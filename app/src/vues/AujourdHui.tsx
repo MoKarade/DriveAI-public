@@ -174,7 +174,7 @@ export function AujourdHui({ langue, onAller }: { langue: Langue; onAller: (s: S
               <Icone nom="horloge" className="accent" />
               <a className="t lien-ligne" href={lienGmailPourLigne(l)} target="_blank" rel="noreferrer">
                 <b>{l.fichier}</b>
-                <small>{t('mailATraiter', langue)} · {formaterDateCourte(l.traiteLe, locale)}</small>
+                <small>{l.chemin.trim() || t('mailATraiter', langue)} · {formaterDateCourte(l.traiteLe, locale)}</small>
               </a>
               <button className="bouton-ligne" aria-label={`${t('fait', langue)} : ${l.fichier}`} onClick={() => void importantFait(l)}>
                 <Icone nom="coche" /> {t('fait', langue)}

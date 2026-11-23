@@ -507,6 +507,33 @@ export function cleErreurJournal(l: LigneJournal): string {
   return `${l.date}|${l.source}|${(h >>> 0).toString(16)}`;
 }
 
+export interface GroupeErreurJournal {
+  derniere: LigneJournal;
+  occurrences: number;
+  cles: string[];
+}
+
+/**
+ * Regroupe les erreurs identiques `(source, message)` en conservant l'occurrence la plus récente
+ * en tête, afin de ne pas noyer l'écran État sous N lignes identiques. PURE.
+ */
+export function grouperErreursJournal(lignes: LigneJournal[]): GroupeErreurJournal[] {
+  const groupes = new Map<string, GroupeErreurJournal>();
+  for (let i = lignes.length - 1; i >= 0; i--) {
+    const l = lignes[i];
+    const cleGroupe = `${l.source}\0${l.message}`;
+    const cleItem = cleErreurJournal(l);
+    const existant = groupes.get(cleGroupe);
+    if (existant) {
+      existant.occurrences += 1;
+      existant.cles.push(cleItem);
+    } else {
+      groupes.set(cleGroupe, { derniere: l, occurrences: 1, cles: [cleItem] });
+    }
+  }
+  return Array.from(groupes.values());
+}
+
 /** Lit la liste des empreintes d'alertes marquées « Vu » dans `localStorage` (repli `[]`). */
 export function lireErreursVues(): string[] {
   try {
@@ -1101,7 +1128,7 @@ export interface SyntheseEtat {
   };
 }
 
-export const CLE_NON_DOCUMENT_SYNTHESE = /^(intention|tache|event|important|tri|tri-abandon|dryrunv2|dryruncmp|conso|consoexec|epingle|fusion)\|/;
+export const CLE_NON_DOCUMENT_SYNTHESE = /^(intention|tache|event|important|brouillon|tri|tri-abandon|dryrunv2|dryruncmp|conso|consoexec|epingle|fusion)\|/;
 
 /**
  * Agrège toutes les sources brutes déjà chargées en une vue d'état cohérente sans jamais

@@ -390,6 +390,18 @@ describe('Vues principales — interactions DOM (P0-3, P0-4, P1-1..P1-3, P2-1)',
       expect(screen.getByText('Mail Important Échec')).toBeDefined();
     });
 
+    it('ADR-0081 (vague 2c) : affiche le résumé d’une ligne (chemin) d’un mail important et retombe sur mailATraiter si vide', () => {
+      mockEtat.donnees = donneesBase({
+        index: [
+          ligne('important|m-resume', 'Convocation examen', 'important', { chemin: 'Confirmer votre présence avant jeudi' }),
+          ligne('important|m-sans', 'Demande simple', 'important', { chemin: '' }),
+        ],
+      });
+      render(createElement(AujourdHui, { langue: 'fr', onAller: vi.fn() }));
+      expect(screen.getByText(/Confirmer votre présence avant jeudi/)).toBeDefined();
+      expect(screen.getByText(/Mail à traiter/)).toBeDefined();
+    });
+
     it('GAP-P2-1 & GAP-P2-5 : conserve la bannière d’erreur si le dernier suspect échoue et bloque le double-clic rapide sur Fait', async () => {
       let rejeterSuspect!: (err: Error) => void;
       spies.marquerPasSuspect.mockImplementationOnce(
@@ -1202,6 +1214,41 @@ describe('Vues principales — interactions DOM (P0-3, P0-4, P1-1..P1-3, P2-1)',
       });
       expect(screen.getAllByRole('alert').some((el) => /Trop de demandes/.test(el.textContent ?? ''))).toBe(true);
       expect(screen.queryByText(/Actualisé à/)).toBeNull();
+    });
+
+    it('ADR-0081 (vague 2c) : regroupe les erreurs identiques (×N), les masque en 1 clic Vu et affiche la cible 25 $', () => {
+      const recent = datePasseRecent();
+      mockEtat.progression = [];
+      mockEtat.donnees = donneesBase({
+        santeBrut: [
+          [`Dernier passage OK : ${recent}`],
+          ['Coût LLM 2026-11 : 13.98 $  (5772 appels)  ·  cible < 25 $/mois  ✅'],
+          ['Tri Gmail : ✅ normal'],
+          ['Compte LLM : actif'],
+        ],
+        telemetrieBrut: [
+          ['llm_cout_mois', '13.98', '$', 'Frein campagnes à 30 $'],
+        ],
+        journalBrut: [
+          [recent, 'ERREUR', 'TriGmail', 'Réponse tri tronquée à max_tokens'],
+          [recent.replace(/\d\d$/, '01'), 'ERREUR', 'TriGmail', 'Réponse tri tronquée à max_tokens'],
+          [recent.replace(/\d\d$/, '02'), 'ERREUR', 'TriGmail', 'Réponse tri tronquée à max_tokens'],
+        ],
+      });
+      render(createElement(Etat, { langue: 'fr' }));
+
+      // Jauge budget alignée à 25 $
+      expect(screen.getByRole('img', { name: /25\s*\$/ })).toBeDefined();
+
+      // 3 occurrences regroupées en 1 ligne ×3 → un seul clic Vu masque les 3
+      const regionAlertes = screen.getByRole('region', { name: 'Points d’attention' });
+      expect(within(regionAlertes).getByText('×3')).toBeDefined();
+      expect(within(regionAlertes).getAllByText('Réponse tri tronquée à max_tokens')).toHaveLength(1);
+
+      fireEvent.click(within(regionAlertes).getByRole('button', { name: /Vu — TriGmail/i }));
+      expect(screen.queryByText('Réponse tri tronquée à max_tokens')).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Points d’attention' })).toBeNull();
+      expect(screen.getByRole('button', { name: /3 masquée\(s\) — réafficher/i })).toBeDefined();
     });
   });
 
