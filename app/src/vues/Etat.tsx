@@ -16,7 +16,6 @@ import { EntetePage, IndicateurChargement } from '../composants/UI';
 import { Icone } from '../composants/Icone';
 import {
   EtatMoteur,
-  LigneJournal,
   syntheseEtat,
   SyntheseEtat,
   familleStatut,
@@ -24,13 +23,14 @@ import {
   formaterAgeMinutes,
   nettoyerDetailSante,
   cleErreurJournal,
+  grouperErreursJournal,
   lireErreursVues,
   enregistrerErreursVues,
 } from '../etat';
 import { formaterMontant } from '../explorateur';
 import { CleTexte, Langue, t } from '../i18n';
 
-const BUDGET_CROISIERE = 10; // cible < 10 $/mois en croisière (CLAUDE.md §1.6)
+const BUDGET_CROISIERE = 25; // cible < 25 $/mois (décision propriétaire ADR-0081)
 const ERREURS_MAX = 8;
 
 export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Section) => void }) {
@@ -43,10 +43,9 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
   const [erreursVues, setErreursVues] = useState<string[]>(lireErreursVues);
   const passageAction = usePassageMoteur(langue);
 
-  function marquerErreurVue(l: LigneJournal) {
-    const cle = cleErreurJournal(l);
+  function marquerGroupeErreursVu(cles: string[]) {
     setErreursVues((prev) => {
-      const maj = Array.from(new Set([...prev, cle]));
+      const maj = Array.from(new Set([...prev, ...cles]));
       enregistrerErreursVues(maj);
       return maj;
     });
@@ -140,7 +139,7 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
   const erreursNonVues = syn.erreurs.journal7j.filter((l) => !vuesSet.has(cleErreurJournal(l)));
   const nbErreursVisibles = erreursNonVues.length;
   const nbErreursMasquees = syn.erreurs.journal7j.length - nbErreursVisibles;
-  const erreurs = erreursNonVues.slice(-ERREURS_MAX).reverse();
+  const groupesErreurs = grouperErreursJournal(erreursNonVues).slice(0, ERREURS_MAX);
   const passesEnCours = syn.moteur.dernieresPassesProgression.filter((op) => {
     const f = familleStatut(op.statut);
     return f === 'encours' || f === 'recensement';
@@ -274,20 +273,22 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
               </div>
             )}
           </div>
-          {erreurs.length > 0 && (
+          {groupesErreurs.length > 0 && (
             <div className="erreurs-liste">
-              {erreurs.map((l: LigneJournal, i) => {
+              {groupesErreurs.map((g, i) => {
+                const l = g.derniere;
                 const cle = cleErreurJournal(l);
                 return (
                   <div key={`${cle}-${i}`} className="erreur-item">
                     <span className="date">{l.date}</span>
                     <span className="pastille crit">{l.source}</span>
+                    {g.occurrences > 1 && <span className="pastille douce">×{g.occurrences}</span>}
                     <span className="erreur-msg">{l.message}</span>
                     <button
                       type="button"
                       className="discret bouton-icone-texte erreur-vu"
                       aria-label={`${t('marquerVu', langue)} — ${l.source} ${l.date}`}
-                      onClick={() => marquerErreurVue(l)}
+                      onClick={() => marquerGroupeErreursVu(g.cles)}
                     >
                       <Icone nom="coche" />
                       <span>{t('marquerVu', langue)}</span>

@@ -21,6 +21,8 @@ import {
   formaterAgeMinutes,
   nettoyerDetailSante,
   cleErreurJournal,
+  grouperErreursJournal,
+  CLE_NON_DOCUMENT_SYNTHESE,
   lireErreursVues,
   enregistrerErreursVues,
 } from '../src/etat';
@@ -1509,5 +1511,33 @@ describe('i18n R4 — parité FR/EN et jetons des 39 nouvelles clés', () => {
     expect(nettoyerDetailSante('✅ normal (libellés + archivage)')).toBe('normal (libellés + archivage)');
     expect(nettoyerDetailSante('⛔  À L’ARRÊT   ⚠️')).toBe('À L’ARRÊT');
     expect(nettoyerDetailSante('terminée ⏳  (2026-07-05)')).toBe('terminée (2026-07-05)');
+  });
+
+  it('ADR-0081 (vague 2c) : brouillon|<id> exclu de la synthèse documents et grouperErreursJournal regroupe les occurrences identiques', () => {
+    expect(CLE_NON_DOCUMENT_SYNTHESE.test('brouillon|M1')).toBe(true);
+    const syn = syntheseEtat({
+      index: [
+        { cle: 'drive|d1', traiteLe: '2026-11-23T12:00:00', fichier: 'Doc.pdf', domaine: '02', chemin: '02', statut: 'classé', confiance: '0.9' },
+        { cle: 'brouillon|M1', traiteLe: '2026-11-23T12:01:00', fichier: 'Sujet', domaine: 'Administration', chemin: '', statut: 'brouillon', confiance: '' },
+      ],
+      santeBrut: [],
+      journalBrut: [],
+      reglagesBrut: [],
+      telemetrieBrut: [],
+      coutsBrut: [],
+    });
+    expect(syn.fichiers.classe).toBe(1);
+
+    const groupes = grouperErreursJournal([
+      { date: '11/20/2026 00:16:38', niveau: 'ERREUR', source: 'TriGmail', message: 'Réponse tri tronquée' },
+      { date: '11/20/2026 01:00:00', niveau: 'ERREUR', source: 'OCR', message: 'Autre erreur' },
+      { date: '11/21/2026 00:11:30', niveau: 'ERREUR', source: 'TriGmail', message: 'Réponse tri tronquée' },
+    ]);
+    expect(groupes).toHaveLength(2);
+    expect(groupes[0].derniere.date).toBe('11/21/2026 00:11:30');
+    expect(groupes[0].occurrences).toBe(2);
+    expect(groupes[0].cles).toHaveLength(2);
+    expect(groupes[1].derniere.source).toBe('OCR');
+    expect(groupes[1].occurrences).toBe(1);
   });
 });
