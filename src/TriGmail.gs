@@ -224,6 +224,25 @@ function validerNomNouveauLibelle_(nom, existants) {
 }
 
 /**
+ * Extrait le lien officiel HTTPS d'un en-tête `List-Unsubscribe` (RFC 2369) et le signal
+ * `One-Click` (`List-Unsubscribe-Post`, RFC 8058). Rejette `http://`, `mailto:` et toute URL
+ * malformée. Jamais suivi automatiquement par requête HTTP. PURE (testée).
+ * @param {*} headerUnsub
+ * @param {*} headerPost
+ * @return {?{url:string, oneClick:boolean}}
+ */
+function extraireLienDesabonnement_(headerUnsub, headerPost) {
+  var brut = String(headerUnsub || '');
+  if (!brut) return null;
+  var m = /<(https:\/\/[^\s<>"]+)>/i.exec(brut) || /\b(https:\/\/[^\s<>",]+)/i.exec(brut);
+  if (!m || !m[1]) return null;
+  var url = String(m[1]).trim();
+  if (/[\x00-\x1f\x7f<>"]/.test(url) || url.length > 300) return null;
+  var oneClick = /List-Unsubscribe\s*=\s*One-Click/i.test(String(headerPost || ''));
+  return { url: url, oneClick: oneClick };
+}
+
+/**
  * PURE. Prompt de l'analyse sujet + corps (ADR-0075) : la catégorisation ci-dessus PLUS le verdict
  * « à traiter » (règle de Marc, inchangée depuis le mini-check #14 : une réponse ou une action
  * PERSONNELLE est attendue). Le corps est une DONNÉE balisée, jamais une instruction.
@@ -1538,9 +1557,12 @@ function trierFil_(fil, candidats, libelles, verifierBoite, horsBoite) {
     // Promo DÉTERMINISTE = en-tête List-Unsubscribe ET catégorie Promotions de GMAIL (le header
     // seul est sous le contrôle de l'expéditeur — un phishing se l'ajoute ; la catégorie est
     // attribuée par Google — revue sécurité).
+    var headerUnsub = '';
     var promoDeterministe = false;
-    try { promoDeterministe = !!ref.getHeader('List-Unsubscribe') && estPromoGmail_(filId); }
-    catch (e) { if (signalerPanneGmail_(e)) return 'erreur'; }
+    try {
+      headerUnsub = String(ref.getHeader('List-Unsubscribe') || '');
+      promoDeterministe = !!headerUnsub && estPromoGmail_(filId);
+    } catch (e) { if (signalerPanneGmail_(e)) return 'erreur'; }
     if (estPanneGmail_()) return 'erreur';
 
     var suspectHeuristique = heuristiquePhishing_(sujet, nomsPj);
@@ -1724,6 +1746,24 @@ function trierFil_(fil, candidats, libelles, verifierBoite, horsBoite) {
           } catch (eB) {
             if (!signalerPanneGmail_(eB)) journalErreur_('TriGmail', 'Brouillon différé : ' + eB);
           }
+        }
+      }
+    }
+    if (CONFIG.TRI_INFOLETTRE_DESABO_ACTIF && promoDeterministe && !suspect && !zoneProtegee &&
+        !horsBoite && impFiche && impFiche.niveau === 'bas' && adresse && !indexContient_('tri|unsub|' + adresse)) {
+      var headerPost = '';
+      try { headerPost = String(ref.getHeader('List-Unsubscribe-Post') || ''); } catch (ePost) { }
+      var lienDesabo = extraireLienDesabonnement_(headerUnsub, headerPost);
+      if (lienDesabo) {
+        indexAjouter_('tri|unsub|' + adresse, {
+          statut: 'infolettre-desabo',
+          nom: adresse,
+          domaine: categorie || '',
+          chemin: lienDesabo.url
+        });
+        if (typeof enregistrerAction_ === 'function') {
+          enregistrerAction_('gmail-infolettre', adresse, '', lienDesabo.url,
+            'Infolettre jamais lue — lien officiel repéré' + (lienDesabo.oneClick ? ' (1-clic RFC 8058)' : ''));
         }
       }
     }

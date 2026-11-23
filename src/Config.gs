@@ -349,6 +349,7 @@ var CONFIG = {
   TRI_CREER_LIBELLE_ACTIF: true,          // autorise la création de libellé Gmail (zéro suppression)
   TRI_CREER_LIBELLE_MAX_PAR_RUN: 2,       // plafond de créations par tick (anti-dérive)
   TRI_CREER_LIBELLE_MAX_JOUR: 5,          // plafond quotidien de créations de libellés Gmail
+  TRI_INFOLETTRE_DESABO_ACTIF: true,      // consigne le lien officiel HTTPS List-Unsubscribe des infolettres jamais lues (ADR-0081 ; zéro requête externe)
   // ADR-0081 (vague 1) : la fiche du propriétaire apprend ses habitudes (lu, répondu, étoilé) fil après fil.
   FICHE_MAX_FILS: 60,                     // fils lus par run (lecture seule, borne le coût Gmail du tick)
   FICHE_FENETRE_JOURS: 3,                 // premier passage : on apprend les 3 derniers jours, ensuite le curseur fait foi
@@ -585,6 +586,8 @@ var CONFIG = {
   REORG_ESSAIS_MAX: 3,                    // tentatives par demande (inventaire/LLM) avant « échec »
   REORG_MAX_JOUR: 5,                      // plafond quotidien d'appels LLM de réorg (borne une app boguée qui re-demanderait en boucle)
   REORG_FUSION_LOT: 40,                   // éléments déplacés par run lors d'une FUSION (reprenable — garde-temps partagé)
+  REORG_AUTO_ACTIF: true,                 // applique automatiquement les propositions sûres (creer/renommer/deplacer, jamais fusionner ni dossier-vide, ADR-0081)
+  REORG_AUTO_MAX_PAR_RUN: 3,              // plafond d'actions réorg autonomes par tick (coupé au frein 30 $)
   // Lignes `vide-candidat` re-filtrées par run par la passe one-shot C28-93 (écritures Sheet
   // seules, aucun appel Drive). 200 couvre d'un coup le stock connu (124 lignes au 13/09) ; le
   // reliquat éventuel est repris au tick suivant, le tag ne se posant qu'à passe complète.

@@ -123,6 +123,7 @@ const CONTRAT = [
   'reinitialiserTriApprisCache_', 'libellesUtilisateur_', 'reinitialiserLibellesCache_',
   'ficheCache_', 'reinitialiserFicheCache_', 'reinitialiserEscaladeTri_', 'reinitialiserBrouillonsTri_',
   'reinitialiserLibellesCrees_', 'validerNomNouveauLibelle_', 'creerLibelleAutonome_',
+  'estActionReorgAutoSure_', 'actionsProposeesAuto_', 'appliquerReorgAuto_', 'extraireLienDesabonnement_',
   'enregistrerAction_', 'annulerAction_', 'validerActionId_', 'actionAnnulerAction_',
   'doitCreerBrouillon_', 'parserBrouillon_', 'genererBrouillonReponse_', 'lireCorpsEtHistorique_',
   'contexteFil_', 'extraitHistoriqueMessages_',

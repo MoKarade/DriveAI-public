@@ -58,7 +58,88 @@ function etapeReorg_(estBudgetDepasse) {
   try { filtrerVidesCandidatsRecreables_(f, lignes, estBudgetDepasse); }
   catch (e) { journalErreur_('Reorg', 'Filtre des propositions de corbeille : ' + e); }
   var reste = appliquerReorgValidee_(f, lignes, estBudgetDepasse);
-  if (!reste && !estBudgetDepasse()) appliquerReorgIA_(f, lignes, estBudgetDepasse);
+  var resteAuto = (!reste && !estBudgetDepasse()) ? appliquerReorgAuto_(f, lignes, estBudgetDepasse) : false;
+  if (!reste && !resteAuto && !estBudgetDepasse()) appliquerReorgIA_(f, lignes, estBudgetDepasse);
+}
+
+/** Retourne le premier ID de parent d'un élément Drive (best-effort pour journaliser `Actions`). */
+function parentPrincipalDe_(obj) {
+  if (!obj || typeof obj.getParents !== 'function') return '';
+  try {
+    var it = obj.getParents();
+    if (it && it.hasNext()) return String(it.next().getId() || '');
+  } catch (e) { /* parent illisible : journalisé sans bloquer la réorg */ }
+  return '';
+}
+
+/**
+ * Vrai si une action proposée de Réorg est sûre pour l'exécution autonome (ADR-0081, vague 3c).
+ * N'admet que `creer`, `renommer`, `deplacer` — jamais `fusionner`, `dossier-vide` ni `deplacer-fichier`. PURE.
+ */
+function estActionReorgAutoSure_(a) {
+  if (!a || !a.cheminPropose) return false;
+  if (a.type !== 'creer' && a.type !== 'renommer' && a.type !== 'deplacer') return false;
+  if (a.type === 'creer') return !!a.cible;
+  if (a.type === 'deplacer') return !!a.source && !!a.cible;
+  return !!a.source;
+}
+
+/**
+ * Les actions `proposé` éligibles à la réorganisation autonome encadrée. PURE (testée).
+ * @return {Array<{rang, cle, type, source, cible, cheminActuel, cheminPropose, detail}>}
+ */
+function actionsProposeesAuto_(lignes) {
+  var res = [];
+  for (var i = 1; i < (lignes || []).length; i++) {
+    if (String(lignes[i][5]) !== 'proposé') continue;
+    var ids = partiesId_(String(lignes[i][2]));
+    var cand = {
+      rang: i + 1,
+      cle: String(lignes[i][0]),
+      type: String(lignes[i][1]),
+      source: ids.source,
+      cible: ids.cible,
+      cheminActuel: String(lignes[i][3] || ''),
+      cheminPropose: String(lignes[i][4] || ''),
+      detail: String(lignes[i][6] || ''),
+    };
+    if (estActionReorgAutoSure_(cand)) res.push(cand);
+  }
+  return res;
+}
+
+/**
+ * Exécute en mode autonome encadré (ADR-0081, vague 3c) les propositions `proposé` sûres
+ * (`creer`, `renommer`, `deplacer`), bornées à `REORG_AUTO_MAX_PAR_RUN`, coupées au frein 30 $,
+ * et soumises aux mêmes gardes `04 · Immigration` / nœuds structurels que `appliquerReorgValidee_`.
+ * @return {boolean} vrai s'il reste des actions proposées sûres pour le tick suivant
+ */
+function appliquerReorgAuto_(f, lignes, estBudgetDepasse) {
+  if (!CONFIG.REORG_AUTO_ACTIF) return false;
+  if (typeof budgetCampagnesAtteint_ === 'function' && budgetCampagnesAtteint_()) return false;
+  var candidates = actionsProposeesAuto_(lignes);
+  if (!candidates.length) return false;
+
+  var proteges = ensembleDomainesProteges_();
+  var intouchables = ensembleIntouchables_();
+  var maxRun = CONFIG.REORG_AUTO_MAX_PAR_RUN || 0;
+  var traitees = 0;
+
+  for (var i = 0; i < candidates.length; i++) {
+    if (traitees >= maxRun || estBudgetDepasse()) return true;
+    var a = candidates[i];
+    try {
+      var resultat = appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse);
+      if (resultat.enCours) return true;
+      solderAction_(f, a.rang, resultat.statut, resultat.detail !== undefined ? resultat.detail : a.detail);
+      journalInfo_('Reorg', 'Auto ' + a.type + ' ' + a.cle + ' → ' + resultat.statut + '.');
+      traitees++;
+    } catch (e) {
+      journalErreur_('Reorg', 'Auto ' + a.cle + ' différée : ' + e);
+      traitees++;
+    }
+  }
+  return false;
 }
 
 /* ================= C21-06 : APPLICATION des actions validées ================= */
@@ -657,7 +738,13 @@ function appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse) {
     while (existants.hasNext() && !vivant) {
       if (!existants.next().isTrashed()) vivant = true;
     }
-    if (!vivant) parent.createFolder(nomCreer);
+    if (!vivant) {
+      var cree = parent.createFolder(nomCreer);
+      var creeId = (cree && typeof cree.getId === 'function') ? cree.getId() : '';
+      if (typeof enregistrerAction_ === 'function') {
+        enregistrerAction_('drive-dossier', creeId || a.cible, '', { parentId: a.cible, nom: nomCreer }, 'Dossier créé (Réorg)');
+      }
+    }
     return { statut: 'appliqué', detail: undefined };
   }
 
@@ -690,7 +777,12 @@ function appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse) {
     if (nouveau.charAt(0) === '_' || /^\d{2} · /.test(nouveau)) {
       return { statut: 'refusé (structure)', detail: 'nom réservé (racines système/domaines)' };
     }
-    if (source.getName() !== nouveau) source.setName(nouveau); // rejeu = no-op
+    if (source.getName() !== nouveau) {
+      source.setName(nouveau); // rejeu = no-op
+      if (typeof enregistrerAction_ === 'function') {
+        enregistrerAction_('drive-renommer', a.source, { nom: nomSource }, { nom: nouveau }, 'Dossier renommé (Réorg)');
+      }
+    }
     return { statut: 'appliqué', detail: undefined };
   }
 
@@ -707,7 +799,11 @@ function appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse) {
   }
 
   if (a.type === 'deplacer') {
+    var ancienParent = parentPrincipalDe_(source);
     source.moveTo(cible); // déjà déplacé = no-op côté arbre (même parent)
+    if (typeof enregistrerAction_ === 'function') {
+      enregistrerAction_('drive-deplacer', a.source, { parentId: ancienParent, nom: nomSource }, { parentId: a.cible, nom: nomSource }, 'Dossier déplacé (Réorg)');
+    }
     return { statut: 'appliqué', detail: undefined };
   }
 
@@ -787,10 +883,15 @@ function appliquerDeplacerFichier_(a, proteges) {
       chaineMonteVersProtege_(cible, proteges, 0, true)) {
     return { statut: 'refusé (zone protégée)', detail: 'cible protégée ou système' };
   }
+  var nomF = fichier.getName();
+  var ancienParentF = parentPrincipalDe_(fichier);
   fichier.moveTo(cible); // déjà en place = no-op (rejeu sûr)
   // Épinglage (convergence, ADR-0026) : posé APRÈS le move réussi, dédoublonné par la clé dédiée.
   if (!indexContient_('epingle|' + a.source)) {
-    indexAjouter_('epingle|' + a.source, { statut: 'épinglé', nom: fichier.getName(), domaine: '', chemin: '' });
+    indexAjouter_('epingle|' + a.source, { statut: 'épinglé', nom: nomF, domaine: '', chemin: '' });
+  }
+  if (typeof enregistrerAction_ === 'function') {
+    enregistrerAction_('drive-deplacer', a.source, { parentId: ancienParentF, nom: nomF }, { parentId: a.cible, nom: nomF }, 'Fichier déplacé (Réorg)');
   }
   return { statut: 'appliqué', detail: undefined };
 }
