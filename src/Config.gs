@@ -130,7 +130,9 @@ var CONFIG = {
   // choisi 20). La raison du 40 — la ré-analyse C26-08 — a disparu avec l'ADR-0062 ; le frein était
   // atteint à 40,90 $ le 29/10. 20 laisse de la place à la lecture des papiers (plafond propre
   // `VISION_PLAFOND_DOLLARS`) sans rouvrir le plafond de rattrapage : le régime de croisière reste < 10 $.
-  LLM_BUDGET_CAMPAGNES: 20,
+  // 20 → 25 $/mois cible, frein automatique mode économique à 30 $/mois (décision Marc 23/11/2026, ADR-0081).
+  LLM_BUDGET_CIBLE: 25,                   // cible mensuelle de référence affichée dans Santé et Résumé (ADR-0081)
+  LLM_BUDGET_CAMPAGNES: 30,               // frein automatique mode économique (coupe campagnes et escalades, ADR-0081)
   // C28-75 (décision Marc 2026-09-07) : plus AUCUN mail du moteur. Le résumé hebdo était le seul
   // envoi restant (les alertes de panne sont muettes depuis le 2026-07-06, `notifierEchec_`). À
   // `false`, `resumeHebdo` n'envoie rien ET `assurerTriggerResume_` SUPPRIME le déclencheur
@@ -335,6 +337,9 @@ var CONFIG = {
   // Allumé en 6b (2026-11-06, verdict de l'audit sur fils réels lu sur DriveAI#890) : le drapeau `TRI_SUJET_CORPS`
   // et l'analyse d'importance séparée (`Intentions.gs`, étape `intentions`) sont retirés ; `TRI_REGLES_VERSION` = r3.
   LLM_MAX_TOKENS_TRI: 300,                // JSON {categorie, suspect, aTraiter} — relevé de 120 à 300 : claude-haiku-5-5 tronquait la réponse
+  // ADR-0081 (vague 2) : escalade vers le modèle complexe (LLM_MODELE_FALLBACK) en cas de doute sur la catégorie.
+  TRI_ESCALADE_ACTIF: true,               // active l'escalade Sonnet quand catégorie = null (hors suspect, coupée au frein)
+  TRI_ESCALADE_MAX_PAR_RUN: 5,            // borne temps et coût des escalades tri par tick
   // ADR-0081 (vague 1) : la fiche du propriétaire apprend ses habitudes (lu, répondu, étoilé) fil après fil.
   FICHE_MAX_FILS: 60,                     // fils lus par run (lecture seule, borne le coût Gmail du tick)
   FICHE_FENETRE_JOURS: 3,                 // premier passage : on apprend les 3 derniers jours, ensuite le curseur fait foi

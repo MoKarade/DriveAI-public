@@ -240,7 +240,7 @@ function construireResume_(s, erreurs, cout, jours, etat, urlForm, newsletters, 
   lignes.push(
     '',
     '💰 Coût LLM ce mois-ci : ~' + cout.dollars.toFixed(2) + ' $ (' +
-      cout.appels + ' appels — cible < 10 $/mois)',
+      cout.appels + ' appels — cible < ' + CONFIG.LLM_BUDGET_CIBLE + ' $/mois)',
     '',
     'Détail complet dans la Google Sheet « DriveAI — État » (onglets Index / Journal / Entités / Santé).'
   );

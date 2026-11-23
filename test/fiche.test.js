@@ -124,3 +124,37 @@ test('la fiche est branchée : onglet créé, étape au tick après le tri, éta
   const iFiche = main.indexOf('apprendreFiche_(estBudgetDepasseStandard)');
   assert.ok(iTri !== -1 && iFiche > iTri, 'la fiche apprend APRÈS le tri (le flux vivant d\'abord)');
 });
+
+test('ficheCache_ : charge l\'onglet une fois par run, normalise l\'adresse, résiste à une panne et se réinitialise', () => {
+  let lectures = 0;
+  const ctx = load(['Config.gs', 'Gmail.gs', 'TriGmail.gs', 'Fiche.gs']);
+  ctx.feuille_ = () => ({
+    getLastRow: () => 4,
+    getRange: (r, c, nl, nc) => {
+      lectures++;
+      assert.deepStrictEqual([r, c, nl, nc], [2, 1, 3, 6]);
+      return {
+        getValues: () => [
+          ['Important@Exemple.test ', 5, 5, 4, 2, 0],
+          ['Bruit@Exemple.test', 4, 0, 0, 0, 4],
+          ['Nouveau@Exemple.test', 2, 2, 1, 0, 0],
+        ],
+      };
+    },
+  });
+  const cache1 = plain(ctx.ficheCache_());
+  const cache2 = plain(ctx.ficheCache_());
+  assert.strictEqual(lectures, 1, 'une seule lecture par run');
+  assert.deepStrictEqual(cache1, cache2);
+  assert.strictEqual(cache1['important@exemple.test'].niveau, 'haut');
+  assert.strictEqual(cache1['bruit@exemple.test'].niveau, 'bas');
+  assert.strictEqual(cache1['nouveau@exemple.test'].niveau, 'inconnu');
+
+  ctx.reinitialiserFicheCache_();
+  ctx.ficheCache_();
+  assert.strictEqual(lectures, 2, 'reinitialiserFicheCache_ relit au run suivant');
+
+  ctx.reinitialiserFicheCache_();
+  ctx.feuille_ = () => { throw new Error('Sheet Fiche inaccessible'); };
+  assert.deepStrictEqual(plain(ctx.ficheCache_()), {}, 'panne de lecture → {} sans lever');
+});

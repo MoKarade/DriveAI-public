@@ -224,7 +224,8 @@ function majSante_() {
   var lignes = [
     ['Dernier passage OK : ' + Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm')],
     ['Documents au catalogue (Index) : ' + nbCatalogue],
-    ['Coût LLM ' + mois + ' : ' + cout.dollars.toFixed(2) + ' $  (' + cout.appels + ' appels)  ·  cible < 10 $/mois' + (cout.dollars >= 10 ? '  ⚠️ DÉPASSÉE' : '  ✅')],
+    ['Coût LLM ' + mois + ' : ' + cout.dollars.toFixed(2) + ' $  (' + cout.appels + ' appels)  ·  cible < ' +
+      CONFIG.LLM_BUDGET_CIBLE + ' $/mois' + (cout.dollars >= CONFIG.LLM_BUDGET_CIBLE ? '  ⚠️ DÉPASSÉE' : '  ✅')],
     ['Rangement ancien Drive : ' + rangement],
     // Le tri doit DIRE s'il est à l'arrêt (panne de compte LLM) : sans cette ligne, « le tri marche »
     // masquerait une boîte non triée. (Le mode dégradé de l'ADR-0043 est parti avec `Intentions.gs`, ADR-0075 6b.)

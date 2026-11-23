@@ -699,7 +699,8 @@ function ctxTickMain(opts) {
   for (const fn of [
     'reinitialiserIndexCache_', 'reinitialiserEntitesCache_', 'reinitialiserCorrectionsCache_',
     'reinitialiserEscalades_', 'chargerPannePlateforme_', 'chargerPanneGmail_',
-    'reinitialiserTriApprisCache_', 'reinitialiserConfianceCache_', 'reinitialiserLibellesCache_',
+    'reinitialiserTriApprisCache_', 'reinitialiserConfianceCache_', 'reinitialiserFicheCache_',
+    'reinitialiserEscaladeTri_', 'reinitialiserLibellesCache_',
     'reinitialiserPromoSetCache_', 'reinitialiserPanneEcriture_', 'reinitialiserUsage_',
     'reinitialiserFreinBudget_', 'assurerIntervalleTick_', 'assurerTriggerResume_',
     'assurerTriggerChienDeGarde_', 'assurerNomsDomaines_', 'appliquerRejeuSiNouvelleVersion_',

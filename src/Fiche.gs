@@ -16,6 +16,40 @@
 var COLONNES_FICHE = ['Adresse', 'Fils vus', 'Lus', 'Répondus', 'Étoilés', 'Sans lire', 'Dernier fil', 'Mis à jour'];
 var FICHE_CURSEUR_PROP = 'DriveAI_FICHE_CURSEUR';
 
+var _ficheCache = null;
+function reinitialiserFicheCache_() { _ficheCache = null; }
+
+/**
+ * Charge l'importance apprise par expéditeur UNE fois par run : `{ adresse: { niveau, score } }`.
+ * Ne lit que des compteurs dérivés (jamais de sujet ni de corps, ADR-0007).
+ * Best-effort : rend `{}` si l'onglet est illisible pour ne jamais bloquer le tri.
+ */
+function ficheCache_() {
+  if (_ficheCache !== null) return _ficheCache;
+  var cache = {};
+  try {
+    var f = feuille_('Fiche');
+    var dern = f.getLastRow();
+    if (dern >= 2) {
+      var v = f.getRange(2, 1, dern - 1, 6).getValues();
+      for (var i = 0; i < v.length; i++) {
+        if (!v[i][0]) continue;
+        var adresse = String(v[i][0]).trim().toLowerCase();
+        if (!adresse) continue;
+        cache[adresse] = importanceFiche_({
+          vus: Number(v[i][1]) || 0,
+          lus: Number(v[i][2]) || 0,
+          repondus: Number(v[i][3]) || 0,
+          etoiles: Number(v[i][4]) || 0,
+          sansLire: Number(v[i][5]) || 0
+        });
+      }
+    }
+  } catch (e) { cache = {}; }
+  _ficheCache = cache;
+  return _ficheCache;
+}
+
 /**
  * Signaux d'usage d'UN fil, PUR. `adresse` = l'expéditeur externe du fil (rien si le propriétaire est
  * seul à écrire).
@@ -135,6 +169,7 @@ function apprendreFiche_(estBudgetDepasse) {
     }
   }
   if (nouveauCurseur > curseur) props.setProperty(FICHE_CURSEUR_PROP, String(nouveauCurseur));
+  if (adresses.length > 0) reinitialiserFicheCache_();
   if (appris > 0) journalInfo_('Fiche', appris + ' fil(s) appris, ' + adresses.length + ' expéditeur(s) mis à jour');
   return appris;
 }
