@@ -479,6 +479,13 @@ function tickDriveAI() {
       });
     if (estPanneGmail_()) suiviSkip_('tri-gmail', 'quota Gmail épuisé');
 
+    // ADR-0081 (vague 1) : la FICHE apprend les habitudes du propriétaire (lu, répondu, étoilé) — LECTURE SEULE,
+    // jamais de contenu. Après le tri (le flux vivant d'abord), même budget tail, bornée à FICHE_MAX_FILS.
+    etapeSuivie_('fiche-apprentissage', [gBudgetStandard, gPanneGmail], function () { apprendreFiche_(estBudgetDepasseStandard); },
+      function (e) {
+        if (!signalerPanneGmail_(e)) journalErreur_('Fiche', 'Apprentissage de la fiche différé : ' + e);
+      });
+
     // ⚖️ CONSOLIDATION de l'arborescence (C28-26, ADR-0024) — REMONTÉE ICI, juste après le flux
     // vivant et AVANT les campagnes legacy + la réconciliation (incident 2026-07-23 : placée EN
     // DERNIER, elle était affamée et ne draînait JAMAIS — anti-patron leçon §7). « BUDGET TAIL » :
@@ -724,7 +731,7 @@ function tickDriveAI() {
       // chaque étape suspendue est ENREGISTRÉE : l'app montre POURQUOI tout est muet pendant une
       // panne de compte (trou d'observabilité n° 1 de l'ADR-0038). Liste = les étapes DU BLOC,
       // couverte par le tripwire (chaque clé y est aussi wrappée `etapeSuivie_` ci-dessus).
-      ['intake-gmail', 'intake-depots', 'intake-partages', 'tri-gmail',
+      ['intake-gmail', 'intake-depots', 'intake-partages', 'tri-gmail', 'fiche-apprentissage',
         'consolidation-exec', 'consolidation-gen',
         'mission-vehicule', 'mission-logement', 'mission-dispatch-03', 'mission-ecoles-archives-06',
         'mission-paies', 'mission-carriere', 'mission-annees-02', 'mission-impots',

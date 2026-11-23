@@ -35,10 +35,10 @@ test('tripwire : aucune clé wrappée deux fois (une étape = un point d\'exécu
 });
 
 test('tripwire : la suspension R2 enregistre un skip pour CHAQUE étape du bloc (liste verrouillée)', () => {
-  // Les 26 étapes du bloc `if (!estPannePlateforme_())` — si une étape entre ou sort du bloc,
+  // Les 27 étapes du bloc `if (!estPannePlateforme_())` — si une étape entre ou sort du bloc,
   // cette liste DOIT bouger avec (sinon : soit un skip fantôme, soit une étape muette en panne).
   // + les 8 missions de curation (C28-49 PR1+PR2) : dans le bloc, juste après la consolidation.
-  const attendu = ['intake-gmail', 'intake-depots', 'intake-partages', 'tri-gmail',
+  const attendu = ['intake-gmail', 'intake-depots', 'intake-partages', 'tri-gmail', 'fiche-apprentissage',
     'consolidation-exec', 'consolidation-gen',
     'mission-vehicule', 'mission-logement', 'mission-dispatch-03', 'mission-ecoles-archives-06',
     'mission-paies', 'mission-carriere', 'mission-annees-02', 'mission-impots',

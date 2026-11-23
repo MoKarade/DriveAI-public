@@ -335,6 +335,9 @@ var CONFIG = {
   // Allumé en 6b (2026-11-06, verdict de l'audit sur fils réels lu sur DriveAI#890) : le drapeau `TRI_SUJET_CORPS`
   // et l'analyse d'importance séparée (`Intentions.gs`, étape `intentions`) sont retirés ; `TRI_REGLES_VERSION` = r3.
   LLM_MAX_TOKENS_TRI: 300,                // JSON {categorie, suspect, aTraiter} — relevé de 120 à 300 : claude-haiku-5-5 tronquait la réponse
+  // ADR-0081 (vague 1) : la fiche du propriétaire apprend ses habitudes (lu, répondu, étoilé) fil après fil.
+  FICHE_MAX_FILS: 60,                     // fils lus par run (lecture seule, borne le coût Gmail du tick)
+  FICHE_FENETRE_JOURS: 3,                 // premier passage : on apprend les 3 derniers jours, ensuite le curseur fait foi
   TRI_AUDIT_FILS: 20,                     // fils réels lus par l'audit manuel (≈ 2 appels chacun, aucune écriture)
   TRI_AUDIT_REQUETE: 'newer_than:30d',    // l'audit lit boîte ET archivés : les relevés/promos déjà triés sont
                                           // ceux du critère « zéro ⏰ nouveau » (l'audit n'écrit rien, le coût
