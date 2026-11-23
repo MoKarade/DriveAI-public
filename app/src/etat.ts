@@ -1331,3 +1331,70 @@ export function nettoyerDetailSante(texte: string): string {
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
+
+/* ---------- Actions autonomes du moteur (onglet Actions, ADR-0081 vague 3b) ---------- */
+
+export interface LigneAction {
+  id: string;
+  horodatage: string;
+  type: string;
+  cible: string;
+  avant: string;
+  apres: string;
+  statut: string;
+  detail: string;
+  annulable: boolean;
+  resume: string;
+}
+
+const REGEX_ID_ACTION = /^act-[A-Za-z0-9_-]{6,64}$/;
+
+function extraireNomEtatAction(brut: string): string {
+  if (!brut || brut[0] !== '{') return '';
+  try {
+    const obj = JSON.parse(brut) as { nom?: unknown };
+    return typeof obj.nom === 'string' ? obj.nom.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function resumerAction(type: string, cible: string, avant: string, apres: string, detail: string): string {
+  if (type === 'drive-deplacer' || type === 'drive-renommer') {
+    return extraireNomEtatAction(apres) || extraireNomEtatAction(avant) || detail || cible;
+  }
+  if (type === 'gmail-libelle') {
+    return apres || cible || detail;
+  }
+  return detail || extraireNomEtatAction(apres) || extraireNomEtatAction(avant) || apres || cible;
+}
+
+/** Interprète l'onglet `Actions` (Id..Détail) : filtre les IDs invalides et rend les plus récentes en premier. PURE. */
+export function interpreterActions(brut: string[][]): LigneAction[] {
+  const sorties: LigneAction[] = [];
+  for (const l of brut) {
+    const id = (l[0] ?? '').trim();
+    if (!REGEX_ID_ACTION.test(id)) continue;
+    const horodatage = (l[1] ?? '').trim();
+    const type = (l[2] ?? '').trim();
+    const cible = (l[3] ?? '').trim();
+    const avant = (l[4] ?? '').trim();
+    const apres = (l[5] ?? '').trim();
+    const statut = (l[6] ?? '').trim();
+    const detail = (l[7] ?? '').trim();
+    const annulable = statut === 'appliqué' && (type === 'drive-deplacer' || type === 'drive-renommer');
+    sorties.push({
+      id,
+      horodatage,
+      type,
+      cible,
+      avant,
+      apres,
+      statut,
+      detail,
+      annulable,
+      resume: resumerAction(type, cible, avant, apres, detail),
+    });
+  }
+  return sorties.reverse();
+}

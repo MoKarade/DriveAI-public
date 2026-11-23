@@ -122,6 +122,11 @@ const PROGRESSION: string[][] = [
   ['histo-gmail', 'Historique Gmail (PJ)', '4520', '', 'fils', 'suspendu (quota Gmail)', '2026-07-06T14:10:00', 'quota Gmail du jour épuisé', '06/07 13:45', '06/07 13:45 — Service invoked too many times', 'campagne', '', ''],
 ];
 
+const ACTIONS: string[][] = [
+  ['act-demo0001', '2026-07-06 14:05:00', 'drive-deplacer', 'f-100', '{"parentId":"dossier-a-trier","nom":"scan-sans-nom.pdf"}', '{"parentId":"dossier-finances","nom":"2026-07-06_Facture_Exemple.pdf"}', 'appliqué', 'Classement dépôt manuel'],
+  ['act-demo0002', '2026-07-06 14:02:00', 'gmail-libelle', 'Voyages', '', 'Voyages', 'appliqué', 'Libellé Gmail créé automatiquement'],
+];
+
 /** Une plage Sheet bouchonnée, par onglet (la PLAGE exacte importe peu : les vues filtrent). */
 export function plageMock(onglet: string, plage: string): string[][] {
   // Les lectures d'EN-TÊTES seuls (A1:H1, A1:Z1) servent aux appends de l'app : renvoyer la 1ʳᵉ ligne.
@@ -134,6 +139,7 @@ export function plageMock(onglet: string, plage: string): string[][] {
     case 'Corrections': return enTeteSeul ? [ENTETES_CORRECTIONS] : CORRECTIONS;
     case 'TriAppris': return TRI_APPRIS;
     case 'Réorg': return REORG;
+    case 'Actions': return ACTIONS;
     case 'Réglages': return REGLAGES;
     case 'Progression': return PROGRESSION;
     case 'Télémétrie': return TELEMETRIE;

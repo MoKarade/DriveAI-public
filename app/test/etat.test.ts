@@ -25,6 +25,7 @@ import {
   CLE_NON_DOCUMENT_SYNTHESE,
   lireErreursVues,
   enregistrerErreursVues,
+  interpreterActions,
 } from '../src/etat';
 
 describe('cleEtatIndex : dédup des familles reset/campagne (revue de fond 2026-07-31)', () => {
@@ -1539,5 +1540,45 @@ describe('i18n R4 — parité FR/EN et jetons des 39 nouvelles clés', () => {
     expect(groupes[0].cles).toHaveLength(2);
     expect(groupes[1].derniere.source).toBe('OCR');
     expect(groupes[1].occurrences).toBe(1);
+  });
+
+  it('ADR-0081 (vague 3b) : interpreterActions trie du plus récent au plus ancien, filtre IDs invalides, expose annulable et annulerActionMoteur', async () => {
+    const actions = interpreterActions([
+      ['mauvais-id', '2026-11-23', 'drive-deplacer', 'F0', '', '', 'appliqué', ''],
+      ['act-100001', '2026-11-23 15:00:00', 'gmail-libelle', 'Voyages', '', 'Voyages', 'appliqué', 'Libellé créé'],
+      ['act-100002', '2026-11-23 15:05:00', 'drive-deplacer', 'F1', '{"parentId":"A","nom":"brut.pdf"}', '{"parentId":"B","nom":"2026-11-23_Facture.pdf"}', 'annulé', 'Classement'],
+      ['act-100003', '2026-11-23 15:10:00', 'drive-renommer', 'F2', '{"nom":"ancien.pdf"}', '{"nom":"nouveau.pdf"}', 'appliqué', 'Renommage'],
+      ['act-100004', '2026-11-23 15:12:00', 'drive-deplacer', 'F3', '{"parentId":"A","nom":"scan.pdf"}', 'json-invalide', 'appliqué', 'Détail secours'],
+    ]);
+    expect(actions.map((a) => a.id)).toEqual(['act-100004', 'act-100003', 'act-100002', 'act-100001']);
+    expect(actions[0].annulable).toBe(true);
+    expect(actions[0].resume).toBe('scan.pdf');
+    expect(actions[1].annulable).toBe(true);
+    expect(actions[1].resume).toBe('nouveau.pdf');
+    expect(actions[2].annulable).toBe(false);
+    expect(actions[3].annulable).toBe(false);
+    expect(actions[3].resume).toBe('Voyages');
+
+    const { chargerConfigServeur } = await import('../src/config');
+    const { annulerActionMoteur } = await import('../src/google');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        spreadsheetId: 's',
+        webappUrl: 'https://script.google.com/macros/s/X/exec',
+        webappSecret: 'sec',
+      }),
+    })));
+    await chargerConfigServeur();
+    const faux = vi.fn<typeof fetch>(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, message: 'Action annulée.' }),
+    }) as unknown as Response);
+    vi.stubGlobal('fetch', faux);
+    expect(await annulerActionMoteur('act-100003')).toBe('Action annulée.');
+    expect(String(faux.mock.calls[0]?.[0])).toContain('action=annuler-action');
+    vi.unstubAllGlobals();
   });
 });
