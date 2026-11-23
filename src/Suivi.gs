@@ -56,6 +56,7 @@ var REGISTRE_OPERATIONS = [
   { cle: 'intake-depots', libelle: 'Intake — dépôts (00 · À trier)', unite: 'fichiers', type: 'flux' },
   { cle: 'intake-partages', libelle: 'Intake — fichiers partagés', unite: 'fichiers', type: 'flux' },
   { cle: 'tri-gmail', libelle: 'Tri de la boîte Gmail', unite: 'fils', type: 'flux' },
+  { cle: 'fiche-apprentissage', libelle: 'Fiche du propriétaire (apprentissage de ses habitudes)', unite: 'fils', type: 'flux' },
   // — Campagnes de fond (ordre du tick : drainer avant d'alimenter)
   { cle: 'consolidation-exec', libelle: 'Consolidation — exécution du plan', unite: 'lignes', type: 'campagne' },
   { cle: 'consolidation-gen', libelle: 'Consolidation — génération du plan', unite: 'domaines', type: 'campagne' },
