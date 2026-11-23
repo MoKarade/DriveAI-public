@@ -292,6 +292,7 @@ function tickDriveAI() {
     reinitialiserTriApprisCache_();  // table adresse→libellé du tri (#16), rechargée 1×/run
     reinitialiserConfianceCache_();  // expéditeurs « pas suspect » (C28-19), rechargés 1×/run
     reinitialiserFicheCache_();      // habitudes par expéditeur (ADR-0081), rechargées 1×/run
+    if (typeof reinitialiserDossiersVieCache_ === 'function') reinitialiserDossiersVieCache_(); // dossiers de vie existants (ADR-0081), rechargés 1×/run
     reinitialiserEscaladeTri_();     // plafond d'escalades du tri par run (ADR-0081)
     reinitialiserBrouillonsTri_();   // plafond de brouillons de réponse du tri par run (ADR-0081)
     reinitialiserLibellesCrees_();   // plafond de libellés Gmail créés par run (ADR-0081)
@@ -1517,6 +1518,15 @@ function traiterPageHistorique_(props, estBudgetDepasse) {
  * @param {GmailAttachment} pj
  */
 function traiterPjGmail_(message, indexPj, pj) {
+  var messageId = '';
+  var threadId = '';
+  try {
+    if (message && typeof message.getId === 'function') messageId = String(message.getId() || '');
+  } catch (e) { }
+  try {
+    var fil = message && typeof message.getThread === 'function' ? message.getThread() : null;
+    if (fil && typeof fil.getId === 'function') threadId = String(fil.getId() || '');
+  } catch (e) { }
   traiterDocument_({
     cle: cleAttachement_(message, indexPj, pj),
     nom: pj.getName(),
@@ -1524,6 +1534,8 @@ function traiterPjGmail_(message, indexPj, pj) {
     expediteur: message.getFrom(),
     sujet: message.getSubject(),
     date: message.getDate(),
+    threadId: threadId,
+    messageId: messageId,
     blob: function () { return pj.copyBlob(); },
     placer: function (dossierId, nom) { return deposer_(pj.copyBlob(), dossierId, nom); }
   });
