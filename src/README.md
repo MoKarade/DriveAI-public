@@ -15,6 +15,7 @@
 | `Pipeline.gs` | Traitement unifié d'un document (doublon → technique → média → OCR → LLM → routage) |
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
 | `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps) |
+| `Libelles.gs` | Bascule et remplacement avec preuves des libellés Gmail (sous 10 principaux / 50 max, ADR-0081) |
 | `Intake.gs` | Source 2 : dépôt manuel `00 · À trier` (déplacement) |
 | `Partages.gs` | Source 3 : fichiers partagés récents (copie, ADR-0005) |
 | `Migration.gs` | Campagne de re-classement de l'existant (#8, gatée par tag) |

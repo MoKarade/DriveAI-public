@@ -224,6 +224,51 @@ function validerNomNouveauLibelle_(nom, existants) {
 }
 
 /**
+ * Compte les libellés de catégorie existants (hors 3 spéciaux) et extrait leurs racines principales. PURE.
+ * @param {string[]} existants
+ * @return {{total:number, principaux:Object<string,boolean>, nbPrincipaux:number}}
+ */
+function compterStructureLibelles_(existants) {
+  var speciaux = CONFIG.TRI_LIBELLES || {};
+  var specSet = {};
+  for (var k in speciaux) specSet[normaliserLibelle_(speciaux[k])] = true;
+  var principaux = {};
+  var total = 0;
+  for (var i = 0; i < (existants || []).length; i++) {
+    var nom = String(existants[i] || '').trim();
+    if (!nom || specSet[normaliserLibelle_(nom)]) continue;
+    total++;
+    var racine = nom.split('/')[0].trim();
+    if (racine) principaux[normaliserLibelle_(racine)] = true;
+  }
+  return { total: total, principaux: principaux, nbPrincipaux: Object.keys(principaux).length };
+}
+
+/**
+ * Vérifie si la création de `nomValide` respecte le plafond de 50 libellés au total et de 10 principaux. PURE.
+ * @param {string} nomValide
+ * @param {string[]} existants
+ * @return {{ok:boolean, raison:string}}
+ */
+function autoriserCreationLibelle_(nomValide, existants) {
+  if (!nomValide) return { ok: false, raison: 'nom-invalide' };
+  var s = compterStructureLibelles_(existants);
+  var maxTotal = CONFIG.TRI_LIBELLES_MAX_TOTAL || 50;
+  var maxPrinc = CONFIG.TRI_LIBELLES_MAX_PRINCIPAUX || 10;
+  if (s.total >= maxTotal) return { ok: false, raison: 'plafond-total' };
+  var idxSlash = nomValide.indexOf('/');
+  if (idxSlash === -1) {
+    if (s.nbPrincipaux >= maxPrinc) return { ok: false, raison: 'plafond-principaux' };
+    return { ok: true, raison: '' };
+  }
+  var racineNorm = normaliserLibelle_(nomValide.slice(0, idxSlash).trim());
+  if (!s.principaux[racineNorm] && s.nbPrincipaux >= maxPrinc) {
+    return { ok: false, raison: 'principal-inconnu' };
+  }
+  return { ok: true, raison: '' };
+}
+
+/**
  * Extrait le lien officiel HTTPS d'un en-tête `List-Unsubscribe` (RFC 2369) et le signal
  * `One-Click` (`List-Unsubscribe-Post`, RFC 8058). Rejette `http://`, `mailto:` et toute URL
  * malformée. Jamais suivi automatiquement par requête HTTP. PURE (testée).
@@ -262,7 +307,8 @@ function promptTriFil_(libelles) {
     'Si « Habitude de Marc avec cet expéditeur » est fournie (haut = il répond souvent, bas = il laisse ' +
     'partir sans lire), sers-t\'en d\'indice pour calibrer "aTraiter" sans contredire les règles ci-dessus.\n' +
     'Si "categorie"=null (aucun libellé existant ne convient), "suspect"=false et que ce mail relève d\'un ' +
-    'thème récurrent absent de la liste, tu peux ajouter "nouveauLibelle": "<nom court 3-40 car.>" ; sinon omets-le.';
+    'thème récurrent absent de la liste, tu peux ajouter "nouveauLibelle": "<Principal/Sous ou nom 3-40 car.>" ' +
+    '(privilégie un sous-libellé sous un libellé principal existant) ; sinon omets-le.';
 }
 
 /**
@@ -379,9 +425,31 @@ function reinitialiserBrouillonsTri_() { _brouillonsTriCeRun = 0; }
 var _libellesCreesCeRun = 0;
 function reinitialiserLibellesCrees_() { _libellesCreesCeRun = 0; }
 
+/** Point unique de création de libellé Gmail dans `src/` (verrouillé par `surface-gmail-ecriture.test.js`). */
+function creerLibelleBrut_(nom) {
+  return GmailApp.createLabel(nom);
+}
+
+/** Obtient ou crée un libellé cible pour le module de remplacement `Libelles.gs`. */
+function obtenirOuCreerLibelleRemplacement_(nom, libelles) {
+  var propre = String(nom || '').trim();
+  if (!propre) return null;
+  if (libelles && libelles[propre]) return libelles[propre];
+  if (typeof GmailApp.getUserLabelByName === 'function') {
+    var existant = GmailApp.getUserLabelByName(propre);
+    if (existant) {
+      if (libelles) libelles[propre] = existant;
+      return existant;
+    }
+  }
+  var cree = creerLibelleBrut_(propre);
+  if (cree && libelles) libelles[propre] = cree;
+  return cree;
+}
+
 /**
- * Crée un nouveau libellé Gmail de façon encadrée (ADR-0081, vague 3a) : validation stricte,
- * plafonds par run et par jour, coupé sous le frein budget 30 $, et journalisé dans `Actions`.
+ * Crée un nouveau libellé Gmail de façon encadrée (ADR-0081, vagues 3a et 3d) : validation stricte,
+ * hiérarchie <= 10 principaux et <= 50 total, plafonds par run/jour, frein 30 $, journal `Actions`.
  * @param {string} nomPropose
  * @param {string[]} candidats
  * @param {Object} libelles
@@ -407,10 +475,10 @@ function creerLibelleAutonome_(nomPropose, candidats, libelles) {
 
   var existants = libelles ? Object.keys(libelles) : (Array.isArray(candidats) ? candidats : []);
   var nomValide = validerNomNouveauLibelle_(nomPropose, existants);
-  if (!nomValide) return '';
+  if (!nomValide || !autoriserCreationLibelle_(nomValide, existants).ok) return '';
 
   try {
-    var cree = GmailApp.createLabel(nomValide);
+    var cree = creerLibelleBrut_(nomValide);
     if (!cree) return '';
     if (libelles) libelles[nomValide] = cree;
     if (Array.isArray(candidats) && candidats.indexOf(nomValide) === -1) candidats.push(nomValide);
@@ -815,6 +883,9 @@ function trierFilsGmail_(estBudgetDepasse) {
   // Historique ARCHIVÉ sans libellé (ADR-0076) : en TOUT dernier, même frein, même plafond commun.
   if (!plafondAtteint() && !budgetCampagnesAtteint_()) {
     trierHistoriqueArchive_(etat, plafondAtteint, candidats, libelles);
+  }
+  if (typeof traiterRemplacementLibelleEnCours_ === 'function' && !plafondAtteint()) {
+    traiterRemplacementLibelleEnCours_(estBudgetDepasse);
   }
 }
 
