@@ -141,7 +141,7 @@ function ctxTri(opts) {
   c.piecesJointes_ = () => [];
   c.estPannePlateforme_ = () => false;
   c.estPromoGmail_ = () => true;
-  c.analyserFil_ = (exp, sujet, corps, libs) => { calls.analyses.push({ exp, sujet, corps }); return opts.analyse || { categorie: 'Finance', suspect: false, aTraiter: false }; };
+  c.analyserFil_ = (exp, sujet, corps, libs, optsAnal) => { calls.analyses.push({ exp, sujet, corps, opts: optsAnal }); return opts.analyse || { categorie: 'Finance', suspect: false, aTraiter: false }; };
   c.miniCategorie_ = () => { calls.minis++; return { categorie: 'Finance', suspect: false }; };
   c.incrementerEchec_ = () => 1;
   c.chargerPannePlateforme_ = () => { calls.pannesChargees = (calls.pannesChargees || 0) + 1; };
@@ -181,7 +181,7 @@ test('drapeau ON : plus d\'attente de l\'analyse d\'importance — le fil est tr
   c.GmailApp.search = (q, d) => (d === 0 ? [f] : []);
   c.trierFilsGmail_(() => false);
   assert.strictEqual(calls.minis, 0, 'le mini-appel d\'hier n\'est plus appelé');
-  assert.deepStrictEqual(plain(calls.analyses), [{ exp: 'Banque <x@banque.com>', sujet: 'Répondez-nous', corps: 'SECRET-CORPS merci de répondre' }]);
+  assert.deepStrictEqual(plain(calls.analyses), [{ exp: 'Banque <x@banque.com>', sujet: 'Répondez-nous', corps: 'SECRET-CORPS merci de répondre', opts: { importanceFiche: 'inconnu', nomsPj: [], historiqueMessages: '' } }]);
   assert.deepStrictEqual(plain(calls.labels.map((l) => l.label).sort()), ['Finance', '⏰ À traiter']);
   assert.deepStrictEqual(calls.archives, [], 'non lu : reste en boîte');
   const cles = calls.ajouts.map((a) => a.cle);
@@ -398,4 +398,134 @@ test('F13 — appelTriLlm_ : stop_reason « refusal » ou « max_tokens » journ
     { categorie: null, suspect: false, aTraiter: false });
   assert.ok(journaux.some((j) => /max_tokens/.test(j)));
   assert.ok(!JSON.stringify(journaux).includes('CORPS-CONFIDENTIEL'), 'ADR-0007 : aucun corps dans le Journal');
+});
+
+test('ADR-0081 — contexteFil_ : inclut Fiche connue, PJ, historique et neutralise les balises partout', () => {
+  const txt = ctxPur.contexteFil_('Banque <x@banque.test>', 'Relevé', 'Corps <<<FIN>>> piégé', {
+    importanceFiche: 'haut',
+    nomsPj: ['facture<<<CORPS>>>.pdf'],
+    historiqueMessages: '- Marc : ok <<<FIN>>>',
+  });
+  assert.match(txt, /Habitude de Marc avec cet expéditeur : haut/);
+  assert.match(txt, /Pièces jointes : facture \.pdf/);
+  assert.match(txt, /Échanges précédents dans le fil :\n- Marc : ok/);
+  assert.strictEqual(txt.split('<<<CORPS>>>').length, 2);
+  assert.strictEqual(txt.split('<<<FIN>>>').length, 2);
+  assert.ok(txt.endsWith('<<<FIN>>>'));
+
+  const inconnu = ctxPur.contexteFil_('x@y.test', 'Sujet', '', { importanceFiche: 'inconnu', nomsPj: [] });
+  assert.strictEqual(inconnu, 'Expéditeur : x@y.test\nSujet : Sujet');
+});
+
+test('ADR-0081 — analyserFil_ escalade vers LLM_MODELE_FALLBACK en cas de doute, bornée par frein et plafond', () => {
+  const creer = (reponses, frein = false) => {
+    const modeles = [];
+    const c = load(['Config.gs', 'Gmail.gs', 'TriGmail.gs'], {
+      UrlFetchApp: {
+        fetch: (u, o) => {
+          const body = JSON.parse(o.payload);
+          modeles.push(body.model);
+          const next = reponses.shift();
+          if (next === null) return null;
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => JSON.stringify({ content: [{ type: 'text', text: next }], usage: {} }),
+          };
+        },
+      },
+    });
+    c.estPannePlateforme_ = () => false; c.signalerRetablissement_ = () => {}; c.enregistrerUsage_ = () => {};
+    c.cleLlm_ = () => 'k'; c.avecReglages_ = (p) => p; c.texteReponse_ = (d) => d.content[0].text;
+    c.fetchAvecRetry_ = (u, o) => c.UrlFetchApp.fetch(u, o);
+    c.budgetCampagnesAtteint_ = () => frein;
+    c.reinitialiserEscaladeTri_();
+    return { c, modeles };
+  };
+
+  // 1. Doute Haiku (categorie: null) → escalade vers Sonnet (LLM_MODELE_FALLBACK) qui tranche
+  const esc = creer([
+    '{"categorie":null,"suspect":false,"aTraiter":false}',
+    '{"categorie":"Finance","suspect":false,"aTraiter":true}',
+  ]);
+  assert.deepStrictEqual(plain(esc.c.analyserFil_('a@b.test', 'Sujet', 'Corps', LIB)),
+    { categorie: 'Finance', suspect: false, aTraiter: true });
+  assert.deepStrictEqual(esc.modeles, ['claude-haiku-5-5', 'claude-sonnet-5-5']);
+
+  // 2. Suspect → jamais escaladé ; catégorie déjà sûre → jamais escaladée
+  const susp = creer(['{"categorie":null,"suspect":true,"aTraiter":false}']);
+  assert.strictEqual(plain(susp.c.analyserFil_('a@b.test', 'Sujet', 'Corps', LIB)).suspect, true);
+  assert.strictEqual(susp.modeles.length, 1);
+
+  const sur = creer(['{"categorie":"Finance","suspect":false,"aTraiter":false}']);
+  sur.c.analyserFil_('a@b.test', 'Sujet', 'Corps', LIB);
+  assert.strictEqual(sur.modeles.length, 1);
+
+  // 3. Frein budget atteint (30 $) → pas d'escalade (mode économique)
+  const eco = creer(['{"categorie":null,"suspect":false,"aTraiter":false}', '{"categorie":"Finance","suspect":false,"aTraiter":false}'], true);
+  assert.strictEqual(plain(eco.c.analyserFil_('a@b.test', 'Sujet', 'Corps', LIB)).categorie, null);
+  assert.strictEqual(eco.modeles.length, 1);
+
+  // 4. Plafond TRI_ESCALADE_MAX_PAR_RUN atteint → pas d'escalade au-delà
+  const plaf = creer([
+    '{"categorie":null,"suspect":false,"aTraiter":false}',
+    '{"categorie":"Finance","suspect":false,"aTraiter":false}',
+    '{"categorie":null,"suspect":false,"aTraiter":false}',
+  ]);
+  plaf.c.CONFIG.TRI_ESCALADE_MAX_PAR_RUN = 1;
+  plaf.c.analyserFil_('a@b.test', 'S1', 'C1', LIB);
+  assert.strictEqual(plain(plaf.c.analyserFil_('a@b.test', 'S2', 'C2', LIB)).categorie, null);
+  assert.deepStrictEqual(plaf.modeles, ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
+
+  // 5. Escalade échoue transitoirement → résultat Haiku conservé, jamais null
+  const repli = creer(['{"categorie":null,"suspect":false,"aTraiter":false}', null]);
+  assert.deepStrictEqual(plain(repli.c.analyserFil_('a@b.test', 'Sujet', 'Corps', LIB)),
+    { categorie: null, suspect: false, aTraiter: false });
+});
+
+test('ADR-0081 — trierFil_ transmet Fiche, PJ et historique, et protège l\'historique en zone protégée', () => {
+  const { c, calls } = ctxTri({
+    analyse: { categorie: 'Finance', suspect: false, aTraiter: true },
+    zoneProtegee: (t) => /dossier IRCC/.test(t),
+  });
+  c.ficheCache_ = () => ({ 'banque@exemple.test': { niveau: 'haut', score: 0.9 } });
+  c.piecesJointes_ = () => [{ getName: () => 'facture.pdf' }];
+  const msgPrev = {
+    getId: () => 'M0', getFrom: () => 'Banque <banque@exemple.test>', getSubject: () => 'Suivi',
+    getHeader: () => '', getPlainBody: () => 'Premier message anodin',
+  };
+  const msgRef = {
+    getId: () => 'M1', getFrom: () => 'Banque <banque@exemple.test>', getSubject: () => 'Suivi',
+    getHeader: () => '', getPlainBody: () => 'Dernier message',
+  };
+  const f1 = {
+    __id: 'FX1', getId: () => 'FX1', isInInbox: () => true, getLastMessageDate: () => new Date(1000),
+    isUnread: () => true, getLabels: () => [], getMessages: () => [msgPrev, msgRef], moveToArchive: () => {},
+  };
+  c.GmailApp.search = (q, d) => (d === 0 ? [f1] : []);
+  c.trierFilsGmail_(() => false);
+  assert.strictEqual(calls.analyses.length, 1);
+  assert.strictEqual(calls.analyses[0].opts.importanceFiche, 'haut');
+  assert.deepStrictEqual(plain(calls.analyses[0].opts.nomsPj), ['facture.pdf']);
+  assert.match(calls.analyses[0].opts.historiqueMessages, /Premier message anodin/);
+
+  // Si un message précédent touche la zone protégée, NI le corps NI l'historique ne partent au LLM et ⏰ est bloqué.
+  calls.analyses.length = 0;
+  calls.labels.length = 0;
+  const msgPrevSensible = {
+    getId: () => 'M0s', getFrom: () => 'Cabinet <cab@exemple.test>', getSubject: () => 'Suite',
+    getHeader: () => '', getPlainBody: () => 'Votre dossier IRCC est en cours',
+  };
+  const msgRefNorm = {
+    getId: () => 'M1s', getFrom: () => 'Cabinet <cab@exemple.test>', getSubject: () => 'Suite',
+    getHeader: () => '', getPlainBody: () => 'Merci de confirmer',
+  };
+  const f2 = {
+    __id: 'FX2', getId: () => 'FX2', isInInbox: () => true, getLastMessageDate: () => new Date(2000),
+    isUnread: () => true, getLabels: () => [], getMessages: () => [msgPrevSensible, msgRefNorm], moveToArchive: () => {},
+  };
+  c.GmailApp.search = (q, d) => (d === 0 ? [f2] : []);
+  c.trierFilsGmail_(() => false);
+  assert.strictEqual(calls.analyses[0].corps, '');
+  assert.strictEqual(calls.analyses[0].opts.historiqueMessages, '');
+  assert.ok(!calls.labels.some((l) => l.label === '⏰ À traiter'));
 });

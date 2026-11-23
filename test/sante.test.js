@@ -472,6 +472,22 @@ test('majSante_ : coût affiché à 0.00 $ quand aucune Property (jamais NaN/und
   assert.ok(ligneCout && ligneCout.includes('0.00 $'), 'coût numérique formaté, pas NaN');
 });
 
+test('ADR-0081 — Santé et Config reflètent la cible 25 $/mois et le frein 30 $/mois', () => {
+  const sous = chargerAvecSanteMock({});
+  assert.strictEqual(sous.ctx.CONFIG.LLM_BUDGET_CIBLE, 25);
+  assert.strictEqual(sous.ctx.CONFIG.LLM_BUDGET_CAMPAGNES, 30);
+  sous.ctx.syntheseCoutMois_ = () => ({ dollars: 24.99, appels: 100 });
+  sous.ctx.majSante_();
+  const ligneSous = sous.captured.find((l) => l.indexOf('Coût LLM') === 0);
+  assert.ok(ligneSous.includes('cible < 25 $/mois') && ligneSous.includes('✅'), ligneSous);
+
+  const auDessus = chargerAvecSanteMock({});
+  auDessus.ctx.syntheseCoutMois_ = () => ({ dollars: 25.0, appels: 100 });
+  auDessus.ctx.majSante_();
+  const ligneDessus = auDessus.captured.find((l) => l.indexOf('Coût LLM') === 0);
+  assert.ok(ligneDessus.includes('cible < 25 $/mois') && ligneDessus.includes('⚠️ DÉPASSÉE'), ligneDessus);
+});
+
 /* ---------- C28-58 : l'onglet `Coûts` (écriture + effacement du reliquat) ---------- */
 
 test('majCouts_ : écrit total + postes, et EFFACE le reliquat du mois précédent', () => {
