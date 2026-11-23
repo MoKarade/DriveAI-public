@@ -346,9 +346,13 @@ var CONFIG = {
   TRI_BROUILLON_MAX_PAR_RUN: 3,           // borne temps, coût LLM et quota Gmail des brouillons par tick
   LLM_MAX_TOKENS_BROUILLON: 350,          // plafond de sortie d'un brouillon de réponse court
   // ADR-0081 (vague 3a) : création autonome et encadrée de libellés Gmail quand aucun libellé existant ne convient.
-  TRI_CREER_LIBELLE_ACTIF: true,          // autorise la création de libellé Gmail (zéro suppression)
+  TRI_CREER_LIBELLE_ACTIF: true,          // autorise la création de libellé Gmail (zéro suppression de mail)
   TRI_CREER_LIBELLE_MAX_PAR_RUN: 2,       // plafond de créations par tick (anti-dérive)
   TRI_CREER_LIBELLE_MAX_JOUR: 5,          // plafond quotidien de créations de libellés Gmail
+  TRI_LIBELLES_MAX_TOTAL: 50,             // plafond global de libellés de catégorie (hors 3 spéciaux, ADR-0081)
+  TRI_LIBELLES_MAX_PRINCIPAUX: 10,        // plafond de libellés principaux (au-delà : sous-libellés seuls)
+  TRI_REMPLACEMENT_LOT_FILS: 30,          // fils reclassés au plus par passe lors d'un remplacement de libellé
+  TRI_REMPLACEMENT_PREUVE_MIN_FILS: 5,    // preuves minimales requises (fils observés) avant tout remplacement
   TRI_INFOLETTRE_DESABO_ACTIF: true,      // consigne le lien officiel HTTPS List-Unsubscribe des infolettres jamais lues (ADR-0081 ; zéro requête externe)
   // ADR-0081 (vague 1) : la fiche du propriétaire apprend ses habitudes (lu, répondu, étoilé) fil après fil.
   FICHE_MAX_FILS: 60,                     // fils lus par run (lecture seule, borne le coût Gmail du tick)
