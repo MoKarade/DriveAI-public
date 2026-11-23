@@ -35,6 +35,7 @@ function initialiserSheet_(ss) {
   creerOnglet_(ss, 'TriAppris', ['Adresse', 'Libellé', 'Appris le']); // table adresse→libellé du tri Gmail (#16)
   creerOnglet_(ss, 'Confiance', COLONNES_CONFIANCE); // expéditeurs « pas suspect » (C28-19, ADR-0020)
   creerOnglet_(ss, 'Fiche', COLONNES_FICHE); // habitudes du propriétaire par expéditeur (ADR-0081) : compteurs seuls, jamais de contenu
+  creerOnglet_(ss, 'Actions', COLONNES_ACTIONS); // journal des actions réversibles (ADR-0081)
   creerOnglet_(ss, 'Réglages', ['Clé', 'Valeur']); // réglages modifiables depuis l'app (#22)
   // Réorg IA (#21) : demandes de l'app + actions proposées/validées/appliquées — machine à états,
   // aucune ligne jamais supprimée (cf. Reorg.gs).

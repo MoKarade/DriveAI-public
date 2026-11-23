@@ -3,7 +3,7 @@
  *
  *  - (défaut) « Vérifier maintenant » (#20) : déclencheur PONCTUEL du tick (idempotent,
  *    LockService, garde-temps) — réponse non lue par l'app (no-cors).
- *  - `action=pas-suspect`, `hub-summary`, `gardes-app` : actions de l'app (secret web app), sans
+ *  - `action=pas-suspect`, `hub-summary`, `gardes-app`, `annuler-action` : actions de l'app (secret web app), sans
  *    aucun appel LLM. L'app POSTe en Content-Type text/plain (requête « simple », pas de
  *    préflight) — Apps Script renvoie alors un CORS lisible (`*`).
  *    (La recherche IA, le chat à outils et les actions `mcp-*` du connecteur MCP ont été RETIRÉS
@@ -18,7 +18,7 @@
  *    (lecture pure, onglet « Audit tri ») et ne rend que des COMPTEURS et des métadonnées. Secret CI.
  *
  * Secrets — DEUX, jamais confondus (le 3ᵉ, `DriveAI_MCP_SECRET`, est parti avec le MCP, ADR-0074) :
- *  - `DriveAI_WEBAPP_SECRET` (défaut, pas-suspect, hub-summary, gardes-app) : exposé côté NAVIGATEUR par conception
+ *  - `DriveAI_WEBAPP_SECRET` (défaut, pas-suspect, hub-summary, gardes-app, annuler-action) : exposé côté NAVIGATEUR par conception
  *    (app/src/config.ts — « la sécurité vient du login Google, pas du secret »).
  *  - `DriveAI_SYNC_SECRET` (pousser-reset, assurer-trigger, audit-tri) : DÉDIÉ, JAMAIS exposé
  *    à un navigateur — connu seulement de GitHub Actions (secret CI) et du script.
@@ -169,6 +169,8 @@ function doPost(e) {
           reponse = actionHubSummary_();
         } else if (action === 'gardes-app') {
           reponse = actionGardesApp_();
+        } else if (action === 'annuler-action') {
+          reponse = actionAnnulerAction_(e);
         } else {
           reponse = actionTickPonctuel_();
         }
@@ -351,6 +353,32 @@ function actionPasSuspect_(e) {
   journalInfo_('WebApp', 'Pas-suspect : « ' + adresse + ' » ajouté à Confiance (fil re-trié au prochain passage).');
   actionTickPonctuel_(); // passage immédiat — le fil est re-jugé « sain » dans la ~minute
   return { ok: true, message: 'Expéditeur de confiance : ' + adresse + ' — le fil est re-trié dans la minute.' };
+}
+
+/**
+ * Annule une action réversible consignée dans l'onglet `Actions` (ADR-0081, vague 3a).
+ * Protégé par `DriveAI_WEBAPP_SECRET`, idempotent via le mémo `cleMemoRequete_` et le statut
+ * `annulé`, et sérialisé par `LockService` pour éviter toute course avec un tick Drive.
+ */
+function actionAnnulerAction_(e) {
+  var actionId = '';
+  try {
+    var corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {};
+    actionId = validerActionId_(corps.actionId);
+  } catch (err) {
+    actionId = '';
+  }
+  if (!actionId) return { ok: false, erreur: 'actionId invalide' };
+
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) {
+    return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
+  }
+  try {
+    return annulerAction_(actionId);
+  } finally {
+    verrou.releaseLock();
+  }
 }
 
 /* ---------- Résumé pour le hub perso (C28-27, CLAUDE.md §6 bis) ---------- */

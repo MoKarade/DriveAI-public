@@ -122,6 +122,8 @@ const CONTRAT = [
   'normaliserLibelle_', 'parserMiniCategorie_', 'miniCategorie_', 'triApprisCache_', 'apprendreTri_',
   'reinitialiserTriApprisCache_', 'libellesUtilisateur_', 'reinitialiserLibellesCache_',
   'ficheCache_', 'reinitialiserFicheCache_', 'reinitialiserEscaladeTri_', 'reinitialiserBrouillonsTri_',
+  'reinitialiserLibellesCrees_', 'validerNomNouveauLibelle_', 'creerLibelleAutonome_',
+  'enregistrerAction_', 'annulerAction_', 'validerActionId_', 'actionAnnulerAction_',
   'doitCreerBrouillon_', 'parserBrouillon_', 'genererBrouillonReponse_', 'lireCorpsEtHistorique_',
   'contexteFil_', 'extraitHistoriqueMessages_',
   'estPromoGmail_', 'reinitialiserPromoSetCache_', 'signalerPanneEcriture_', 'reinitialiserPanneEcriture_',

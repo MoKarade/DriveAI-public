@@ -61,6 +61,7 @@ const MODULES_MOTEUR = [
   'ResolutionFileId.gs',
   'RetourOrphelins.gs',
   'WebApp.gs',
+  'Actions.gs',
   'Journal.gs',
   'Main.gs',
 ];
