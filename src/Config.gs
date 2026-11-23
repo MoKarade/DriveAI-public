@@ -340,6 +340,11 @@ var CONFIG = {
   // ADR-0081 (vague 2) : escalade vers le modèle complexe (LLM_MODELE_FALLBACK) en cas de doute sur la catégorie.
   TRI_ESCALADE_ACTIF: true,               // active l'escalade Sonnet quand catégorie = null (hors suspect, coupée au frein)
   TRI_ESCALADE_MAX_PAR_RUN: 5,            // borne temps et coût des escalades tri par tick
+  // ADR-0081 (vague 2b) : résumé court (1 ligne) des mails à traiter et brouillons de réponse (jamais envoyés).
+  TRI_RESUME_MAX_CARS: 140,               // longueur max du résumé dérivé enregistré avec `important|` (ADR-0007)
+  TRI_BROUILLON_ACTIF: true,              // prépare un brouillon Gmail (createDraftReply, jamais d'envoi) si réponse attendue
+  TRI_BROUILLON_MAX_PAR_RUN: 3,           // borne temps, coût LLM et quota Gmail des brouillons par tick
+  LLM_MAX_TOKENS_BROUILLON: 350,          // plafond de sortie d'un brouillon de réponse court
   // ADR-0081 (vague 1) : la fiche du propriétaire apprend ses habitudes (lu, répondu, étoilé) fil après fil.
   FICHE_MAX_FILS: 60,                     // fils lus par run (lecture seule, borne le coût Gmail du tick)
   FICHE_FENETRE_JOURS: 3,                 // premier passage : on apprend les 3 derniers jours, ensuite le curseur fait foi

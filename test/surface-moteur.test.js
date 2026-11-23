@@ -121,7 +121,9 @@ const CONTRAT = [
   'communVehiculeDepuisSource_', 'communVehiculeDuNom_', 'estLocationVehicule_',
   'normaliserLibelle_', 'parserMiniCategorie_', 'miniCategorie_', 'triApprisCache_', 'apprendreTri_',
   'reinitialiserTriApprisCache_', 'libellesUtilisateur_', 'reinitialiserLibellesCache_',
-  'ficheCache_', 'reinitialiserFicheCache_', 'reinitialiserEscaladeTri_', 'contexteFil_', 'extraitHistoriqueMessages_',
+  'ficheCache_', 'reinitialiserFicheCache_', 'reinitialiserEscaladeTri_', 'reinitialiserBrouillonsTri_',
+  'doitCreerBrouillon_', 'parserBrouillon_', 'genererBrouillonReponse_', 'lireCorpsEtHistorique_',
+  'contexteFil_', 'extraitHistoriqueMessages_',
   'estPromoGmail_', 'reinitialiserPromoSetCache_', 'signalerPanneEcriture_', 'reinitialiserPanneEcriture_',
   'scanAvantTri_', 'scanArriereTri_',
   'nettoyerBoiteHistorique_', 'finaliserPasseBoite_', // nettoyage profond > 30 j (C28-22, ADR-0022)

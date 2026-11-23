@@ -432,7 +432,7 @@ test('F13 — compatibilité production sans DriveAI_GEMINI_KEY : pipeline V2 + 
   c.reinitialiserPannePlateforme_();
   c.reinitialiserUsage_();
   const resTri = plat(c.analyserFil_('Banque <c@banque.exemple>', 'Relevé', 'Votre relevé est prêt.', ['Finance']));
-  assert.deepStrictEqual(resTri, { categorie: 'Finance', suspect: false, aTraiter: false });
+  assert.deepStrictEqual(resTri, { categorie: 'Finance', suspect: false, aTraiter: false, resume: '' });
   const resTexte = c.appelAnthropicTexte_(c.CONFIG.ANALYSE_V2_MODELE, 'S', 'C', 100);
   assert.ok(typeof resTexte === 'string' && resTexte.length > 0);
   assert.ok(urls.every((u) => u === 'https://api.anthropic.com/v1/messages'), 'tous les appels restent sur Anthropic');
