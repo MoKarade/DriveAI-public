@@ -120,10 +120,17 @@ function traiterDocument_(src) {
       return;
     }
 
+    var dossiersVie = (typeof dossiersVieCache_ === 'function' &&
+        typeof chercherDossiersVie_ === 'function' &&
+        typeof formaterContexteDossiersVie_ === 'function')
+      ? formaterContexteDossiersVie_(chercherDossiersVie_(src, dossiersVieCache_(), 3))
+      : '';
+
     var classif = classifier_({
       nomFichier: src.nom,
       expediteur: src.expediteur || '',
       sujet: src.sujet || '',
+      dossiersVie: dossiersVie,
       extrait: extrait || '' // null (échec OCR) → le LLM classe sur les métadonnées, comme avant
     });
     if (!classif) {
@@ -183,6 +190,7 @@ function traiterDocument_(src) {
     // quatre préfixes — une pièce jointe Gmail n'en porte aucun, et c'est l'intake principal.
     decision.fileId = fileId;
     indexAjouter_(src.cle, decision, empreinte, trace);
+    if (typeof enregistrerLienMailDrive_ === 'function') enregistrerLienMailDrive_(src, decision);
     journalInfo_('Pipeline', decision.statut + ' → ' + decision.chemin + ' : ' + decision.nom);
   } catch (e) {
     // Erreur inattendue (OCR, blob, Sheet...) : comptée comme un échec → re-tentée, ou

@@ -182,6 +182,7 @@ function appelAnthropicV2_(modele, meta, systeme, propositionPasse1) {
     'Nom du fichier : ' + meta.nomFichier + '\n' +
     'Expéditeur : ' + (meta.expediteur || '') + '\n' +
     'Sujet : ' + (meta.sujet || '') + '\n' +
+    (meta.dossiersVie ? meta.dossiersVie + '\n' : '') +
     'Extrait du contenu (peut être vide) :\n' + (meta.extrait || '(aucun)');
   if (propositionPasse1) {
     contenu += '\n\nPROPOSITION DE LA PASSE 1 (à contester puis finaliser) :\n' +
@@ -485,6 +486,7 @@ function appelAnthropic_(modele, meta, systeme) {
     'Nom du fichier : ' + meta.nomFichier + '\n' +
     'Expéditeur : ' + meta.expediteur + '\n' +
     'Sujet : ' + meta.sujet + '\n' +
+    (meta.dossiersVie ? meta.dossiersVie + '\n' : '') +
     'Extrait du contenu (peut être vide) :\n' + (meta.extrait || '(aucun)');
 
   var options = {
