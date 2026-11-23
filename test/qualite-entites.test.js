@@ -1,0 +1,321 @@
+'use strict';
+/**
+ * Chantier #10 (ADR-0009 §1) — qualité des propositions d'entités :
+ *  - `estEntiteGenerique_` : calibré sur la FILE RÉELLE du 2026-07-02 (génériques refusés,
+ *    vrais noms propres TOUJOURS gardés — filtre étroit, haute précision).
+ *  - `estFusionnableEntite_` : inclusion de jetons SEULEMENT (jamais la distance d'édition —
+ *    « Marquex Modelx 2014 » ≠ « Marquex Modelx 2017 »).
+ *  - `entiteEnAttenteAjouter_` : générique → aucune ligne ; fusionnable → incrément « Vu N fois » ;
+ *    inédit → append avec Vu=1.
+ *  - `appliquerCurationEntites_` : one-shot gaté (statuts seulement, tag figé après passe complète).
+ */
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { load } = require('./harness');
+
+const ctx = load(['Config.gs', 'Entites.gs']);
+
+/* ---------- estEntiteGenerique_ (calibrage réel) ---------- */
+
+test('estEntiteGenerique_ : les génériques de la file réelle sont refusés', () => {
+  const generiques = [
+    'banque', 'diplôme', 'véhicule', 'logement', 'cours',
+    'Banque/Service en ligne', 'Banque/Institution financière', 'Compte bancaire',
+    'carte de crédit', 'Banque ou service de paiement',
+    'cours de physique', 'Cours d\'anglais', 'Anglais - Examen écrit', 'Devoir de mathématiques',
+    'classe préparatoire', 'Classe préparatoire Prepalpha', 'établissement scolaire',
+    'Diplôme/Certification technique', 'mémoire de fin d\'études', 'Études secondaires ou universitaires',
+    'École/Établissement scolaire', 'Épreuves de synthèse — Anglais', 'Préparation aux concours',
+    'Physique (classe de première)', 'Algorithmique / Programmation Python',
+    'Transport ferroviaire', 'Assurance santé', 'projet académique',
+  ];
+  for (const g of generiques) {
+    assert.strictEqual(ctx.estEntiteGenerique_(g), true, `« ${g} » devrait être générique`);
+  }
+});
+
+test('estEntiteGenerique_ : les VRAIS noms propres de la file réelle sont TOUS gardés', () => {
+  const propres = [
+    'Bellerives', 'Alphatek Inc.', 'lycée Lyceea', 'Banque Marnex (CMF)',
+    'IUT du Plateau Côte d\'Opale', 'IUT de Villez', 'CPE Lyon', 'Hydro-Québec', 'CourtierX',
+    'Placementia', 'RSE (Régime de santé étranger)', 'SCI MRic',
+    '1201 Rue Exemple Alpha, Québec Z9Z 9Z9', '1202 Rte Fictive Rivage, Ville Exemple', 'VW Modelb',
+    'Ford Modela 2011', 'Marquex Modelx 2014', 'Lycée Gustave Delta', 'HAMX International',
+    'Betatek robotek', 'Safran', 'Schneider Electric', 'Airbus', 'Kinova', 'Efrei Paris',
+    'banque Bellerives', // « banque » générique + « bellerives » identifiant → GARDÉE
+    'carte de crédit Bellerives',
+  ];
+  for (const p of propres) {
+    assert.strictEqual(ctx.estEntiteGenerique_(p), false, `« ${p} » devrait être gardée`);
+  }
+});
+
+test('estEntiteGenerique_ : pluriels couverts (jeton OU jeton sans « s » final)', () => {
+  assert.strictEqual(ctx.estEntiteGenerique_('Relevés bancaires'), true);
+  assert.strictEqual(ctx.estEntiteGenerique_('factures'), true);
+  assert.strictEqual(ctx.estEntiteGenerique_('diplômes'), true);
+  assert.strictEqual(ctx.estEntiteGenerique_('Bellerives'), false); // « bellerive » n'est pas du lexique
+});
+
+test('estEntiteGenerique_ : vide / null / que des stopwords → générique', () => {
+  assert.strictEqual(ctx.estEntiteGenerique_(''), true);
+  assert.strictEqual(ctx.estEntiteGenerique_(null), true);
+  assert.strictEqual(ctx.estEntiteGenerique_('de la du'), true);
+});
+
+/* ---------- estFusionnableEntite_ (inclusion seulement) ---------- */
+
+test('estFusionnableEntite_ : inclusion → fusionnable (adresses, banque, casse/accents)', () => {
+  assert.strictEqual(ctx.estFusionnableEntite_('Bellerives', 'carte de crédit Bellerives'), true);
+  assert.strictEqual(ctx.estFusionnableEntite_('banque Bellerives', 'Bellerives'), true);
+  assert.strictEqual(ctx.estFusionnableEntite_('1201 rue Exemple Alpha', '1201 Rue Exemple Alpha, App. 5, Québec'), true);
+  assert.strictEqual(ctx.estFusionnableEntite_('ALPHATEK Inc', 'Alphatek Inc.'), true);
+});
+
+test('estFusionnableEntite_ : JAMAIS par simple proximité — années/villes distinctes', () => {
+  assert.strictEqual(ctx.estFusionnableEntite_('Marquex Modelx 2014', 'Marquex Modelx 2017'), false);
+  // Garde anti-effondrement transitif (revue flotte) : une ANNÉE excédentaire = entité distincte.
+  assert.strictEqual(ctx.estFusionnableEntite_('Marquex Modelx', 'Marquex Modelx 2014'), false);
+  assert.strictEqual(ctx.estFusionnableEntite_('Ford Modela', 'Ford Modela 2011'), false);
+  assert.strictEqual(ctx.estFusionnableEntite_('IUT de Villez', 'IUT de Nantes'), false);
+  assert.strictEqual(ctx.estFusionnableEntite_('Ford Modela 2011', 'Marquec Corolla 2014'), false);
+  assert.strictEqual(ctx.estFusionnableEntite_('', 'Bellerives'), false);
+});
+
+/* ---------- entiteEnAttenteAjouter_ (effectful, mocks) ---------- */
+
+function ctxProposition(lignesExistantes) {
+  const c = load(['Config.gs', 'Entites.gs']);
+  const calls = { append: [], setValue: [] };
+  c.journalInfo_ = () => {};
+  c.journalErreur_ = () => {};
+  const ENTETES = ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'];
+  c.feuille_ = () => ({
+    getLastColumn: () => ENTETES.length,
+    getLastRow: () => 1 + (lignesExistantes || []).length,
+    getRange: (l, col) => ({
+      getValues: () => [ENTETES.slice()],
+      getValue: () => 1,
+      setValue: (v) => calls.setValue.push({ ligne: l, col, v }),
+    }),
+    appendRow: (row) => calls.append.push(row),
+  });
+  const parCle = {};
+  (lignesExistantes || []).forEach((l) => { parCle[c.cleEntite_(l.domaine, l.entite)] = l; });
+  c._entitesCache = { lignes: (lignesExistantes || []).slice(), parCle };
+  return { c, calls };
+}
+
+test('entiteEnAttenteAjouter_ : GÉNÉRIQUE → aucune ligne, aucune I/O', () => {
+  const { c, calls } = ctxProposition([]);
+  c.entiteEnAttenteAjouter_({ entite: 'Banque/Service en ligne', domaine: '02 · Finances' });
+  assert.strictEqual(calls.append.length, 0);
+  assert.strictEqual(calls.setValue.length, 0);
+});
+
+// TRIPWIRE ADR-0031 (décision Marc 2026-07-31 « plus RIEN tout seul ») : sans dossier Drive
+// existant, une entité inconnue n'écrit plus JAMAIS rien — ni ligne en_attente, ni incrément.
+test('entiteEnAttenteAjouter_ (ADR-0031) : entité INCONNUE sans dossier existant → ZÉRO écriture Sheet', () => {
+  const { c, calls } = ctxProposition([]);
+  c.entiteEnAttenteAjouter_({ entite: 'Placementia', domaine: '02 · Finances' });
+  assert.strictEqual(calls.append.length, 0, 'plus aucune ligne en_attente (le doc reste classé au domaine)');
+  assert.strictEqual(calls.setValue.length, 0, 'aucun compteur touché');
+});
+
+test('entiteEnAttenteAjouter_ (ADR-0031) : entité DÉJÀ connue (validée ou héritée) → no-op, AUCUN alias', () => {
+  const validee = { ligneSheet: 2, entite: 'Bellerives', domaine: '02 · Finances', categorie: '', type: '', statut: 'validee', dossierId: 'DOSSIER' };
+  const { c, calls } = ctxProposition([validee]);
+  c.entiteEnAttenteAjouter_({ entite: 'Bellerives', domaine: '02 · Finances' });
+  assert.strictEqual(calls.append.length, 0);
+  assert.strictEqual(calls.setValue.length, 0, 'plus d\'incrément « Vu N fois » à l\'observation');
+  // PAS d'alias non plus : une VARIANTE inconnue (« banque Bellerives ») n'entre jamais dans parCle
+  // → resoudreEntite_ ne routera jamais une variante dans le dossier sans fusion explicite de Marc.
+  c.entiteEnAttenteAjouter_({ entite: 'banque Bellerives', domaine: '02 · Finances' });
+  assert.strictEqual(calls.append.length, 0);
+  const cleVariante = c.cleEntite_('02 · Finances', 'banque Bellerives');
+  assert.strictEqual(c._entitesCache.parCle[cleVariante], undefined);
+});
+
+test('appliquerCurationEntites_ : passe 1.5 (P4/C28-10) — les millésimes d\'un MÊME véhicule se regroupent sous la forme canonique', () => {
+  // Révision du comportement (plan NotebookLM P4 validé par Marc, 2026-07-08) : la canonicalisation
+  // véhicule (C26-02) retire les années/finitions — « Marquex Modelx 2014 » et « Marquex Modelx 2017 »
+  // SONT le même véhicule que « Marquex Modelx » (la plainte d'origine : « Ford Modela en 3 dossiers »).
+  // Le regroupement est par ÉGALITÉ de clé canonique (jamais l'inclusion transitive d'antan) et
+  // reste réversible (statuts seulement).
+  const lignes = [
+    { ligneSheet: 2, entite: 'Marquex Modelx', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+    { ligneSheet: 3, entite: 'Marquex Modelx 2014', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+    { ligneSheet: 4, entite: 'Marquex Modelx 2017', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+  ];
+  const { c, calls } = ctxCuration(lignes, false);
+  c.appliquerCurationEntites_(() => false);
+  const variantes = calls.statuts.filter((s) => typeof s.v === 'string' && s.v.indexOf('variante') === 0);
+  assert.strictEqual(variantes.length, 2, '2014 et 2017 rejoignent la forme canonique');
+  variantes.forEach((s) => assert.strictEqual(s.v, 'variante de : Marquex Modelx'));
+});
+
+test('appliquerCurationEntites_ : passe 1.5 — une en_attente dont le canonique rejoint une ligne VALIDÉE devient sa variante', () => {
+  const lignes = [
+    { ligneSheet: 2, entite: 'Ford Modela', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'validee', dossierId: 'DOSSIER-MODELA' },
+    { ligneSheet: 3, entite: 'Ford Modela SE 2011', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+  ];
+  const { c, calls } = ctxCuration(lignes, false);
+  c.appliquerCurationEntites_(() => false);
+  const variantes = calls.statuts.filter((s) => typeof s.v === 'string' && s.v.indexOf('variante') === 0);
+  assert.strictEqual(variantes.length, 1);
+  assert.strictEqual(variantes[0].v, 'variante de : Ford Modela');
+  assert.strictEqual(variantes[0].ligne, 3, 'c\'est la ligne en_attente qui est requalifiée, jamais la validée');
+});
+
+test('appliquerCurationEntites_ : deux domaines DIFFÉRENTS ne se regroupent jamais (clé canonique = domaine + nom)', () => {
+  const lignes = [
+    { ligneSheet: 2, entite: 'Bellerives', domaine: '02 · Finances', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+    { ligneSheet: 3, entite: 'Bellerives', domaine: '03 · Logement & véhicule', categorie: '', type: '', statut: 'en_attente', dossierId: '' },
+  ];
+  const { c, calls } = ctxCuration(lignes, false);
+  c.appliquerCurationEntites_(() => false);
+  const variantes = calls.statuts.filter((s) => typeof s.v === 'string' && s.v.indexOf('variante') === 0);
+  assert.strictEqual(variantes.length, 0);
+});
+
+/* ---------- P4 (C28-10) : canonicalisation à la SOURCE + « reality check » Drive ---------- */
+
+test('entiteEnAttenteAjouter_ (ADR-0031) : deux formes du MÊME véhicule, dossier EXISTANT → UNE ligne canonique validée', () => {
+  const { c, calls } = ctxProposition([]);
+  c.idDomaine_ = () => 'ID-DOMAINE-03';
+  c.DriveApp = {
+    getFolderById: () => {
+      let servi = false;
+      return {
+        getFolders: () => ({
+          hasNext: () => !servi,
+          next: () => { servi = true; return { getName: () => 'Ford Modela', getId: () => 'DOSSIER-MODELA' }; },
+        }),
+      };
+    },
+  };
+  c.entiteEnAttenteAjouter_({ entite: 'Ford Modela SE 2011', domaine: '03 · Logement & véhicule', categorie: 'Véhicule' });
+  c.entiteEnAttenteAjouter_({ entite: 'Ford Modela 2011', domaine: '03 · Logement & véhicule', categorie: 'Véhicule' });
+  assert.strictEqual(calls.append.length, 1, 'la 2e forme rejoint la clé canonique de la 1re (cache du run)');
+  const ENTETES = ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'];
+  assert.strictEqual(calls.append[0][ENTETES.indexOf('Entité')], 'Ford Modela', 'sous sa forme canonique (années/finitions retirées)');
+  assert.strictEqual(calls.append[0][ENTETES.indexOf('Statut')], 'validée', 'ADR-0031 : seule l\'observation d\'un dossier EXISTANT écrit');
+});
+
+test('entiteEnAttenteAjouter_ : un dossier du domaine porte DÉJÀ ce nom → ligne directement VALIDÉE, liée au dossier', () => {
+  const { c, calls } = ctxProposition([]);
+  c.idDomaine_ = () => 'ID-DOMAINE-03';
+  c.DriveApp = {
+    getFolderById: (id) => {
+      assert.strictEqual(id, 'ID-DOMAINE-03');
+      let servi = false;
+      return {
+        getFolders: () => ({
+          hasNext: () => !servi,
+          next: () => { servi = true; return { getName: () => '1201 Rue Exemple Alpha, Québec', getId: () => 'DOSSIER-APPART' }; },
+        }),
+      };
+    },
+  };
+  // Variante d'adresse (« ave », complément « app 5 ») : canonisée puis matchée au dossier existant.
+  c.entiteEnAttenteAjouter_({ entite: '1201 rue Exemple Alpha, app 5, Québec', domaine: '03 · Logement & véhicule', categorie: 'Logement' });
+  assert.strictEqual(calls.append.length, 1);
+  const ENTETES = ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'];
+  assert.strictEqual(calls.append[0][ENTETES.indexOf('Statut')], 'validée', 'jamais en_attente quand le dossier existe déjà');
+  assert.strictEqual(calls.append[0][ENTETES.indexOf('Dossier ID')], 'DOSSIER-APPART');
+});
+
+test('dossiersExistantsDomaine_ : 1 listage Drive par domaine et par run (cache), échec → table vide sans planter', () => {
+  const { c } = ctxProposition([]);
+  let listages = 0;
+  c.idDomaine_ = () => 'ID-DOM';
+  c.DriveApp = {
+    getFolderById: () => { listages++; return { getFolders: () => ({ hasNext: () => false, next: () => null }) }; },
+  };
+  c.dossiersExistantsDomaine_('02 · Finances');
+  c.dossiersExistantsDomaine_('02 · Finances');
+  assert.strictEqual(listages, 1, 'le 2e appel sert le cache');
+  // Échec Drive (autre domaine) : table vide, cachée elle aussi — jamais une exception qui remonte.
+  c.DriveApp = { getFolderById: () => { throw new Error('Drive indisponible'); } };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.dossiersExistantsDomaine_('05 · Carrière'))), {});
+});
+
+test('resoudreEntite_ : la requête est canonisée avant le matching — une variante d\'adresse résout vers la ligne validée', () => {
+  const validee = { ligneSheet: 2, entite: '1201 Rue Exemple Alpha, Québec', domaine: '03 · Logement & véhicule', categorie: 'Logement', type: 'Logement', statut: 'validee', dossierId: 'DOSSIER-APPART' };
+  const { c } = ctxProposition([validee]);
+  const r = c.resoudreEntite_({ entite: '1201 rue Exemple Alpha, app 5, Québec', domaine: '03 · Logement & véhicule' });
+  assert.strictEqual(r.etat, 'connue');
+  assert.strictEqual(r.dossierId, 'DOSSIER-APPART');
+});
+
+test('resoudreEntite_ : canonique NULL (générique, propriétaire) → transverse (document classé au domaine)', () => {
+  const { c } = ctxProposition([]);
+  assert.strictEqual(c.resoudreEntite_({ entite: 'Banque/Service en ligne', domaine: '02 · Finances' }).etat, 'transverse');
+  assert.strictEqual(c.resoudreEntite_({ entite: 'Marc Exemple', domaine: '01 · Administratif & identité' }).etat, 'transverse');
+});
+
+/* ---------- appliquerCurationEntites_ (one-shot gaté) ---------- */
+
+function ctxCuration(lignes, dejaFaite) {
+  const c = load(['Config.gs', 'Entites.gs']);
+  const calls = { statuts: [], props: {} };
+  c.journalInfo_ = () => {};
+  const ENTETES = ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'];
+  c.feuille_ = () => ({
+    getLastColumn: () => ENTETES.length,
+    getLastRow: () => 1 + lignes.length,
+    getRange: (l, col) => ({
+      getValues: () => [ENTETES.slice()],
+      getValue: () => 1,
+      setValue: (v) => calls.statuts.push({ ligne: l, col, v }),
+    }),
+    appendRow: () => {},
+  });
+  c._entitesCache = { lignes: lignes.slice(), parCle: {} };
+  c.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (k) => (dejaFaite && k === 'DriveAI_CURATION_ENTITES' ? c.CONFIG.CURATION_ENTITES_TAG : calls.props[k] ?? null),
+      setProperty: (k, v) => { calls.props[k] = v; },
+      deleteProperty: () => {},
+    }),
+  };
+  return { c, calls };
+}
+
+function ligne(n, entite, domaine, statut) {
+  return { ligneSheet: n, entite, domaine, categorie: '', type: '', statut, dossierId: '' };
+}
+
+test('appliquerCurationEntites_ : génériques refusés, variantes regroupées (canonique = la plus courte), tag figé', () => {
+  const lignes = [
+    ligne(2, 'banque', '02 · Finances', 'en_attente'),                       // générique → refusée
+    ligne(3, 'Bellerives', '02 · Finances', 'en_attente'),                   // canonique (la plus courte)
+    ligne(4, 'carte de crédit Bellerives', '02 · Finances', 'en_attente'),   // variante de Bellerives
+    ligne(5, 'IUT de Villez', '06 · Études & diplômes', 'en_attente'),         // gardée (pas fusionnable avec Nantes)
+    ligne(6, 'IUT de Nantes', '06 · Études & diplômes', 'en_attente'),       // gardée
+    ligne(7, 'Safran', '05 · Carrière', 'validée'),                          // pas en_attente → intouchée
+  ];
+  const { c, calls } = ctxCuration(lignes, false);
+  c.appliquerCurationEntites_(() => false);
+
+  const statuts = calls.statuts.filter((s) => typeof s.v === 'string');
+  assert.deepStrictEqual(
+    statuts.map((s) => [s.ligne, s.v]),
+    [[2, 'refusée (générique)'], [4, 'variante de : Bellerives']],
+  );
+  assert.strictEqual(calls.props['DriveAI_CURATION_ENTITES'], c.CONFIG.CURATION_ENTITES_TAG); // passe complète → tag
+});
+
+test('appliquerCurationEntites_ : budget épuisé en cours → PAS de tag (reprise au tick suivant)', () => {
+  const lignes = [ligne(2, 'banque', '02 · Finances', 'en_attente'), ligne(3, 'cours', '06 · Études & diplômes', 'en_attente')];
+  const { c, calls } = ctxCuration(lignes, false);
+  let appels = 0;
+  c.appliquerCurationEntites_(() => ++appels > 2); // le budget tombe après le 1er traitement
+  assert.strictEqual(calls.props['DriveAI_CURATION_ENTITES'], undefined);
+});
+
+test('appliquerCurationEntites_ : tag déjà posé → no-op total', () => {
+  const { c, calls } = ctxCuration([ligne(2, 'banque', '02 · Finances', 'en_attente')], true);
+  c.appliquerCurationEntites_(() => false);
+  assert.strictEqual(calls.statuts.length, 0);
+});

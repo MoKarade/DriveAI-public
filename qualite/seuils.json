@@ -1,0 +1,14 @@
+{
+  "_doc": "Copie LISIBLE À LA RACINE des seuils de couverture du cliquet de app/qualite/seuils.json (la grille de conformité lit qualite/seuils.json à la racine). La source qui fait foi est app/qualite/seuils.json ; test/seuils-racine.test.js rougit si les deux divergent. Quand `npm run portes:maj` resserre un seuil, reporter ici les mêmes valeurs.",
+  "portes": {
+    "couverture.lignes_coeur": {
+      "min": 97.7
+    },
+    "couverture.lignes_global": {
+      "min": 94.9
+    },
+    "couverture.branches_global": {
+      "min": 86.2
+    }
+  }
+}

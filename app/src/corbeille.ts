@@ -1,0 +1,444 @@
+/**
+ * corbeille.ts — L'UNIQUE porte de mise à la corbeille de TOUTE l'app (ADR-0014, révision
+ * ÉTROITE du §2 validée par Marc le 2026-07-06). Périmètre : un DOSSIER devenu VIDE après une
+ * réorg validée (ligne `vide-candidat`), au CLIC de Marc — récupérable 30 jours dans la
+ * corbeille Drive. Jamais un fichier, jamais un dossier non vide, jamais la zone protégée,
+ * jamais une racine système, jamais la suppression DÉFINITIVE (interdite partout, y compris ici).
+ *
+ * Ce fichier est le SEUL de `src/` autorisé à porter `trashed: true` — verrouillé par le
+ * tripwire de `test/aucune-suppression.test.ts` (exception chirurgicale + cohérence
+ * CLAUDE.md §2 ↔ ce fichier, dans les deux sens). Le verdict est PUR et testé : l'action
+ * réseau ne part que sur verdict vide, avec des données RE-VÉRIFIÉES en direct au clic
+ * (une ligne `vide-candidat` est un candidat, jamais une preuve — le moteur a pu re-remplir
+ * le dossier entre-temps).
+ */
+
+import { Ascendance, VIOLATION_PROFIL_ABSENT } from './garde-fous';
+import { plagesContigues } from './etat';
+import { MIME_DOSSIER } from './explorateur';
+import { api, lireFichier, remonterAscendance, viderCachesDrive, chargerGardes, DRIVE, MARQUEUR_DROITS_FICHIER } from './google';
+
+/**
+ * Verdict PUR (testé) : ce dossier peut-il partir à la corbeille ? Liste des violations
+ * (vide = autorisé). Toutes les données viennent d'une re-lecture LIVE faite par l'appelant.
+ */
+export function verdictCorbeille(args: {
+  id: string;
+  nom: string;
+  mimeType: string;
+  nbEnfants: number; // 0 ou 1 (compte BORNÉ pageSize=1) — tous statuts confondus, corbeillés inclus
+  ascendance: Ascendance;
+  // Drive dit-il que Marc peut corbeiller CE dossier ? `capabilities.canTrash`, corroboré par
+  // `ownedByMe`. TROIS états, comme `ascendance` : `true` = oui ; `false` = non, VERDICT (le
+  // dossier appartient à un autre compte, ou Marc n'y a qu'un accès en lecture) ; `undefined` =
+  // Drive n'a rien répondu, PANNE (on ne conclut pas). Jamais de défaut permissif : un défaut de
+  // configuration n'est pas une décision (§9).
+  peutCorbeiller: boolean | undefined;
+  racinesProtegees?: string[];
+  idsStructurels?: string[];
+}): string[] {
+  const violations: string[] = [];
+  if (args.mimeType !== MIME_DOSSIER) violations.push('pas-un-dossier');
+  if (args.nbEnfants > 0) violations.push('non-vide');
+  // 🟠 audit sécurité C28-129 : la question se pose sur une LECTURE, avant toute mutation. Avant,
+  // le seul chemin qui apprenait « ce dossier n'est pas à moi » était l'échec du PATCH — un verdict
+  // décidé par une exception, hors de cette fonction, donc sans qu'aucune des gardes ci-dessous
+  // n'ait tourné. Ici l'ordre d'ADR-0014 est respecté : on constate, puis on agit.
+  if (args.peutCorbeiller === false) violations.push('non-possede');
+  else if (args.peutCorbeiller === undefined) violations.push('capacite-inconnue');
+  const proteges = args.racinesProtegees ?? [];
+  const structurels = args.idsStructurels ?? [];
+  // Sans repères (profil absent), la protection est INCONNUE : refus, jamais un défaut permissif.
+  if (proteges.length === 0 || structurels.length === 0) violations.push(VIOLATION_PROFIL_ABSENT);
+  // Identité D'ABORD (la racine protégée elle-même n'est pas dans sa propre ascendance), puis
+  // ascendance. Le refus est le MÊME dans les deux cas (échec fermé) — mais le MOTIF diffère, et
+  // c'est tout l'objet de cette séparation (revue C28-93, 🔴) : « je sais que c'est protégé » est un
+  // VERDICT, « je n'ai pas pu lire la chaîne » est une PANNE. Les deux arrivaient au lecteur sous
+  // la même chaîne `zone-protegee`, si bien qu'un 429 sur un GET d'ancêtre retirait définitivement
+  // une ligne de la liste (le moteur dédoublonne à vie sur `videcandidat|<id>` : jamais re-proposé).
+  // C'est la leçon §9 « un verdict pris sur la donnée RICHE ne se re-dérive jamais depuis sa forme
+  // APPAUVRIE » — d'où un motif explicite porté par celui qui SAIT.
+  if (proteges.includes(args.id) || args.ascendance.ids.some((id) => proteges.includes(id))) {
+    violations.push('zone-protegee');
+  } else if (!args.ascendance.complete) {
+    violations.push('ascendance-illisible'); // refus identique, motif distinct : jamais un verdict
+  }
+  if (structurels.includes(args.id)) {
+    violations.push('dossier-structurel'); // ID fixe du router (Logement/Véhicule) — jamais corbeillé
+  }
+  const nom = args.nom.trim();
+  if (nom.charAt(0) === '_' || /^\d{2} · /.test(nom)) {
+    violations.push('racine-systeme'); // _Doublons/_Médias/…, 00 · files, NN · domaines
+  }
+  return violations;
+}
+
+/**
+ * Verdict d'une tentative de corbeille qui N'A PAS abouti : que fait-on de la ligne ? PURE (testée).
+ *
+ * Pourquoi cette fonction existe (C28-93) : le lot s'arrêtait à la PREMIÈRE exception, et la liste
+ * de Marc commençait par un dossier nommé `02 · Finances` — refusé par son nom. Le bouton « tout
+ * corbeiller (124) » ne corbeillait donc RIEN, sans qu'on puisse le deviner. Un refus n'est pas une
+ * panne : c'est un VERDICT sur UNE ligne, et il doit retirer cette ligne de la liste en disant
+ * pourquoi, pas arrêter les 123 suivantes.
+ *
+ * Le statut rendu n'est jamais `vide-candidat` : la ligne quitte la liste dans tous les cas où on
+ * sait conclure. `null` = on ne sait pas (réseau, quota, session) ⇒ la ligne RESTE candidate et
+ * sera re-tentée : une incertitude ne se transforme pas en verdict.
+ */
+export function statutRefusCorbeille(message: string): string | null {
+  const brut = String(message);
+  if (brut.includes('Google API 404')) return 'vide-disparu';   // déjà supprimé/corbeillé ailleurs
+  if (brut.includes('non-vide')) return 'vide-repris';          // le classement l'a re-rempli
+  if (brut.includes('ascendance-illisible')) return null;        // PANNE de lecture : aucun verdict
+  if (brut.includes('zone-protegee') || brut.includes('racine-systeme') ||
+      brut.includes('dossier-structurel') || brut.includes('pas-un-dossier')) {
+    return 'vide-protégé';                                      // ne devait jamais être proposé
+  }
+  // Marc n'a pas les droits sur CET élément (403 `insufficientFilePermissions`) : il n'en est pas
+  // propriétaire, ou il n'y a qu'un accès en lecture. DÉFINITIF — aucun réessai ne le rendra
+  // propriétaire, et le traiter en panne a arrêté le lot de Marc au 5ᵉ dossier, 53 jamais tentés
+  // (15/09). Le marqueur vient de `api()`, qui l'a reconnu sur le corps ENTIER : cette ligne ne
+  // regarde JAMAIS le texte de Google, qui arrive tronqué avant `errors[].reason`.
+  // Même fait, deux sources : la garde de possession (constat sur lecture, chemin nominal) et le
+  // marqueur posé par `api()` si le PATCH échoue quand même (course : droits retirés entre la
+  // lecture et la mutation). `capacite-inconnue` n'est PAS ici : c'est une panne, la ligne reste.
+  if (brut.includes('non-possede')) return 'vide-droits-refusés';
+  if (brut.includes(MARQUEUR_DROITS_FICHIER)) return 'vide-droits-refusés';
+  return null;                                                  // transitoire : on re-tentera
+}
+
+/**
+ * Nombre de pannes CONSÉCUTIVES au-delà duquel le lot s'arrête. Sans ce coupe-circuit, un 429
+ * généralisé sur Drive faisait partir 124 lignes × ~4 appels × 4 tentatives ≈ 2 000 requêtes en
+ * rafale — sur un quota PARTAGÉ avec le moteur (revue sécurité C28-93). Au-delà de quelques échecs
+ * d'affilée, ce n'est plus une ligne qui est en cause mais la plateforme : on rend la main.
+ */
+export const CORBEILLE_MAX_PANNES = 5;
+
+/**
+ * Lignes traitées entre deux écritures Sheet (C28-119).
+ *
+ * POURQUOI — incident du 2026-09-14, rapporté par Marc au premier vrai clic sur « Tout corbeiller
+ * (112) » : « Lot interrompu : Google refuse les appels. 56 dossier(s) n'ont pas été tentés ». Le
+ * coupe-circuit avait bien fait son travail ; ce qui l'a déclenché, c'est nous. Le lot écrivait
+ * **UNE cellule par dossier**, or l'API Sheets plafonne à **60 écritures/minute PAR UTILISATEUR ET PAR PROJET**.
+ * À ~2 dossiers/seconde, on dépassait le plafond autour de la 56ᵉ ligne : exactement là où ça s'est
+ * arrêté. Le compte tombe juste : coupure après 5 pannes d'affilée à `i = 56` ⇒ le premier refus est
+ * tombé sur la **52ᵉ** écriture, et les réessais de `api()` ont brûlé le reste du seau.
+ * ⚠️ Une version antérieure de ce commentaire disait « quota PARTAGÉ avec le moteur ». C'est très
+ * probablement FAUX (revue C28-119) : le moteur écrit via `SpreadsheetApp` d'Apps Script — service
+ * interne, projet GCP caché — et non par l'API REST Sheets du client OAuth de l'app. Deux seaux
+ * indépendants [Probable]. Le seau de l'app suffit à lui seul à expliquer l'incident, et une cause
+ * mémorisée que les faits ne soutiennent pas refonde un raisonnement plus tard (§9). Les réessais de `api()` (1,5 s → 3 s → 6 s) ne sauvent pas d'un quota PAR
+ * MINUTE qu'on continue de saturer — ils l'entretiennent.
+ *
+ * Le remède n'est pas d'attendre, c'est d'écrire MOINS : les lignes `vide-candidat` sont posées en
+ * bloc par une même passe du moteur, donc contiguës dans l'onglet — `plagesContigues` les regroupe
+ * et un PUT couvre toute une plage, même avec des statuts DIFFÉRENTS. 112 écritures deviennent une
+ * poignée.
+ *
+ * Pourquoi 20 et pas « tout à la fin » : entre l'action Drive et l'écriture du statut, le dossier
+ * EST déjà à la corbeille alors que la Sheet l'ignore encore. Vider le tampon borne cette fenêtre —
+ * au pire 20 lignes à re-constater, jamais 112 (c'est le défaut vécu en C28-93 : « 124 dossiers
+ * réellement corbeillés et 124 statuts perdus »). L'ordre des écritures d'état reste celui du
+ * projet : l'action d'abord, la trace ensuite.
+ */
+export const CORBEILLE_LOT_ECRITURE = 20;
+
+/**
+ * Taille du PREMIER lot d'écriture — une sentinelle (C28-119).
+ *
+ * Grouper les écritures repousse mécaniquement le moment où l'on découvre que le canal Sheets ne
+ * répond plus : avec un tampon de 20, on aurait corbeillé 20 dossiers SANS pouvoir inscrire un seul
+ * statut avant de s'en apercevoir. La première écriture part donc tôt : si Sheets refuse, le
+ * coupe-circuit tombe après 5 dossiers, comme avant ce correctif. Le gain de quota est intact —
+ * 112 lignes font 7 écritures au lieu de 112.
+ */
+const CORBEILLE_PREMIERE_ECRITURE = CORBEILLE_MAX_PANNES;
+
+/**
+ * Écritures Sheet autorisées par minute glissante (C28-119, revue flotte).
+ *
+ * ⚠️ POURQUOI CE RÉGULATEUR EXISTE, ALORS QUE LA MISE EN LOTS SEMBLE SUFFIRE. Elle ne suffit que si
+ * les lignes `vide-candidat` sont CONTIGUËS — et c'est une hypothèse que ce code ne contrôle pas.
+ * Mesuré en revue sur la vraie fonction : 112 lignes contiguës font 7 PUT, par blocs de 3 elles en
+ * font 42, **une ligne sur deux en fait 112 — exactement comme avant le correctif**. Or QUATRE
+ * producteurs écrivent dans l'onglet Réorg (`ConsolidationExec.gs` ×2, `Reorg.gs`, `WebApp.gs`), la
+ * consolidation découvre les dossiers vides sur des dizaines de ticks budgétés, et
+ * `inscrireDossierVideCandidat_` ré-arme une ligne `vide-repris` SUR PLACE, à son ancien rang —
+ * un producteur délibéré de lignes isolées.
+ *
+ * Le régulateur borne LA CAUSE (le nombre d'écritures par minute) au lieu de parier sur la
+ * disposition : quelle que soit la forme de la liste, on ne sature plus. La mise en lots reste
+ * utile — elle rend l'attente rare — mais elle n'est plus ce sur quoi la correction repose.
+ * 50 et non 60 : le reste de l'app écrit aussi (validations, demandes d'analyse).
+ */
+export const CORBEILLE_ECRITURES_PAR_MIN = 50;
+
+/** Ce qu'un lot de corbeille a VRAIMENT fait — chaque état distinct, jamais additionnés. */
+export interface BilanLot {
+  corbeilles: number;  // dossier mis à la corbeille Drive (récupérable 30 j)
+  classes: number;     // refus CONNU : la ligne quitte la liste avec sa raison
+  aReessayer: number;  // refus INCONNU (réseau, quota, session) : la ligne reste candidate
+  sheetKo: number;     // action Drive faite, mais la Sheet n'a pas pris le statut
+  // ⚠️ Un lot ÉCOURTÉ rendait exactement le même bilan qu'un lot complet (revue C28-93) : sur une
+  // session morte à la 40ᵉ ligne, `{corbeilles:40, aReessayer:1}` — et rien, nulle part, ne disait
+  // que 83 lignes n'avaient jamais été tentées. « Une passe abandonnée doit se DIRE dans l'état ».
+  nonTentees: number;                        // lignes jamais tentées, parce que le lot a été coupé
+  interrompu: '' | 'session' | 'pannes';     // '' = le lot est allé au bout
+  // ⚠️ LE POURQUOI, pas seulement le QUE (C28-121). « Google refuse les appels (quota ou panne) »
+  // ne distingue pas un quota d'un refus de droits, d'une ascendance illisible ou d'une coupure
+  // réseau — et le message de l'exception, seul endroit où la différence est écrite, était JETÉ.
+  // Résultat vécu : deux diagnostics successifs faits à l'aveugle, dont un FAUX (j'ai conclu au
+  // quota Sheets ; Marc a ensuite rapporté « après 4 dossiers il s'arrête sans rien supprimer »,
+  // ce qui l'exclut — sous l'hypothèse quota-Sheets, les dossiers PARTENT et seuls les statuts
+  // échouent). §9 : « tout verdict indéterminé persiste son POURQUOI ».
+  derniereCause: string;                     // message de la DERNIÈRE panne non interprétable
+  // SOUS-ENSEMBLE de `classes` (jamais un bucket de plus : l'invariant de somme reste
+  // `corbeilles + classes + aReessayer + nonTentees === lignes.length`). Compté à part parce que
+  // c'est le seul verdict qui demande un GESTE à Marc — devenir propriétaire, ou renoncer — et
+  // qu'un total de « retirés de la liste » ne le dit pas.
+  refusDroits: number;
+}
+
+/**
+ * Applique la corbeille à UN LOT de lignes. Extraite de la vue pour être TESTABLE : c'est ici que
+ * vivait le défaut de C28-93 — la boucle était dans un `try` unique, donc la PREMIÈRE exception
+ * arrêtait tout, et le premier de la liste était justement un dossier refusé par son nom. 124
+ * propositions, zéro action. La revue a reproduit la régression sous CI verte : rien ne la gardait.
+ *
+ * Invariants que les tests figent :
+ *  - un refus n'arrête JAMAIS le lot (il classe SA ligne) ;
+ *  - `corbeilles + classes + aReessayer + nonTentees === lignes.length` — `sheetKo` compte À PART,
+ *    sinon une écriture Sheet refusée ferait compter deux fois une ligne déjà corbeillée ;
+ *  - `stop()` (session morte) coupe NET, et `CORBEILLE_MAX_PANNES` pannes d'affilée aussi : dans les
+ *    deux cas le bilan DIT qu'il a été écourté, et combien de lignes n'ont jamais été tentées.
+ * @param lignes  {id Drive, numéro de ligne Sheet}
+ * @param deps    I/O injectées (corbeille, écriture Sheet, UI) — aucune n'est appelée en test réel
+ */
+export async function corbeillerLot(
+  lignes: { id: string; ligneSheet: number }[],
+  deps: {
+    corbeiller: (id: string) => Promise<void>;
+    // ⚠️ ÉCRITURE PAR PLAGE, jamais par cellule (C28-119) : une cellule par dossier saturait le
+    // quota Sheets de 60 écritures/minute par utilisateur, partagé avec le moteur.
+    ecrireLot: (debut: number, valeurs: string[]) => Promise<void>;
+    surLigne?: (ligneSheet: number, statut: string) => void;
+    avancement?: (fait: number, total: number) => void;
+    stop?: () => boolean;
+    // Horloge et attente INJECTÉES : le régulateur de cadence ne se teste pas en attendant vraiment
+    // une minute. Défauts réels en production.
+    maintenant?: () => number;
+    attendre?: (ms: number) => Promise<void>;
+  },
+): Promise<BilanLot> {
+  const bilan: BilanLot = {
+    corbeilles: 0, classes: 0, aReessayer: 0, sheetKo: 0, nonTentees: 0, refusDroits: 0, interrompu: '',
+    derniereCause: '',
+  };
+  let pannesDaffilee = 0;
+  // 404 en tête de lot (C28-131) : rien n'est encore inscrit pour ces lignes, voir `trancher404`.
+  const en404: { ligneSheet: number }[] = [];
+  let tete404 = true; // vrai tant que le lot n'a rien vu d'autre qu'un 404
+  // Statuts en attente d'écriture : l'action Drive est DÉJÀ faite pour chacun.
+  let tampon: { ligneSheet: number; statut: string }[] = [];
+  let premiereEcritureFaite = false;
+  const maintenant = deps.maintenant ?? (() => Date.now());
+  const attendre = deps.attendre ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const horodatages: number[] = []; // instants des PUT émis, fenêtre glissante d'une minute
+
+  /** Attend s'il le faut pour ne jamais dépasser CORBEILLE_ECRITURES_PAR_MIN sur 60 s glissantes. */
+  async function cadencer(): Promise<void> {
+    const purger = (t: number) => {
+      while (horodatages.length && t - horodatages[0] >= 60_000) horodatages.shift();
+    };
+    purger(maintenant());
+    if (horodatages.length >= CORBEILLE_ECRITURES_PAR_MIN) {
+      // On attend que la plus ANCIENNE écriture sorte de la fenêtre, plus une marge : c'est le
+      // minimum qui libère une place, jamais une pause forfaitaire.
+      await attendre(60_000 - (maintenant() - horodatages[0]) + 100);
+      purger(maintenant());
+    }
+    horodatages.push(maintenant());
+  }
+
+  /** Écrit le tampon en PLAGES contiguës (un PUT par plage), puis le vide. */
+  async function viderTampon(): Promise<void> {
+    if (tampon.length === 0) return;
+    const parLigne = new Map(tampon.map((x) => [x.ligneSheet, x.statut]));
+    const plages = plagesContigues(tampon.map((x) => x.ligneSheet));
+    tampon = []; // vidé d'ABORD : une exception ne doit jamais faire ré-écrire deux fois la plage
+    for (const { debut, fin } of plages) {
+      const valeurs: string[] = [];
+      for (let n = debut; n <= fin; n++) valeurs.push(parLigne.get(n) as string);
+      try {
+        await cadencer();
+        await deps.ecrireLot(debut, valeurs);
+        // L'écran ne suit QUE ce que la Sheet a pris : sinon Marc voit « corbeillé » sur une ligne
+        // que le prochain rechargement lui rendra `vide-candidat`, sans qu'il comprenne pourquoi.
+        for (let n = debut; n <= fin; n++) {
+          try { deps.surLigne?.(n, parLigne.get(n) as string); } catch { /* affichage seulement */ }
+        }
+        pannesDaffilee = 0; // une plage écrite prouve que le canal Sheets répond
+      } catch (eSheet) {
+        bilan.derniereCause = String(eSheet); // même exigence côté Sheets (C28-121)
+        // Les dossiers SONT traités ; seule la Sheet les ignore. Compté à part (revue C28-93).
+        // ⚠️ Le coupe-circuit compte les LIGNES, pas les requêtes : ce qu'il protège, c'est le
+        // nombre de dossiers corbeillés dont on n'a PAS pu inscrire l'état. Compter « 1 par plage
+        // refusée » laisserait continuer à l'aveugle — 100 dossiers pour 5 requêtes.
+        const n = fin - debut + 1;
+        bilan.sheetKo += n;
+        pannesDaffilee += n;
+      }
+    }
+  }
+
+  /**
+   * Les 404 du début du lot ont un autre sens que « disparu » dès qu'il n'y a QUE ça : avec le mauvais
+   * compte Google, TOUT répond 404, et chaque ligne devenait `vide-disparu` pour de bon, sans alerte
+   * (C28-131). On ne les inscrit donc pas tout de suite : si une ligne répond autre chose avant le
+   * seuil, c'étaient de vrais dossiers disparus et on les classe ; si le seuil est atteint sans
+   * aucune autre réponse, c'est une panne et elles restent candidates.
+   */
+  function trancher404(): void {
+    for (const x of en404) {
+      tampon.push({ ligneSheet: x.ligneSheet, statut: 'vide-disparu' });
+      bilan.classes++;
+    }
+    en404.length = 0;
+  }
+
+  for (let i = 0; i < lignes.length; i++) {
+    if (!bilan.interrompu) {
+      if (deps.stop?.()) bilan.interrompu = 'session';
+      else if (pannesDaffilee >= CORBEILLE_MAX_PANNES) bilan.interrompu = 'pannes';
+    }
+    if (bilan.interrompu) {
+      bilan.aReessayer += en404.length; // 404 en attente de verdict : aucune n'est inscrite, elles restent candidates
+      en404.length = 0;
+      bilan.nonTentees = lignes.length - i;
+      break;
+    }
+    const l = lignes[i];
+    let statut = 'corbeillé';
+    try {
+      await deps.corbeiller(l.id);
+      tete404 = false; trancher404();
+      bilan.corbeilles++;
+      // ⚠️ Le canal Drive vient de RÉPONDRE : la rafale est cassée (le coupe-circuit vise la
+      // RAFALE, jamais le cumul). Depuis que les statuts partent par plages, attendre l'écriture
+      // pour remettre à zéro faisait tomber le lot sur des pannes ALTERNÉES — une ligne sur deux en
+      // échec réseau atteignait 5 avant la première écriture, alors que Google répondait très bien.
+      // Le canal Sheets, lui, a son propre signal : un tampon refusé ajoute ses LIGNES d'un coup,
+      // ce qui dépasse le seuil immédiatement.
+      pannesDaffilee = 0;
+    } catch (e) {
+      const verdict = statutRefusCorbeille(String(e));
+      if (!verdict) {
+        tete404 = false; trancher404();
+        bilan.aReessayer++;
+        pannesDaffilee++;             // c'est la PLATEFORME qui flanche, pas la ligne
+        bilan.derniereCause = String(e); // …et on GARDE de quoi le dire (C28-121)
+        try { deps.avancement?.(i + 1, lignes.length); } catch { /* affichage seulement */ }
+        continue;
+      }
+      if (verdict === 'vide-disparu' && tete404) {
+        // Que des 404 depuis la 1re ligne : pas encore un verdict (voir `trancher404`).
+        en404.push({ ligneSheet: l.ligneSheet });
+        pannesDaffilee = 0;
+        if (en404.length >= CORBEILLE_MAX_PANNES) {
+          bilan.aReessayer += en404.length; // elles restent candidates : rien n'est inscrit
+          en404.length = 0;
+          bilan.interrompu = 'pannes';
+          bilan.derniereCause = '404 sur tout : mauvais compte ?';
+        }
+        try { deps.avancement?.(i + 1, lignes.length); } catch { /* affichage seulement */ }
+        continue;
+      }
+      tete404 = false; trancher404();
+      statut = verdict;
+      bilan.classes++;                // un VERDICT prouve que le canal Drive répond
+      if (verdict === 'vide-droits-refusés') bilan.refusDroits++;
+      // …donc la RAFALE est cassée, exactement comme après une corbeille réussie. Le coupe-circuit
+      // vise la rafale, jamais le cumul (c'est écrit deux blocs plus haut) — sans cette remise à
+      // zéro, quelques blips réseau épars finissent par couper un lot que Google sert très bien,
+      // et le cas devient la norme maintenant que « pas propriétaire » rend un verdict par ligne.
+      pannesDaffilee = 0;
+    }
+    tampon.push({ ligneSheet: l.ligneSheet, statut });
+    // Première écriture SENTINELLE (petite) puis lots pleins : on prouve que Sheets répond avant
+    // d'engager 20 dossiers sur sa parole.
+    const seuil = premiereEcritureFaite ? CORBEILLE_LOT_ECRITURE : CORBEILLE_PREMIERE_ECRITURE;
+    if (tampon.length >= seuil) { premiereEcritureFaite = true; await viderTampon(); }
+    try { deps.avancement?.(i + 1, lignes.length); } catch { /* affichage seulement */ }
+  }
+  // ⚠️ VIDÉ MÊME SUR INTERRUPTION : les dossiers déjà corbeillés avant la coupure doivent laisser
+  // leur trace, sinon le lot suivant les re-présente et Marc re-clique sur du travail déjà fait.
+  // (Une version antérieure ajoutait « et la re-tentative tombe sur un 404 » : FAUX, vérifié en
+  // revue — l'API sert les fichiers corbeillés, le re-clic réussit en silence. Le travail refait
+  // suffit comme raison ; une justification fausse dans un commentaire durable se recopie.)
+  trancher404(); // lot fini avec moins de CORBEILLE_MAX_PANNES 404 en tête : de vrais disparus
+  await viderTampon();
+  return bilan;
+}
+
+/**
+ * Compte STRICT des enfants directs : la requête ne filtre PAS `trashed` — un dossier dont il
+ * ne reste que des éléments corbeillés n'est PAS vide (les corbeiller avec serait une décision
+ * que personne n'a validée).
+ */
+async function compterEnfantsStrict(folderId: string): Promise<number> {
+  const sain = folderId.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const params = new URLSearchParams({
+    q: `'${sain}' in parents`,
+    fields: 'files(id)',
+    pageSize: '1',
+  });
+  const r = await api<{ files?: { id: string }[] }>(`${DRIVE}?${params.toString()}`);
+  return (r.files ?? []).length;
+}
+
+/**
+ * Met à la corbeille un dossier VIDE (ADR-0014) après re-vérification complète au clic.
+ * @throws si le verdict n'est pas vide (l'appelant affiche les violations).
+ */
+export async function corbeillerDossierVide(folderId: string): Promise<void> {
+  if (!folderId || !folderId.trim()) throw new Error('Corbeille refusée (ADR-0014) : id manquant');
+  const [meta, nbEnfants, ascendance, gardes] = await Promise.all([
+    lireFichier(folderId),
+    compterEnfantsStrict(folderId),
+    remonterAscendance(folderId),
+    chargerGardes(),
+  ]).catch((e) => {
+    // 🟠 audit sécurité C28-129 : le marqueur ne vaut QUE pour la mutation. Rencontré pendant la
+    // LECTURE, il ne prouve rien sur le dossier — il dit qu'on n'a pas pu conclure, et « je n'a
+    // pas pu lire » est une PANNE, pas un VERDICT (le 🔴 de C28-93, sur ce même chemin). On le
+    // neutralise donc ici, en gardant le texte lisible pour le diagnostic.
+    throw new Error(String(e).split(MARQUEUR_DROITS_FICHIER).join('lecture-403-droits'));
+  });
+  const violations = verdictCorbeille({
+    id: folderId,
+    nom: meta.name,
+    mimeType: meta.mimeType ?? '',
+    nbEnfants,
+    ascendance,
+    // `canTrash` fait foi (il couvre aussi un accès en lecture sur un dossier partagé) ;
+    // `ownedByMe === false` le corrobore. Si Drive n'a rendu NI l'un NI l'autre, on reste à
+    // `undefined` et le verdict refuse de conclure.
+    peutCorbeiller: meta.capabilities?.canTrash ?? (meta.ownedByMe === false ? false : undefined),
+    racinesProtegees: gardes.racinesProtegees,
+    idsStructurels: gardes.idsStructurels,
+  });
+  if (violations.length > 0) {
+    throw new Error(`Corbeille refusée (ADR-0014) : ${violations.join(', ')}`);
+  }
+  // Seul le LISTAGE du dossier parent devient périmé : on ne jette QUE les caches Drive. La purge
+  // totale jetait aussi le mémo d'ascendance, donc chaque ligne d'un lot de 124 re-parcourait toute
+  // sa chaîne depuis zéro alors que ces dossiers partagent une poignée de racines (revue C28-93).
+  viderCachesDrive();
+  await api(`${DRIVE}/${folderId}?fields=id`, {
+    method: 'PATCH',
+    body: JSON.stringify({ trashed: true }), // corbeille Drive — récupérable 30 j, jamais définitif
+  });
+}

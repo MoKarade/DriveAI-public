@@ -1,0 +1,1307 @@
+/**
+ * Reorg.gs — réorg IA du Drive (chantier #21, C21-04) : phase PROPOSITION seulement.
+ *
+ * L'app dépose une demande dans l'onglet `Réorg` (ligne Type `demande`, Statut `analyse
+ * demandée`, Détail = portée : 'tout' ou un ID de dossier). Au tick (étape SECONDAIRE,
+ * enveloppée, budget-gatée, en dernier), le moteur :
+ *  1. inventorie l'arborescence des DOSSIERS (métadonnées seules : chemins, comptes, quelques
+ *     noms de fichiers en exemple — jamais un contenu, ADR-0007). Zone protégée exclue par
+ *     REMONTÉE DE LA CHAÎNE D'ANCÊTRES dès la collecte (multi-parents inclus, échec fermé —
+ *     CLAUDE.md §2.1b) ; racines système (`_…`, 00 · À trier, 00 · À vérifier) exclues aussi ;
+ *  2. demande UN plan à Haiku (JSON strict) — les dossiers y sont référencés par NUMÉRO
+ *     (#1..#N), jamais par ID : un index inventé rejette l'action, un ID halluciné serait
+ *     dangereux ;
+ *  3. écrit les lignes `proposé` (une par action) en UN append, puis passe la demande à `proposé`.
+ *
+ * AUCUNE mutation Drive ici (l'inventaire est lecture seule — les domaines AUTO absents sont
+ * sautés, jamais créés). L'application (déplacements seuls, re-vérif zone protégée par mutation,
+ * re-pointage de `Entités.Dossier ID` lors d'une fusion de dossier d'entité) arrive en C21-06
+ * après validation de Marc dans l'app (C21-05). La corbeille des dossiers vides validée =
+ * C21-07 (ADR-0014). Aucune ligne de l'onglet n'est jamais supprimée.
+ *
+ * Reprise/idempotence : si les lignes `reorg|<tag>|…` existent déjà (coupure entre l'append et
+ * le statut), le tick suivant pose seulement le statut — jamais un second inventaire/LLM.
+ * Convergence : les essais (3 max) ne comptent que les VRAIS échecs (LLM muet/illisible) —
+ * interruption budget et panne de compte RENDENT l'essai ; portée protégée =
+ * `échec` immédiat (déterministe, retenter ne changerait rien).
+ */
+
+/**
+ * Statuts d'une ligne d'action (machine à états — cf. BACKLOG #21).
+ * ⚠️ Cette liste est DOCUMENTAIRE : aucun code du moteur ne la consulte pour valider un statut, et
+ * il ne faut pas le lui faire faire — `chargerVidesConnus_` est une garde par CAPACITÉ (« tout sauf
+ * `vide-repris` est définitif »), qui reste juste quand un statut s'ajoute. Ce qui empêche l'app et
+ * le moteur de diverger est un TRIPWIRE côté app (`app/test/corbeille.test.ts`) : tout statut
+ * `vide-…` rendu par `statutRefusCorbeille` doit figurer ici.
+ */
+var REORG_STATUTS = ['proposé', 'validé', 'écarté', 'appliqué', 'refusé (zone protégée)',
+  'refusé (structure)', 'échec', 'vide-candidat', 'corbeillé',
+  // Écrits par l'APP au clic (C28-93) : un refus classe SA ligne au lieu d'arrêter le lot.
+  // `vide-repris` est le SEUL de la famille qui soit RÉVISABLE (cf. `chargerVidesConnus_`).
+  // `vide-droits-refusés` (C28-129) : Google a refusé la corbeille parce que Marc n'est pas
+  // propriétaire du dossier. DÉFINITIF comme `vide-disparu`/`vide-protégé` — jamais révisable.
+  'vide-disparu', 'vide-repris', 'vide-protégé', 'vide-droits-refusés'];
+
+/**
+ * Étape de tick unique du chantier Réorg : UNE lecture de l'onglet, puis DRAINER (appliquer les
+ * actions VALIDÉES, C21-06) avant d'ALIMENTER (proposer un nouveau plan, C21-04). Tant que des
+ * actions validées restent à appliquer, aucune nouvelle analyse — un plan se termine avant que
+ * le suivant naisse (sinon plans contradictoires sur un Drive mouvant).
+ * @param {function(): boolean} estBudgetDepasse
+ */
+function etapeReorg_(estBudgetDepasse) {
+  var f = feuille_('Réorg');
+  var lignes = f.getDataRange().getValues(); // en-têtes incluses — onglet petit (demandes + actions)
+  // One-shot versionné : nettoyer le STOCK de propositions de corbeille avant tout le reste — un
+  // clic de Marc peut tomber à tout moment (C28-93). ENVELOPPÉ : une étape secondaire ne bloque
+  // jamais l'application des actions validées.
+  try { filtrerVidesCandidatsRecreables_(f, lignes, estBudgetDepasse); }
+  catch (e) { journalErreur_('Reorg', 'Filtre des propositions de corbeille : ' + e); }
+  var reste = appliquerReorgValidee_(f, lignes, estBudgetDepasse);
+  if (!reste && !estBudgetDepasse()) appliquerReorgIA_(f, lignes, estBudgetDepasse);
+}
+
+/* ================= C21-06 : APPLICATION des actions validées ================= */
+
+/**
+ * Applique les actions au statut `validé` : déplacements/renommages/créations de DOSSIERS —
+ * JAMAIS de suppression. Par ID (jamais par chemin), re-vérification zone protégée AVANT CHAQUE
+ * mutation (ascendance stricte, échec fermé), racines de domaine et dossiers système intouchables
+ * (défense en profondeur — le parseur les a déjà bloqués). Ordre coupure-sûr : mutation Drive
+ * PUIS statut (un rejeu re-tente, moveTo/renommage déjà faits = no-op).
+ *
+ * Une fusion COLLECTE d'abord (lecture seule, itérateur jamais invalidé — patron Maintenance)
+ * puis déplace PAR ID, par lots bornés (REORG_FUSION_LOT/run), et ne conclut que sur une passe
+ * BLANCHE (plus rien à déplacer) ; les éléments protégés — par ASCENDANCE étrangère (multi-
+ * parents sous 04) ou par IDENTITÉ (un enfant qui EST une racine protégée/système) — sont
+ * LAISSÉS EN PLACE, jamais détachés ; s'il n'en reste que ça, l'action finit `refusé (zone
+ * protégée)`. Une fusion terminée re-pointe `Entités.Dossier ID` et inscrit la ligne
+ * `vide-candidat` (dédupliquée) AVANT le statut `appliqué` (« c'est fini » se pose en DERNIER —
+ * un rejeu refait des no-ops, jamais l'inverse). La corbeille = C21-07 (ADR-0014), jamais ici.
+ * Une exception laisse UNE seconde chance (marqueur suffixé au détail), puis `échec` — jamais
+ * une boucle à vie ; le marqueur est effacé dès que l'action progresse.
+ * @return {boolean} vrai s'il reste des actions validées à traiter (analyse différée)
+ */
+function appliquerReorgValidee_(f, lignes, estBudgetDepasse) {
+  var validees = actionsValidees_(lignes);
+  if (validees.length === 0) return false;
+  var proteges = ensembleDomainesProteges_();
+  var intouchables = ensembleIntouchables_();
+  var horodate = new Date().toISOString();
+  var resteEnValide = false;
+  var videsValidees; // référentiel d'entités, résolu au plus une fois par run — SENTINELLE
+  // `undefined` : `null` est une VALEUR de retour légitime (référentiel illisible). Tester `!x`
+  // rappellerait la lecture à chaque fusion du run (revue C28-93).
+
+  for (var i = 0; i < validees.length; i++) {
+    if (estBudgetDepasse()) return true; // repris au tick suivant
+    var a = validees[i];
+    var detailPropre = a.detail.replace(/\s*\[tentative 1[\s\S]*$/, '');
+    var resultat;
+    try {
+      resultat = appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse);
+    } catch (e) {
+      // Une 2e chance, puis échec inscrit — jamais un poison retenté à vie. Le marqueur est
+      // SUFFIXÉ (la raison LLM reste lisible dans l'app) et effacé si l'action progresse.
+      if (a.detail.indexOf('[tentative 1') !== -1) {
+        solderAction_(f, a.rang, 'échec', detailPropre + ' [tentative 2 : ' + String(e).slice(0, 120) + ']');
+      } else {
+        solderAction_(f, a.rang, 'validé', detailPropre + ' [tentative 1 : ' + String(e).slice(0, 120) + ']');
+        resteEnValide = true;
+      }
+      journalErreur_('Reorg', 'Action ' + a.cle + ' : ' + e);
+      continue;
+    }
+    if (resultat.enCours) {
+      // Fusion pas finie (lot/budget). Si elle a PROGRESSÉ, l'éventuel marqueur d'échec passé
+      // est rendu (leçon : les essais se comptent par échec réel, jamais par passe).
+      if (resultat.aProgresse && a.detail.indexOf('[tentative 1') !== -1) {
+        solderAction_(f, a.rang, 'validé', detailPropre);
+      }
+      return true;
+    }
+    // Effets AVANT le statut « c'est fini » (une coupure rejoue des no-ops, ne perd jamais le
+    // re-pointage). L'échec de repointerEntites_ REMONTE au catch → 2e chance standard.
+    if (resultat.statut === 'appliqué' && a.type === 'fusionner') {
+      try {
+        repointerEntites_(a.source, a.cible);
+        var cleVide = 'videcandidat|' + a.source;
+        var dejaInscrit = false;
+        for (var v = 1; v < lignes.length; v++) {
+          if (String(lignes[v][0]) === cleVide) { dejaInscrit = true; break; }
+        }
+        // SECOND producteur de `videcandidat|`, découvert en revue C28-93 (🟠) : il ne passait pas
+        // par `detecterDossierVide_`, donc pas par la garde par capacité — l'ADR affirmait pourtant
+        // « ils ne peuvent plus contenir un nœud de la structure ». Un plan IA qui fusionne
+        // `Projets` dans un voisin vidait un nœud de la table, le proposait à la corbeille, et la
+        // table le recréait au premier document : le ping-pong de la leçon §9.
+        // NUANCE (réserve déjà codée chez le voisin `estAncreStructurelleFusion_`) : pour une fusion
+        // de DOUBLONS DE MÊME NOM, proposer la source drainée reste légitime — le canonique existe
+        // toujours et le find-or-create le retrouve. D'où la conjonction avec `nomSource !== nomCible`.
+        if (videsValidees === undefined) videsValidees = entitesValideesOuNull_();
+        if (!proposerSourceFusion_(a.cheminActuel, a.cheminPropose, videsValidees)) dejaInscrit = true;
+        if (!dejaInscrit) {
+          f.appendRow([cleVide, 'dossier-vide', a.source, a.cheminActuel, '',
+            'vide-candidat', 'devenu vide par fusion', horodate]);
+        }
+      } catch (e2) {
+        if (a.detail.indexOf('[tentative 1') !== -1) {
+          solderAction_(f, a.rang, 'échec', detailPropre + ' [tentative 2 : ' + String(e2).slice(0, 120) + ']');
+        } else {
+          solderAction_(f, a.rang, 'validé', detailPropre + ' [tentative 1 : ' + String(e2).slice(0, 120) + ']');
+          resteEnValide = true;
+        }
+        journalErreur_('Reorg', 'Effets de fin de fusion ' + a.cle + ' : ' + e2);
+        continue;
+      }
+    }
+    solderAction_(f, a.rang, resultat.statut,
+      resultat.detail !== undefined ? resultat.detail : detailPropre);
+    journalInfo_('Reorg', 'Action ' + a.type + ' ' + a.cle + ' → ' + resultat.statut + '.');
+  }
+  return resteEnValide;
+}
+
+/** Statut (col 6) + détail (col 7) d'une ligne d'ACTION. */
+function solderAction_(f, rang, statut, detail) {
+  f.getRange(rang, 6).setValue(statut);
+  if (detail !== undefined) f.getRange(rang, 7).setValue(detail);
+}
+
+/**
+ * Les actions `validé` de l'onglet, prêtes à appliquer. PURE (testée).
+ * @return {Array<{rang, cle, type, source, cible, cheminActuel, cheminPropose, detail}>}
+ */
+function actionsValidees_(lignes) {
+  var res = [];
+  for (var i = 1; i < lignes.length; i++) {
+    var type = String(lignes[i][1]);
+    if (String(lignes[i][5]) !== 'validé') continue;
+    if (type !== 'deplacer' && type !== 'fusionner' && type !== 'creer' && type !== 'renommer' &&
+        type !== 'deplacer-fichier') continue;
+    var ids = partiesId_(String(lignes[i][2]));
+    res.push({
+      rang: i + 1,
+      cle: String(lignes[i][0]),
+      type: type,
+      source: ids.source,
+      cible: ids.cible,
+      cheminActuel: String(lignes[i][3] || ''),
+      cheminPropose: String(lignes[i][4] || ''),
+      detail: String(lignes[i][6] || ''),
+    });
+  }
+  return res;
+}
+
+/** Colonne ID « source→cible » → {source, cible} (l'un ou l'autre peut être vide). PURE (testée). */
+function partiesId_(idCol) {
+  var parts = String(idCol).split('→');
+  return { source: (parts[0] || '').trim(), cible: (parts[1] || '').trim() };
+}
+
+/**
+ * Après une fusion APPLIQUÉE, faut-il proposer la source drainée à la corbeille ? PURE (testée).
+ *
+ * Découvert en revue C28-93 (🟠) : ce chemin est un SECOND producteur de lignes `videcandidat|`,
+ * et il ne passait pas par `detecterDossierVide_` — donc pas par la garde par capacité, alors que
+ * l'ADR affirmait « ils ne peuvent plus contenir un nœud de la structure ». Un plan IA qui fusionne
+ * `Projets` dans un voisin vidait un nœud de la table, le proposait à la corbeille, et la table le
+ * recréait au premier document : le ping-pong de la leçon §9.
+ *
+ * ⚠️ EXACTEMENT la même règle que `detecterDossierVide_` — pas une variante. Une première écriture
+ * exemptait les fusions de DOUBLONS DE MÊME NOM (« le canonique existe toujours »), en copiant la
+ * réserve du voisin `estAncreStructurelleFusion_`. La revue a mesuré ce que ça donnait : `Alphatek`
+ * REFUSÉ par un producteur et PROPOSÉ par l'autre dès que la cible porte le même nom, puis défait
+ * par le filtre du stock au bump suivant. Trois règles, deux verdicts — le corollaire §9 « mutualiser
+ * UNE dimension d'une règle ne couvre pas les autres ». Et la justification ne tenait que pour un
+ * dossier d'ENTITÉ (où `repointerEntites_` vient de re-pointer le `Dossier ID`), pas pour un nœud de
+ * table à profondeur ≥ 2, que la table recrée PAR NOM au premier document : le ping-pong même que
+ * cette garde doit fermer. Ce qu'on perd en alignant : un doublon d'entité vidé n'est plus proposé,
+ * donc un dossier vide subsiste. Un dossier vide qui reste coûte moins qu'un dossier utile corbeillé.
+ * @param {string} cheminActuel   chemin de la SOURCE (son dernier segment est son nom)
+ * @param {string} cheminPropose  chemin de la CIBLE — gardé au contrat, non lu (voir ci-dessus)
+ * @param {Object|null} validees  référentiel des entités validées, `null` s'il est illisible
+ * @return {boolean}
+ */
+function proposerSourceFusion_(cheminActuel, cheminPropose, validees) {
+  return !estNoeudRecreableDepuisConstat_(cheminActuel, validees);
+}
+
+/**
+ * Le NOM du dossier depuis la colonne « Chemin actuel » d'un constat. PURE (testée).
+ *
+ * ⚠️ POUR L'AFFICHAGE SEULEMENT. La DÉCISION passe par `estNoeudRecreableDepuisConstat_`, qui essaie
+ * les DEUX lectures — voir pourquoi là-bas. Ce discriminant-ci (« un chemin commence par une racine
+ * de domaine ») est vrai des constats produits par `cheminPourConstat_`, faux des chemins d'un
+ * INVENTAIRE SCOPÉ (`inventaireDossiers_` empile le dossier de portée avec `chemin: null`, donc ses
+ * enfants sont `Alphatek/Projets`) : s'en servir pour décider a rouvert la garde sur `Projets` et
+ * `Candidatures`, les noms mêmes de la plainte de Marc (régression attrapée en 4ᵉ revue).
+ * @param {string} valeur
+ * @return {string} le libellé à MONTRER, jamais celui sur lequel trancher
+ */
+function nomDepuisConstat_(valeur) {
+  var brut = String(valeur == null ? '' : valeur).trim();
+  if (!brut) return '';
+  return /^\d{2} · /.test(brut) ? dernierSegment_(brut) : brut;
+}
+
+/**
+ * La TAXONOMIE sait-elle recréer le dossier que désigne cette colonne « Chemin actuel » ? PURE.
+ *
+ * La colonne porte trois formats : un nom NU (lignes d'avant C28-93), un chemin complet ancré sur la
+ * racine de domaine (`cheminPourConstat_`), et un chemin d'INVENTAIRE SCOPÉ ancré sur le dossier que
+ * Marc analysait (`Alphatek/Projets`). Aucun discriminant ne les sépare de façon fiable — et se
+ * tromper coûte cher DANS LES DEUX SENS : découper toujours retire à tort un dossier réellement
+ * nommé « Impôts/Archives », ne jamais découper laisse passer `Alphatek/Projets`.
+ *
+ * On essaie donc les DEUX lectures et on refuse si l'UNE d'elles est un nœud. Le prédicat qui
+ * déclenche l'action quasi-irréversible est STRICT et, dans le doute, REFUSE (§9) : un refus coûte
+ * un dossier vide qui subsiste, un faux positif coûte un dossier utile corbeillé. Conséquence
+ * assumée : un dossier réellement nommé « Impôts/Archives » n'est plus proposé.
+ * @param {string} valeur   la colonne « Chemin actuel »
+ * @param {Object|null} validees  référentiel des entités validées (`null` = illisible ⇒ abstention)
+ * @return {boolean}
+ */
+function estNoeudRecreableDepuisConstat_(valeur, validees) {
+  var brut = String(valeur == null ? '' : valeur).trim();
+  if (!brut) return true;                                          // sans nom : échec fermé
+  var dernier = dernierSegment_(brut);
+  // Un chemin ANCRÉ sur une racine de domaine ne se lit QUE par son dernier segment : la chaîne
+  // entière commence par `NN · `, que `estNoeudRecreable_` reconnaît comme un NOM de racine de
+  // domaine — la lire en bloc protégerait tout ce qui est sous un domaine, donc tout.
+  if (dernier !== brut && /^\d{2} · /.test(brut)) return estNoeudRecreablePrudent_(dernier, validees);
+  if (estNoeudRecreablePrudent_(brut, validees)) return true;
+  return estNoeudRecreablePrudent_(dernier, validees);
+}
+
+/**
+ * La marque que le FILTRE inscrit dans le détail : son tag de règles ET le statut qu'il a écrit.
+ * PURE (testée).
+ *
+ * Pourquoi le STATUT y figure (4ᵉ revue) : l'app n'écrit que la colonne F (le statut), jamais la G
+ * (le détail). Une marque qui ne portait que le tag prouvait donc seulement « le filtre a touché
+ * cette ligne un jour », pas « ce `vide-protégé`-ci vient du filtre » — et une ligne que MARC avait
+ * fait refuser par Drive (zone protégée) redevenait `vide-candidat` au bump suivant, réapparaissait
+ * dans sa liste, échouait encore, à chaque bump. En comparant le statut inscrit au statut RELU, toute
+ * écriture de l'app fait diverger les deux et rend son verdict définitif, comme promis.
+ * @param {string} detail
+ * @return {{tag: string, statut: string}|null}
+ */
+function marqueFiltreVides_(detail) {
+  var m = /\[filtre-vides ([^\]\s]+) → ([^\]]+)\]/.exec(String(detail == null ? '' : detail));
+  return m ? { tag: m[1], statut: m[2].trim() } : null;
+}
+
+/**
+ * Marque écrite dans le DÉTAIL d'une ligne retirée par le filtre du stock, suivie du tag de règles.
+ * Elle distingue un `vide-protégé` posé par le FILTRE (verdict révisable, sous une version de
+ * règles) d'un `vide-protégé` posé par l'APP (zone protégée, racine système : définitif par nature).
+ * Sans elle, le moteur ne pouvait plus les distinguer — et un bump ne ramenait jamais une ligne
+ * retirée, alors que retirer un nœud de la table (C28-89 l'a déjà fait) doit la ramener.
+ */
+var MARQUE_FILTRE_VIDES = '[filtre-vides ';
+
+/**
+ * Version des RÈGLES de la garde par capacité. Bumper cette valeur re-filtre tout le stock de
+ * propositions `vide-candidat` sous les règles courantes — c'est la leçon §9 « quand la décision
+ * dépend d'une TABLE DE RÈGLES du code, la VERSION de cette table fait partie de l'état » : sans
+ * elle, ajouter un nœud à la taxonomie n'aurait aucun effet sur ce qui est déjà proposé.
+ */
+var VIDES_FILTRE_TAG = 'c2893-1';
+
+/**
+ * PURE — parmi les lignes de l'onglet `Réorg`, les propositions à la corbeille qui portent un nom
+ * que la TAXONOMIE sait recréer. Rend [{rang, nom}] (rang 1-based, en-tête comprise).
+ *
+ * Le verdict du filtre est RÉVISABLE, dans les DEUX sens (revue C28-93) : une ligne retirée porte
+ * dans son détail la MARQUE du filtre et le tag de règles sous lequel elle l'a été. Un bump du tag
+ * la re-juge — et si la taxonomie ne connaît plus ce nœud (C28-89 a réellement RETIRÉ
+ * `Modèles & formulaires` de la table), elle redevient `vide-candidat`. Sans ça, l'affinage ne
+ * marchait que dans le sens restrictif, et un refus keyé sur « je n'ai pas su faire » restait figé
+ * à vie (§9). Les `vide-protégé` posés par l'APP (zone protégée, racine système) ne portent PAS la
+ * marque : ils sont définitifs par nature et ne sont jamais relus.
+ * @param {Array<Array>} lignes  l'onglet entier, en-tête comprise
+ * @param {Object} validees  référentiel des entités validées (déjà vérifié NON vide par l'appelant)
+ * @param {string} tag  version COURANTE des règles (`VIDES_FILTRE_TAG`)
+ * @return {Array<{rang:number, nom:string, statut:string}>} `statut` = ce qu'il faut écrire
+ */
+function videsCandidatsRecreables_(lignes, validees, tag) {
+  var out = [];
+  for (var i = 1; i < lignes.length; i++) {
+    var l = lignes[i] || [];
+    if (String(l[1]) !== 'dossier-vide') continue;
+    var statut = String(l[5]);
+    var detail = String(l[6] == null ? '' : l[6]);
+    var marque = marqueFiltreVides_(detail);
+    var duFiltre = !!marque && marque.statut === statut; // l'app n'écrit que F : le statut fait foi
+    if (statut === 'vide-protégé' && !duFiltre) continue;                 // verdict de l'APP : définitif
+    if (statut === 'vide-protégé' && marque.tag === tag) continue;        // déjà jugé sous ces règles
+    if (statut !== 'vide-candidat' && statut !== 'vide-protégé') continue; // disparu, repris, corbeillé
+    var nom = nomDepuisConstat_(l[3]);
+    if (!nom) continue;
+    var recreable = estNoeudRecreableDepuisConstat_(l[3], validees);
+    if (statut === 'vide-candidat' && !recreable) continue;                // rien à changer
+    out.push({ rang: i + 1, nom: nom, statut: recreable ? 'vide-protégé' : 'vide-candidat' });
+  }
+  return out;
+}
+
+/**
+ * ÉTAPE DE TICK (one-shot, versionnée) — applique la garde par capacité au STOCK de propositions
+ * DÉJÀ écrites, pas seulement aux futures.
+ *
+ * Pourquoi (revue C28-93, 🔴 trouvé par DEUX agents en convergence) : `estNoeudRecreable_` n'avait
+ * qu'un site d'appel, sur le chemin d'ÉCRITURE d'un nouveau constat. Les 124 lignes d'août étaient
+ * déjà dans l'onglet, et l'onglet est append-only — rien ne les re-filtrait. Le même lot rendait le
+ * bouton « Tout corbeiller » OPÉRANT : au clic, les 7 lignes de nœuds de table (`Alphatek` ×2,
+ * `Projets`, `Betatek`, `DriveAI`, `Projet C`, `Candidatures`) et `IUT du Plateau`
+ * seraient parties à la corbeille — exactement les « dossiers utiles » de la plainte de Marc, et
+ * exactement ce que la nouvelle garde déclare intouchable. Corriger le flux sans nettoyer le stock
+ * aurait rendu le défaut EFFECTIF au lieu de le fermer.
+ *
+ * C'est aussi le chemin de RETOUR qui manquait aux lignes déjà mal proposées (§9 : « un garde-fou
+ * qui met des items hors circuit exige un chemin de retour »).
+ *
+ * Aucune mutation Drive : seuls les statuts de l'onglet changent. Échec fermé : référentiel muet
+ * (illisible OU vide) ⇒ on ne retire RIEN et on réessaie au tick suivant — marquer tout le stock
+ * « protégé » sur un blip de lecture serait le défaut symétrique.
+ * @param {Sheet} f  l'onglet Réorg
+ * @param {Array<Array>} lignes  déjà lu par `etapeReorg_` — aucune relecture de l'onglet entier
+ * @param {function(): boolean} estBudgetDepasse  garde-temps PARTAGÉ du tick (§9 : « garde-temps sur
+ *   TOUT lot », y compris une boucle d'écritures Sheet — celle-ci part en DERNIÈRE étape du tick et
+ *   peut démarrer à quelques secondes du mur DUR de 6 min, que ne capture aucun `try`)
+ */
+function filtrerVidesCandidatsRecreables_(f, lignes, estBudgetDepasse) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_VIDES_FILTRES') === VIDES_FILTRE_TAG) return;
+  var validees = entitesValideesOuNull_();
+  if (!validees || !Object.keys(validees).length) return; // panne ≠ verdict : re-tenté au tick suivant
+  var cibles = videsCandidatsRecreables_(lignes, validees, VIDES_FILTRE_TAG);
+  if (!cibles.length) { props.setProperty('DriveAI_VIDES_FILTRES', VIDES_FILTRE_TAG); return; }
+  // Statuts RELUS à l'instant. `lignes` est un instantané pris en tête d'étape, et l'APP écrit dans
+  // le même onglet au clic de Marc : sans cette relecture, un `corbeillé` posé entre-temps serait
+  // écrasé par `vide-protégé` — une ligne qui affiche « protégé » pour un dossier qui est en
+  // réalité DANS la corbeille, et sera purgé à 30 jours sans autre trace (revue C28-93).
+  var frais = f.getRange(1, 6, f.getLastRow(), 2).getValues(); // F (statut) + G (détail)
+  var faits = 0;
+  var vus = 0;
+  for (var i = 0; i < cibles.length; i++) {
+    if (faits >= CONFIG.REORG_VIDES_FILTRE_LOT) break;
+    if (estBudgetDepasse && estBudgetDepasse()) break;
+    vus++;
+    var rang = cibles[i].rang;
+    var avant = frais[rang - 1] || [];
+    var statutLu = String(avant[0]);
+    var marqueLue = marqueFiltreVides_(avant[1]);
+    var duFiltre = !!marqueLue && marqueLue.statut === statutLu;
+    // L'app est-elle passée entre l'instantané et maintenant ? Seuls deux états sont à nous : une
+    // proposition encore candidate, et un `vide-protégé` que le FILTRE avait posé.
+    if (statutLu !== 'vide-candidat' && !(statutLu === 'vide-protégé' && duFiltre)) continue;
+    var raison = cibles[i].statut === 'vide-protégé'
+      ? 'la taxonomie recrée « ' + cibles[i].nom + ' » au premier document '
+      : 'la taxonomie ne recrée plus « ' + cibles[i].nom + ' » ';
+    var detail = raison + MARQUE_FILTRE_VIDES + VIDES_FILTRE_TAG + ' → ' + cibles[i].statut + ']';
+    // Statut ET détail en UNE écriture (÷2 les allers-retours Sheet vs `solderAction_`).
+    f.getRange(rang, 6, 1, 2).setValues([[cibles[i].statut, detail]]);
+    faits++;
+  }
+  // Le tag ne se pose que sur une passe COMPLÈTE — toutes les cibles EXAMINÉES, qu'elles aient été
+  // réécrites ou laissées à l'app. Une passe écrêtée (lot ou garde-temps) reprend au tick suivant :
+  // les lignes réécrites ne matchent plus `vide-candidat`, donc la collecte converge.
+  if (vus === cibles.length) props.setProperty('DriveAI_VIDES_FILTRES', VIDES_FILTRE_TAG);
+  if (faits) journalInfo_('Reorg', faits + ' proposition(s) de corbeille re-jugée(s) par la taxonomie');
+}
+
+/** Dernier segment d'un chemin proposé (nom du dossier à créer/renommer). PURE (testée). */
+function dernierSegment_(chemin) {
+  var parts = String(chemin).split('/');
+  return (parts[parts.length - 1] || '').trim();
+}
+
+/**
+ * Dossiers que l'application ne mute JAMAIS : domaines (fixes ET auto), files système, et les
+ * dossiers de CATÉGORIE à ID FIXE (Logement/Véhicule — le router y route par ID en dur : les
+ * vider/corbeiller serait une perte réelle, aucune re-création automatique par nom).
+ */
+function ensembleIntouchables_() {
+  var set = {};
+  Object.keys(CONFIG.DOMAINES).forEach(function (dom) { set[CONFIG.DOMAINES[dom]] = true; });
+  (CONFIG.DOMAINES_AUTO || []).forEach(function (dom) {
+    var id = PropertiesService.getScriptProperties().getProperty('DriveAI_DOM_' + dom);
+    if (id) set[id] = true;
+  });
+  Object.keys(CONFIG.CATEGORIES || {}).forEach(function (dom) {
+    Object.keys(CONFIG.CATEGORIES[dom]).forEach(function (cat) {
+      set[CONFIG.CATEGORIES[dom][cat]] = true;
+    });
+  });
+  set[CONFIG.DOSSIERS.A_TRIER] = true;
+  set[CONFIG.DOSSIERS.A_VERIFIER] = true;
+  return set;
+}
+
+/**
+ * Vrai si la TAXONOMIE COURANTE sait RECRÉER un dossier de ce nom — donc le proposer à la corbeille
+ * ne mène nulle part : il reviendrait au premier document qui le vise. PURE.
+ *
+ * Garde par CAPACITÉ, jamais par liste d'exceptions (leçon §9) : on demande à la table elle-même si
+ * elle connaît ce nœud, à N'IMPORTE QUELLE profondeur, plutôt que d'énumérer les cas — une liste
+ * serait fausse au premier nœud ajouté, et personne ne saurait qu'elle l'est.
+ *
+ * Vécu (C28-93, décompte du 13/09) : la liste des dossiers vides proposés à Marc contenait
+ * `Alphatek` (deux fois), `Projets`, `Betatek`, `DriveAI`, `Projet C`, `Candidatures` —
+ * six noms sur sept lignes, tous des nœuds que la table
+ * recrée PAR NOM — et deux dossiers NOMMÉS comme des domaines (`02 · Finances`, `05 · Carrière`),
+ * que l'app refuse de corbeiller par leur nom. Le premier de la liste étant l'un d'eux, le bouton
+ * « tout corbeiller » s'arrêtait dessus : la liste était inutilisable ENTIÈREMENT à cause de ce que
+ * le moteur n'aurait jamais dû y mettre.
+ * @param {string} nom  nom du dossier
+ * @param {Object=} validees  référentiel des entités VALIDÉES (cleCanonique → {nom, dossierId})
+ * @return {boolean}
+ */
+function estNoeudRecreable_(nom, validees) {
+  var propre = String(nom == null ? '' : nom).trim();
+  if (!propre) return true;                       // sans nom : on ne propose rien (échec fermé)
+  if (/^\d{2} · /.test(propre)) return true;      // NOM de racine de domaine (l'app le refuse aussi)
+  if (propre.charAt(0) === '_') return true;      // racine système
+  if (estSegmentStructurel_(propre)) return true; // année AAAA, schéma d'entité, type d'identité
+  if (noeudsTableReset_()[propre]) return true;   // nœud de STRUCTURE_CIBLE_RESET, à toute profondeur
+  // Comparaison NORMALISÉE (casse, accents, apostrophes) : le décompte du 13/09 contenait QUATRE
+  // graphies d'« IUT du Plateau ». Une comparaison stricte n'en protégeait qu'une — et la garde
+  // doit protéger LARGE, c'est le sens où se tromper coûte le moins (relevé en 4ᵉ revue).
+  var cible = normaliserCle_(propre);
+  var v = validees || {};
+  var cles = Object.keys(v);
+  for (var i = 0; i < cles.length; i++) {
+    if (v[cles[i]] && normaliserCle_(v[cles[i]].nom) === cible) return true; // dossier d'entité validée
+  }
+  return false;
+}
+
+/**
+ * `estNoeudRecreable_` à ÉCHEC FERMÉ, pour les appelants qui décident de PROPOSER un dossier à la
+ * corbeille. Un référentiel d'entités illisible ou vide rend `true` — « je ne sais pas, donc je
+ * m'abstiens » — là où le prédicat nu répondrait `false` (« ce n'est pas une entité validée ») et
+ * laisserait passer la proposition.
+ *
+ * Pourquoi (revue quotas C28-93, 🟠) : `entitesValideesParCle_` échoue OUVERT, elle avale son
+ * exception et rend `{}`. Pour le ROUTAGE c'est la bonne dégradation (classement à plat,
+ * réversible au run suivant) ; pour une PROPOSITION À LA CORBEILLE c'est un faux verdict
+ * DÉFINITIF — la clé `videcandidat|<id>` n'est jamais ré-évaluée, et l'app ne protège pas les
+ * dossiers d'entité : Marc verrait « Alphatek » dans sa liste, et il cliquerait.
+ *
+ * ⚠️ À n'utiliser QUE dans ce sens. Pour la question INVERSE — « dois-je RETIRER une proposition
+ * existante ? » — s'abstenir veut dire ne rien retirer : l'appelant coupe alors AVANT la boucle
+ * (cf. `filtrerVidesCandidatsRecreables_`), sinon il marquerait tout le stock « protégé ».
+ * @param {string} nom
+ * @param {Object|null} validees  référentiel des entités validées, ou `null` s'il est illisible
+ * @return {boolean}
+ */
+function estNoeudRecreablePrudent_(nom, validees) {
+  if (!validees || !Object.keys(validees).length) return true;
+  return estNoeudRecreable_(nom, validees);
+}
+
+/**
+ * Index {nom → true} de TOUS les nœuds de `STRUCTURE_CIBLE_RESET`, à toute profondeur, plus les
+ * quatre sous-dossiers d'école. Calculé UNE fois par exécution (la table est une constante).
+ * @return {Object}
+ */
+var _noeudsTableResetCache = null;
+function noeudsTableReset_() {
+  if (_noeudsTableResetCache) return _noeudsTableResetCache;
+  var set = {};
+  var plonger = function (obj) {
+    if (!obj || typeof obj !== 'object') return;
+    Object.keys(obj).forEach(function (k) { set[k] = true; plonger(obj[k]); });
+  };
+  plonger(typeof structureCibleReset_ === 'function' ? structureCibleReset_() : {});
+  // ⚠️ Redondant AUJOURD'HUI (`ecoleReset_` injecte déjà ces 4 noms dans la table) — gardé comme
+  // ceinture : le jour où les sous-dossiers d'école cesseraient de passer par la table, la garde
+  // ne tomberait pas en silence. Dit ici pour que la prochaine revue ne le lise pas comme un ajout.
+  (typeof SOUS_DOSSIERS_ECOLE_RESET !== 'undefined' ? SOUS_DOSSIERS_ECOLE_RESET : []).forEach(function (n) { set[n] = true; });
+  // GELÉ : l'index est rendu PAR RÉFÉRENCE et mémoïsé pour toute l'exécution — un appelant qui le
+  // muterait corromprait la garde jusqu'au prochain tick (revue C28-93).
+  _noeudsTableResetCache = Object.freeze(set);
+  return _noeudsTableResetCache;
+}
+
+/**
+ * Vrai si `nom` est un segment STRUCTUREL de la taxonomie : sous-dossier d'année « AAAA » ou
+ * nom de schéma d'entité (le router les find-or-create PAR NOM — les muter rend le plan non
+ * convergent : le router les re-créerait). PURE (testée).
+ */
+var _noeudsStructureMarcCache = null;
+
+/**
+ * Vrai si `nom` est un nœud de la structure que MARC a construite sous `Archives scolaires`
+ * (ADR-0055) — la racine elle-même, un de ses 8 dossiers d'école, ou l'un de leurs sous-dossiers
+ * déclarés (les 4 standard, « Concours », et les thématiques de Marc).
+ *
+ * Garde par CAPACITÉ à l'intérieur d'un sous-arbre DÉCLARÉ, pas une liste d'exceptions : ajouter
+ * un dossier à la table suffit à le protéger. GELÉ et mémoïsé comme `noeudsTableReset_`. PURE.
+ * @param {string} nom @return {boolean}
+ */
+function estNoeudStructureMarc_(nom) {
+  if (!_noeudsStructureMarcCache) {
+    var set = {};
+    var t = (typeof structureCibleReset_ === 'function')
+      ? structureCibleReset_()['06 · Études & diplômes'] : null;
+    var racine = (typeof RACINE_ARCHIVES_ECOLE_RESET !== 'undefined')
+      ? RACINE_ARCHIVES_ECOLE_RESET : 'Archives scolaires';
+    if (t && t[racine]) {
+      set[racine] = true;
+      var plonger = function (obj) {
+        if (!obj || typeof obj !== 'object') return;
+        Object.keys(obj).forEach(function (k) { set[k] = true; plonger(obj[k]); });
+      };
+      plonger(t[racine]);
+    }
+    _noeudsStructureMarcCache = Object.freeze(set);
+  }
+  return !!_noeudsStructureMarcCache[String(nom).trim()];
+}
+
+function estSegmentStructurel_(nom) {
+  var propre = String(nom).trim();
+  if (typeof estExcluDuReset_ === 'function' && estExcluDuReset_(propre)) return true;
+  // ⚠️ LA STRUCTURE DE MARC, À TOUTE PROFONDEUR (revue structure C28-105). Cette garde ne
+  // consultait que les enfants de NIVEAU 1 des domaines : les 5 dossiers d'école, passés sous
+  // `Archives scolaires` (ADR-0055), l'auraient perdue du jour au lendemain — la Réorg IA, ACTIVE
+  // dans le tick, aurait pu proposer de renommer ou fusionner `Prépa Alpha (2017-2018)`, ce que le
+  // code refusait la veille. La garde est CIBLÉE sur ce sous-arbre et pas étendue à toute la
+  // table : un dossier d'ENTITÉ de niveau 2 (`Banques/Bellerives`) doit rester mutable, sinon la
+  // Réorg n'a plus rien à proposer — contrat vérifié par test depuis ADR-0044 §6.3.
+  if (estNoeudStructureMarc_(propre)) return true;
+  if (/^\d{4}$/.test(propre)) return true;
+  // Dossiers de TYPE D'IDENTITÉ (« Passeport », « Permis de conduire », …) au niveau 1 d'un domaine.
+  // ⚠️ La justification a CHANGÉ avec C28-72, et il faut le dire pour que la prochaine revue ne
+  // retire pas cette garde en la croyant périmée. AVANT : le flux vivant ET la consolidation les
+  // find-or-créaient par nom, donc les muter était non convergent. DEPUIS C28-72 : plus personne ne
+  // les crée (`repliIdentite_` dégrade vers un nœud de la table). La garde reste néanmoins JUSTE,
+  // pour une raison d'HÉRITAGE : `01 · Administratif/Permis de conduire` existe en prod (créé le
+  // 12/08 par l'ancien repli) et contient le permis d'un tiers.
+  // CONSÉQUENCE À ASSUMER : être « structurel » signifie être REFUSÉ COMME SOURCE par la Réorg
+  // (plus bas) et par Fusion.gs — donc **rien d'automatique ne résorbera jamais ce nœud**. C'est
+  // cohérent avec la décision de Marc du 2026-08-20 (ne pas toucher au document de tiers), mais
+  // c'est un choix, pas un effet de bord : seul Marc peut le vider.
+  if ((typeof TYPES_IDENTITE !== 'undefined' ? TYPES_IDENTITE : []).indexOf(propre) !== -1) return true;
+  var schemas = CONFIG.SCHEMAS_ENTITE || {};
+  var types = Object.keys(schemas);
+  for (var i = 0; i < types.length; i++) {
+    if (types[i] === propre) return true; // clés = catégories (Logement, Véhicule, …)
+    if (schemas[types[i]].indexOf(propre) !== -1) return true;
+  }
+  // Catégories PAR VÉHICULE (C28-51, ADR-0040 §3a) : find-or-créées PAR NOM par le flux ET les
+  // missions sous chaque `Véhicule/<véhicule>` — les muter les ferait re-créer au document
+  // suivant (ping-pong, leçon #47 « quel garde mes voisins ont-ils que je n'ai pas ? »).
+  if ((CONFIG.MISSIONS_CATEGORIES_VEHICULE || []).indexOf(propre) !== -1) return true;
+  // Dossiers COMMUNS sous « Véhicule » (ADR-0044) : find-or-créés PAR NOM par le flux vivant
+  // (`cheminCibleReset_`) ET par la mission véhicule — les muter les ferait re-créer au document
+  // suivant. C'est ICI que se trouve leur seule protection : l'inventaire de la Réorg est
+  // RÉCURSIF (BFS), donc un nœud imbriqué sous « Véhicule » lui est bel et bien soumis, alors que
+  // `estAncreStructurelleFusion_` ne voit que le premier niveau (revue C28-62). « Recherche &
+  // achat » était déjà couvert par la ligne ci-dessus ; « Locations » et « À attribuer » ne
+  // l'étaient par RIEN.
+  if ((CONFIG.MISSIONS_VEHICULE_COMMUNS || []).some(function (c) { return c.nom === propre; })) return true;
+  // Commun des employeurs OCCASIONNELS (ADR-0044 D11) : find-or-créé PAR NOM par le flux ET la
+  // mission carrière, et IMBRIQUÉ sous « Employeurs » — donc invisible d'`estAncreStructurelle-
+  // Fusion_`, qui ne lit que le niveau 1. Sans cette ligne il n'était protégé par RIEN : exposé
+  // à l'inventaire RÉCURSIF de la Réorg et à `detecterDossierVide_` (proposé à la corbeille).
+  if (CONFIG.MISSIONS_EMPLOYEURS_COMMUN && propre === CONFIG.MISSIONS_EMPLOYEURS_COMMUN) return true;
+  // Buckets de NIVEAU 1 de `STRUCTURE_CIBLE_RESET` (ADR-0044 §6.3) : find-or-créés PAR NOM par le
+  // flux, donc non convergents si on les mute. `estAncreStructurelleFusion_` les protège déjà
+  // côté Fusion ; l'inventaire RÉCURSIF de la Réorg, lui, ne les connaissait pas — un plan LLM
+  // pouvait proposer de fusionner un bucket VIDE (« Travaux & équipements », « Recherche
+  // d'emploi ») vers un voisin sémantique, puis la corbeille au clic, pendant que le flux le
+  // recrée au document suivant. Bénéfice secondaire : le LLM ne les reçoit plus comme
+  // regroupables, donc plus d'essais brûlés sur des actions que la whitelist rejette déjà.
+  var tables = (typeof structureCibleReset_ === 'function') ? structureCibleReset_() : {};
+  var domaines = Object.keys(tables);
+  for (var d = 0; d < domaines.length; d++) {
+    if (Object.prototype.hasOwnProperty.call(tables[domaines[d]], propre)) return true;
+  }
+  return false;
+}
+
+/**
+ * Applique UNE action validée. @return {{statut, detail}|{enCours: true, aProgresse: boolean}}
+ * — `enCours` = fusion pas finie (lot/budget), à reprendre au tick suivant.
+ * Lève sur erreur inattendue (gérée par l'appelant : 2 tentatives puis échec).
+ */
+function appliquerUneAction_(a, proteges, intouchables, estBudgetDepasse) {
+  if (a.type === 'creer') {
+    if (!a.cible) return { statut: 'échec', detail: 'parent manquant' };
+    // CRÉER un dossier DANS un domaine/catégorie ne MUTE pas le parent (ni détachement ni suppression)
+    // → AUTORISÉ (demande Marc C28-30 : « crée un dossier Garage dans Véhicule », ADR-0026). Restent
+    // interdits : la zone protégée (04), les files d'arrivée/revue (créer dans l'intake casserait le
+    // tri), et les racines système « _… ». NB : `intouchables` protège les dossiers contre leur propre
+    // mutation (déplacer/renommer/vider), PAS contre la RÉCEPTION d'un enfant — d'où le retrait ici.
+    if (proteges[a.cible] || a.cible === CONFIG.DOSSIERS.A_TRIER || a.cible === CONFIG.DOSSIERS.A_VERIFIER) {
+      return { statut: 'refusé (zone protégée)', detail: 'parent protégé ou système' };
+    }
+    var parent = DriveApp.getFolderById(a.cible);
+    if (parent.getName().charAt(0) === '_' || chaineMonteVersProtege_(parent, proteges, 0, true)) {
+      return { statut: 'refusé (zone protégée)', detail: 'parent protégé ou système' };
+    }
+    var nomCreer = dernierSegment_(a.cheminPropose);
+    if (!nomCreer) return { statut: 'échec', detail: 'nom manquant' };
+    // Idempotent au rejeu : réutilise un dossier homonyme déjà créé, jamais un doublon.
+    // ⚠️ #475 — `getFoldersByName` rend AUSSI les dossiers corbeillés (cf. `racineVivanteOuCreee_`) :
+    // un seul homonyme à la corbeille faisait répondre « appliqué » sans rien créer. Seul un homonyme
+    // VIVANT compte ; si `isTrashed()` lève, l'exception sort (2 tentatives puis « échec » dit par
+    // l'appelant) : jamais un « appliqué » sans dossier.
+    var existants = parent.getFoldersByName(nomCreer);
+    var vivant = false;
+    while (existants.hasNext() && !vivant) {
+      if (!existants.next().isTrashed()) vivant = true;
+    }
+    if (!vivant) parent.createFolder(nomCreer);
+    return { statut: 'appliqué', detail: undefined };
+  }
+
+  // Déplacement de FICHIER (chat assistant, C28-30) : source = fileId (pas un dossier) → branche
+  // DÉDIÉE, avant les gardes propres aux dossiers ci-dessous (getFolderById échouerait sur un fichier).
+  if (a.type === 'deplacer-fichier') return appliquerDeplacerFichier_(a, proteges);
+
+  if (!a.source) return { statut: 'échec', detail: 'source manquante' };
+  if (intouchables[a.source] || proteges[a.source]) {
+    return { statut: 'refusé (zone protégée)', detail: 'dossier système ou protégé' };
+  }
+  var source = DriveApp.getFolderById(a.source);
+  var nomSource = source.getName();
+  if (nomSource.charAt(0) === '_') {
+    return { statut: 'refusé (zone protégée)', detail: 'racine système' };
+  }
+  // Segments STRUCTURELS (années AAAA, schémas d'entité) : les muter rendrait le plan non
+  // convergent (le router les re-crée par nom). Défense en profondeur — le parseur les bloque déjà.
+  if (estSegmentStructurel_(nomSource)) {
+    return { statut: 'refusé (structure)', detail: 'sous-dossier structurel (' + nomSource + ')' };
+  }
+  // Re-vérification AVANT mutation (§2.1b, strict : illisible = protégé).
+  if (aParentProtege_(source, proteges, true)) {
+    return { statut: 'refusé (zone protégée)', detail: '' };
+  }
+
+  if (a.type === 'renommer') {
+    var nouveau = dernierSegment_(a.cheminPropose);
+    if (!nouveau) return { statut: 'échec', detail: 'nom manquant' };
+    if (nouveau.charAt(0) === '_' || /^\d{2} · /.test(nouveau)) {
+      return { statut: 'refusé (structure)', detail: 'nom réservé (racines système/domaines)' };
+    }
+    if (source.getName() !== nouveau) source.setName(nouveau); // rejeu = no-op
+    return { statut: 'appliqué', detail: undefined };
+  }
+
+  // deplacer / fusionner : la CIBLE reçoit les MÊMES gardes que la source (jamais muter VERS la
+  // zone protégée ni vers une file système — le plan n'a jamais vu ces dossiers, un id qui y
+  // mène est forcément anormal).
+  if (!a.cible) return { statut: 'échec', detail: 'cible manquante' };
+  if (proteges[a.cible] || intouchables[a.cible]) {
+    return { statut: 'refusé (zone protégée)', detail: 'cible protégée ou système' };
+  }
+  var cible = DriveApp.getFolderById(a.cible);
+  if (cible.getName().charAt(0) === '_' || chaineMonteVersProtege_(cible, proteges, 0, true)) {
+    return { statut: 'refusé (zone protégée)', detail: 'cible protégée ou système' };
+  }
+
+  if (a.type === 'deplacer') {
+    source.moveTo(cible); // déjà déplacé = no-op côté arbre (même parent)
+    return { statut: 'appliqué', detail: undefined };
+  }
+
+  // fusionner : COLLECTE (lecture seule — l'itérateur Drive saute des éléments si on mute
+  // pendant l'itération, patron Maintenance) puis déplacement PAR ID, borné. Laissés en place,
+  // jamais détachés : ascendance ÉTRANGÈRE protégée (multi-parents sous 04 — la branche source
+  // est déjà validée strict ci-dessus, on ne re-paye pas sa remontée) et, pour les sous-dossiers,
+  // IDENTITÉ protégée/système (un enfant multi-parents qui EST la racine 04 ou un domaine —
+  // moveTo retirerait TOUS ses parents : détachement interdit).
+  var aDeplacer = [];
+  var laissesProteges = 0;
+  var it = source.getFiles();
+  while (it.hasNext() && aDeplacer.length < CONFIG.REORG_FUSION_LOT && !estBudgetDepasse()) {
+    var fichier = it.next();
+    if (aParentEtrangerProtege_(fichier, a.source, proteges)) { laissesProteges++; continue; }
+    aDeplacer.push({ id: fichier.getId(), dossier: false });
+  }
+  var sous = source.getFolders();
+  while (sous.hasNext() && aDeplacer.length < CONFIG.REORG_FUSION_LOT && !estBudgetDepasse()) {
+    var d = sous.next();
+    var idD = d.getId();
+    if (proteges[idD] || intouchables[idD] || d.getName().charAt(0) === '_' ||
+        aParentEtrangerProtege_(d, a.source, proteges)) {
+      laissesProteges++;
+      continue;
+    }
+    aDeplacer.push({ id: idD, dossier: true });
+  }
+  var deplaces = 0;
+  for (var m = 0; m < aDeplacer.length; m++) {
+    if (estBudgetDepasse()) break;
+    if (aDeplacer[m].dossier) DriveApp.getFolderById(aDeplacer[m].id).moveTo(cible);
+    else DriveApp.getFileById(aDeplacer[m].id).moveTo(cible);
+    deplaces++;
+  }
+  // On ne conclut que sur une passe BLANCHE (rien déplacé, budget intact) : c'est la seule
+  // lecture fiable de « plus rien à fusionner » — jamais un `appliqué` sur itération douteuse.
+  if (deplaces > 0 || estBudgetDepasse()) return { enCours: true, aProgresse: deplaces > 0 };
+  if (laissesProteges > 0) {
+    return { statut: 'refusé (zone protégée)', detail: laissesProteges + ' élément(s) protégé(s) laissé(s) en place' };
+  }
+  return { statut: 'appliqué', detail: undefined };
+}
+
+/**
+ * Applique un déplacement de FICHIER (chat assistant, C28-30/ADR-0026) : `getFileById(source)
+ * .moveTo(cible)`. moveTo SEUL (réversible), jamais de suppression. Garde §1 STRICTE échec-fermé
+ * des DEUX côtés (comme les déplacements de dossiers) : la SOURCE — un fichier sous 04 · Immigration
+ * n'est JAMAIS détaché (moveTo retirerait TOUS ses parents, y compris un parent protégé multi-parents)
+ * — ET la CIBLE — jamais VERS la zone protégée, une racine système (`_…`) ou une file d'arrivée/revue.
+ * Sur succès, ÉPINGLE le fichier (Index `epingle|<id>`) : immunité contre tout re-rangement auto
+ * (convergence). Idempotent : moveTo déjà-en-place = no-op, épinglage dédoublonné par la clé.
+ * @return {{statut, detail}}
+ */
+function appliquerDeplacerFichier_(a, proteges) {
+  if (!a.source) return { statut: 'échec', detail: 'source (fichier) manquante' };
+  if (!a.cible) return { statut: 'échec', detail: 'cible (dossier) manquante' };
+  var fichier;
+  try { fichier = DriveApp.getFileById(a.source); }
+  catch (e) { return { statut: 'échec', detail: 'fichier introuvable' }; }
+  // La source DOIT être un FICHIER : un DOSSIER (racine de domaine « NN · … », catégorie à ID fixe,
+  // ou 04 lui-même) passé par erreur ici serait RELOGÉ par moveTo (dérive structurelle que le chemin
+  // `deplacer` de dossier interdit déjà). getFileById accepte un ID de dossier → filtrer par le MIME.
+  if (fichier.getMimeType() === 'application/vnd.google-apps.folder') {
+    return { statut: 'refusé (structure)', detail: 'la source doit être un fichier, pas un dossier' };
+  }
+  // Source : un fichier en zone protégée n'est JAMAIS déplacé (détachement interdit — §2.1b, strict).
+  if (aParentProtege_(fichier, proteges, true)) {
+    return { statut: 'refusé (zone protégée)', detail: 'fichier en zone protégée (04)' };
+  }
+  var cible;
+  try { cible = DriveApp.getFolderById(a.cible); }
+  catch (e2) { return { statut: 'échec', detail: 'dossier cible introuvable' }; }
+  // Cible : jamais vers la zone protégée ni une racine/file système.
+  if (cible.getName().charAt(0) === '_' || cible.getId() === CONFIG.DOSSIERS.A_TRIER ||
+      cible.getId() === CONFIG.DOSSIERS.A_VERIFIER ||
+      chaineMonteVersProtege_(cible, proteges, 0, true)) {
+    return { statut: 'refusé (zone protégée)', detail: 'cible protégée ou système' };
+  }
+  fichier.moveTo(cible); // déjà en place = no-op (rejeu sûr)
+  // Épinglage (convergence, ADR-0026) : posé APRÈS le move réussi, dédoublonné par la clé dédiée.
+  if (!indexContient_('epingle|' + a.source)) {
+    indexAjouter_('epingle|' + a.source, { statut: 'épinglé', nom: fichier.getName(), domaine: '', chemin: '' });
+  }
+  return { statut: 'appliqué', detail: undefined };
+}
+
+/**
+ * Après une FUSION appliquée, les entités dont `Dossier ID` pointait le dossier vidé sont
+ * re-pointées vers la cible (sinon le routage classerait dans un dossier mort — contrat
+ * structure-keeper C21-04).
+ */
+/**
+ * RE-POINTAGE EN LOT du référentiel d'entités : UNE lecture de l'onglet `Entités` pour N
+ * correspondances `ancienDossierId → nouveauDossierId` (ADR-0055).
+ *
+ * `repointerEntites_` relit l'onglet ENTIER à chaque appel ; l'appeler 6 fois d'affilée, juste
+ * avant la seule fenêtre où la mission peut encore écrire, consomme le garde-temps qu'elle
+ * partage avec la suite (revue quotas C28-105). Même sémantique, même idempotence (une ligne déjà
+ * re-pointée ne matche plus sa source). PEUT LEVER, volontairement : l'appelant n'a pas le droit
+ * de conclure sur un re-pointage raté.
+ * @param {!Object<string,string>} carte  { ancienDossierId: nouveauDossierId }
+ */
+function repointerEntitesLot_(carte) {
+  var sources = Object.keys(carte || {});
+  if (!sources.length) return;
+  var f = feuille_('Entités');
+  var valeurs = f.getDataRange().getValues();
+  if (valeurs.length < 2) return;
+  var iDossier = valeurs[0].indexOf('Dossier ID');
+  if (iDossier === -1) return;
+  for (var i = 1; i < valeurs.length; i++) {
+    var actuel = String(valeurs[i][iDossier]);
+    if (Object.prototype.hasOwnProperty.call(carte, actuel)) {
+      f.getRange(i + 1, iDossier + 1).setValue(carte[actuel]);
+      journalInfo_('Reorg', 'Entité re-pointée (lot) : ' + String(valeurs[i][0] || ''));
+    }
+  }
+}
+
+function repointerEntites_(sourceId, cibleId) {
+  var f = feuille_('Entités');
+  var valeurs = f.getDataRange().getValues();
+  if (valeurs.length < 2) return;
+  var iDossier = valeurs[0].indexOf('Dossier ID');
+  if (iDossier === -1) return;
+  for (var i = 1; i < valeurs.length; i++) {
+    if (String(valeurs[i][iDossier]) === sourceId) {
+      f.getRange(i + 1, iDossier + 1).setValue(cibleId);
+      journalInfo_('Reorg', 'Entité re-pointée (fusion) : ' + String(valeurs[i][0] || ''));
+    }
+  }
+}
+
+/* ================= C21-04 : PROPOSITION (analyse à la demande) ================= */
+
+/**
+ * Traite (au plus) UNE demande d'analyse — appelée par etapeReorg_ avec la lecture déjà faite.
+ * @param {Sheet} f
+ * @param {Array} lignes  valeurs de l'onglet (en-têtes incluses)
+ * @param {function(): boolean} estBudgetDepasse
+ */
+function appliquerReorgIA_(f, lignes, estBudgetDepasse) {
+  var demande = null;
+  for (var i = lignes.length - 1; i >= 1; i--) {
+    if (String(lignes[i][1]) === 'demande' && String(lignes[i][5]) === 'analyse demandée') {
+      demande = { rang: i + 1, cle: String(lignes[i][0]), portee: String(lignes[i][6] || 'tout') };
+      break; // la plus récente seulement — une analyse à la fois
+    }
+  }
+  if (!demande) return;
+  if (estPannePlateforme_()) return; // panne de compte : on retente plus tard, sans compter un essai
+
+  var tag = 'reorg|' + demande.cle;
+  // Reprise après coupure : les actions de CE tag existent déjà → poser le statut et finir.
+  for (var j = 1; j < lignes.length; j++) {
+    if (String(lignes[j][0]).indexOf(tag + '|') === 0) {
+      f.getRange(demande.rang, 6).setValue('proposé');
+      journalInfo_('Reorg', 'Proposition déjà écrite (reprise) — demande soldée.');
+      return;
+    }
+  }
+
+  // Essais bornés (anti-boucle sur exception répétable : pré-incrémenté, RENDU sur issue bénigne).
+  var props = PropertiesService.getScriptProperties();
+  var prefixe = demande.cle + '|';
+  var brutEssais = String(props.getProperty('DriveAI_REORG_ESSAIS') || '');
+  var essais = brutEssais.indexOf(prefixe) === 0 ? Number(brutEssais.slice(prefixe.length)) || 0 : 0;
+  if (essais >= CONFIG.REORG_ESSAIS_MAX) {
+    solderDemande_(f, demande.rang, 'échec', 'analyse impossible après ' + essais + ' tentatives — voir Journal');
+    journalErreur_('Reorg', 'Demande abandonnée après ' + essais + ' tentatives.');
+    return;
+  }
+  props.setProperty('DriveAI_REORG_ESSAIS', prefixe + (essais + 1));
+  var rendreEssai = function () { props.setProperty('DriveAI_REORG_ESSAIS', prefixe + essais); };
+
+  var resultat = inventaireDossiers_(demande.portee, estBudgetDepasse);
+  if (resultat.raison === 'interrompu') {
+    rendreEssai(); // le tick était chargé — pas un échec d'analyse
+    return;
+  }
+  if (resultat.raison === 'protege') {
+    solderDemande_(f, demande.rang, 'échec', 'portée refusée : zone protégée (04 · Immigration)');
+    return;
+  }
+  var inventaire = resultat.dossiers;
+  if (inventaire.length === 0) {
+    solderDemande_(f, demande.rang, 'échec', 'aucun dossier analysable dans cette portée');
+    return;
+  }
+
+  // Plafond QUOTIDIEN d'appels LLM de réorg (défense en profondeur : une app boguée qui
+  // re-poserait des demandes en boucle est bornée à ~0,1 $/jour). La demande reste posée.
+  var jour = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var brutJour = String(props.getProperty('DriveAI_REORG_JOUR') || '');
+  var appelsJour = brutJour.indexOf(jour + '|') === 0 ? Number(brutJour.split('|')[1]) || 0 : 0;
+  if (appelsJour >= CONFIG.REORG_MAX_JOUR) {
+    rendreEssai();
+    return;
+  }
+  props.setProperty('DriveAI_REORG_JOUR', jour + '|' + (appelsJour + 1));
+
+  var texte = appelAnthropicTexte_(
+    CONFIG.LLM_MODELE,
+    promptReorg_(),
+    resumeArborescence_(inventaire),
+    CONFIG.LLM_MAX_TOKENS_REORG
+  );
+  if (texte === null && estPannePlateforme_()) {
+    rendreEssai(); // panne de COMPTE détectée par cet appel — jamais imputée à la demande (leçon R1)
+    return;
+  }
+  // IDs des dossiers d'entités VALIDÉES : alimentent le verrou « jamais fusionner une entité dans un
+  // dossier de regroupement » (une fusion détruit la source et re-pointe `Entités.Dossier ID`).
+  // Référentiel illisible ⇒ carte vide : les autres gardes tiennent, on ne bloque pas le plan.
+  var idsEntites = {};
+  try {
+    var vald = entitesValideesParCle_();
+    Object.keys(vald).forEach(function (k) { if (vald[k] && vald[k].dossierId) idsEntites[vald[k].dossierId] = true; });
+  } catch (e0) { idsEntites = {}; }
+  var proposition = parserPropositionReorg_(texte, inventaire, idsEntites);
+  if (!proposition) {
+    journalErreur_('Reorg', 'Plan LLM illisible ou vide (tentative ' + (essais + 1) + '/' + CONFIG.REORG_ESSAIS_MAX + ').');
+    return;
+  }
+
+  // UN append pour toutes les actions (reprenable), PUIS le statut de la demande.
+  var maintenant = new Date().toISOString();
+  if (proposition.actions.length > 0) {
+    var rows = proposition.actions.map(function (a, n) {
+      return lignePourAction_(tag, n + 1, a, inventaire, maintenant);
+    });
+    f.getRange(f.getLastRow() + 1, 1, rows.length, 8).setValues(rows);
+  }
+  var synthese = proposition.synthese || '';
+  if (resultat.tronque) {
+    var noteTronc = 'Analyse limitée aux ' + CONFIG.REORG_DOSSIERS_MAX + ' premiers dossiers (niveaux supérieurs).';
+    synthese = synthese ? synthese + ' ' + noteTronc : noteTronc;
+  }
+  solderDemande_(f, demande.rang, 'proposé', synthese);
+  try { props.deleteProperty('DriveAI_REORG_ESSAIS'); } catch (e) { /* résidu inoffensif */ }
+  journalInfo_('Reorg', 'Proposition écrite : ' + proposition.actions.length + ' action(s) — à valider dans l’app.');
+}
+
+/* (Campagne de réorg AUTOMATIQUE C28-32/ADR-0029 : ABROGÉE par l'ADR-0031 — décision Marc
+   2026-07-31 « plus RIEN tout seul ». Les seules demandes qui arrivent ici sont À LA DEMANDE :
+   déposées par l'app (ou, hier, par l'outil `proposer_reorg` du chat, retiré par l'ADR-0074 le
+   05/11/2026), puis validées par Marc.) */
+
+/** Pose statut (col 6) + détail (col 7) d'une ligne de demande. */
+function solderDemande_(f, rang, statut, detail) {
+  f.getRange(rang, 6).setValue(statut);
+  f.getRange(rang, 7).setValue(detail);
+}
+
+/**
+ * Inventaire BORNÉ en largeur des dossiers (BFS, dédoublonné par ID — les multi-parents existent sur ce
+ * Drive) : {dossiers: [{id, chemin, nbFichiers, exemples[], nbSousDossiers}], tronque: boolean} ou
+ * {raison: 'interrompu' (budget) | 'protege' (portée en zone protégée)}.
+ * Au-delà de CONFIG.REORG_DOSSIERS_MAX dossiers, l'inventaire s'arrête proprement aux niveaux supérieurs
+ * (`tronque: true`) au lieu d'échouer.
+ *
+ * Zone protégée : EXCLUE PAR ASCENDANCE dès la collecte — pour chaque dossier, tout parent
+ * AUTRE que celui par lequel le BFS est arrivé est remonté (`chaineMonteVersProtege_` strict) ;
+ * une branche illisible = protégé (échec fermé : ces métadonnées PARTENT vers le LLM).
+ * Lecture seule : les domaines AUTO absents (Script Property) sont sautés, jamais créés.
+ * @param {string} portee  'tout' ou un ID de dossier
+ * @param {function(): boolean} estBudgetDepasse
+ * @return {{dossiers: Array, tronque: boolean}|{raison: string}}
+ */
+function inventaireDossiers_(portee, estBudgetDepasse) {
+  var proteges = ensembleDomainesProteges_();
+  var front = []; // {dossier: Folder, id, chemin (du parent, null pour racine), parentId}
+
+  if (portee === 'tout') {
+    Object.keys(CONFIG.DOMAINES).forEach(function (dom) {
+      var id = CONFIG.DOMAINES[dom];
+      if (proteges[id]) return;
+      try { front.push({ dossier: DriveApp.getFolderById(id), id: id, chemin: null, parentId: null }); }
+      catch (e) { /* domaine disparu : ignoré */ }
+    });
+    (CONFIG.DOMAINES_AUTO || []).forEach(function (dom) {
+      var id = PropertiesService.getScriptProperties().getProperty('DriveAI_DOM_' + dom);
+      if (!id || proteges[id]) return; // absent → sauté (JAMAIS créé ici : inventaire lecture seule)
+      try { front.push({ dossier: DriveApp.getFolderById(id), id: id, chemin: null, parentId: null }); }
+      catch (e) { /* dossier disparu : ignoré */ }
+    });
+  } else {
+    if (proteges[portee]) return { raison: 'protege' };
+    var racinePortee;
+    try {
+      racinePortee = DriveApp.getFolderById(portee);
+      // La portée vient de la Sheet (donnée UTILISATEUR via l'app) : le moteur re-vérifie
+      // lui-même l'ascendance — un descendant d'Immigration est refusé, échec fermé.
+      var parentsPortee = racinePortee.getParents();
+      while (parentsPortee.hasNext()) {
+        if (chaineMonteVersProtege_(parentsPortee.next(), proteges, 0, true)) return { raison: 'protege' };
+      }
+    } catch (e) {
+      return { raison: 'protege' }; // illisible = protégé (prudence — la donnée sort vers le LLM)
+    }
+    front.push({ dossier: racinePortee, id: portee, chemin: null, parentId: null });
+  }
+
+  var dossiers = [];
+  var vus = {};
+  var tronque = false;
+  while (front.length > 0) {
+    if (estBudgetDepasse()) return { raison: 'interrompu' };
+    if (dossiers.length >= CONFIG.REORG_DOSSIERS_MAX) { tronque = true; break; }
+    var courant = front.shift();
+    if (vus[courant.id]) continue; // multi-parents : un dossier = UNE entrée d'inventaire
+    vus[courant.id] = true;
+
+    var dossier = courant.dossier;
+    var nom;
+    try {
+      nom = dossier.getName();
+    } catch (e) {
+      continue; // disparu entre-temps (Drive vivant) — toléré
+    }
+    if (nom.charAt(0) === '_' || proteges[courant.id] ||
+        courant.id === CONFIG.DOSSIERS.A_TRIER || courant.id === CONFIG.DOSSIERS.A_VERIFIER ||
+        (typeof estExcluDuReset_ === 'function' && estExcluDuReset_(nom))) {
+      continue; // racines système, dossiers techniques exclus, files d'arrivée/de revue, zone protégée
+    }
+    // Garde multi-parents (§2.1b, à la COLLECTE) : tout parent AUTRE que la branche d'arrivée
+    // est remonté ; s'il touche la zone protégée (ou est illisible), le dossier est écarté.
+    if (courant.parentId !== null && aParentEtrangerProtege_(dossier, courant.parentId, proteges)) {
+      continue;
+    }
+    var chemin = courant.chemin === null ? nom : courant.chemin + '/' + nom;
+
+    var nbFichiers = 0;
+    var exemples = [];
+    var nbSousDossiers = 0; // loi de Miller (ADR-0027) — REGROUPABLES seulement, cf. ci-dessous
+    try {
+      var it = dossier.getFiles();
+      while (it.hasNext()) {
+        var fichier = it.next();
+        nbFichiers++;
+        if (exemples.length < CONFIG.REORG_EXEMPLES_PAR_DOSSIER) exemples.push(fichier.getName());
+        if (nbFichiers >= 999) break; // le compte exact au-delà n'apporte rien au plan
+      }
+      var sous = dossier.getFolders();
+      while (sous.hasNext()) {
+        var s = sous.next();
+        // On ne compte QUE les sous-dossiers REGROUPABLES (typiquement les dossiers d'ENTITÉ —
+        // le cas de Marc : 12 employeurs sous « 05 · Carrière »). Sont exemptés : les segments
+        // STRUCTURELS (années « AAAA », noms de schéma) — le router les find-or-create PAR NOM et
+        // `parserPropositionReorg_` REJETTE toute mutation d'un tel segment : les compter ferait
+        // proposer au LLM des regroupements systématiquement rejetés (essais brûlés pour rien) —
+        // et les racines système « _… », hors inventaire de toute façon. MÊME prédicat que la
+        // whitelist du plan : une seule règle, deux consommateurs.
+        var nomSous = '';
+        var idSous = s.getId();
+        try { nomSous = s.getName(); } catch (e2) { nomSous = ''; } // illisible : non compté, jamais un plantage
+        // Le compte doit refléter ce que le LLM VERRA : on écarte aussi ce que la boucle de collecte
+        // écartera au dépilage (zone protégée, files d'arrivée/de revue) — sinon on flaggerait un
+        // dossier « trop plein » d'enfants absents de la liste, donc impossibles à regrouper.
+        if (nomSous && nomSous.charAt(0) !== '_' && !estSegmentStructurel_(nomSous) &&
+            !proteges[idSous] && idSous !== CONFIG.DOSSIERS.A_TRIER && idSous !== CONFIG.DOSSIERS.A_VERIFIER) {
+          nbSousDossiers++;
+        }
+        if (typeof estExcluDuReset_ === 'function' && estExcluDuReset_(nomSous)) continue;
+        front.push({ dossier: s, id: idSous, chemin: chemin, parentId: courant.id });
+      }
+    } catch (e) {
+      continue; // contenu illisible : dossier écarté de l'inventaire (jamais un plan sur du flou)
+    }
+    dossiers.push({ id: courant.id, chemin: chemin, nbFichiers: nbFichiers, exemples: exemples,
+      nbSousDossiers: nbSousDossiers });
+  }
+  return { dossiers: dossiers, tronque: tronque };
+}
+
+/**
+ * Vrai si `dossier` a un parent AUTRE que `parentConnu` dont la chaîne touche la zone protégée,
+ * OU si ses parents sont illisibles (échec fermé — ces métadonnées partent vers le LLM).
+ */
+function aParentEtrangerProtege_(dossier, parentConnu, proteges) {
+  try {
+    var parents = dossier.getParents();
+    while (parents.hasNext()) {
+      var p = parents.next();
+      if (p.getId() === parentConnu) continue; // la branche saine par laquelle le BFS est arrivé
+      if (proteges[p.getId()] || chaineMonteVersProtege_(p, proteges, 0, true)) return true;
+    }
+    return false;
+  } catch (e) {
+    return true; // illisible = protégé (prudence)
+  }
+}
+
+/**
+ * Résumé texte de l'inventaire pour le prompt : « #n | chemin (x fichiers ; ex. a, b) ». PURE (testée).
+ * Loi de Miller (ADR-0027) : un dossier SATURÉ porte en plus un flag explicite
+ * « , y sous-dossiers ⚠️ TROP DE DOSSIERS, À REGROUPER » que `promptReorg_` sait interpréter.
+ * Le flag n'est émis QU'AU-DELÀ de la tolérance : un dossier sain ne coûte pas un token de plus
+ * (budget §2.6 — aucun appel LLM ajouté par ce chantier). `nbSousDossiers` absent ou non numérique
+ * (inventaire d'une version antérieure) ⇒ AUCUN flag : on n'invente jamais une alerte.
+ */
+function resumeArborescence_(inventaire) {
+  return inventaire.map(function (d, i) {
+    var noms = (d.exemples || []).map(function (n) { return String(n).slice(0, 60); });
+    var exemples = noms.length ? ' ; ex. ' + noms.join(', ') : '';
+    var nb = Number(d.nbSousDossiers);
+    var sature = isFinite(nb) && nb >= CONFIG.REORG_MAX_SOUS_DOSSIERS_TOLERANCE
+      ? ', ' + nb + ' sous-dossiers ⚠️ TROP DE DOSSIERS, À REGROUPER'
+      : '';
+    return '#' + (i + 1) + ' | ' + d.chemin + ' (' + d.nbFichiers + ' fichiers' + sature + exemples + ')';
+  }).join('\n');
+}
+
+/** Prompt système du plan de réorg : JSON strict COMPACT, actions bornées, dossiers par NUMÉRO. */
+function promptReorg_() {
+  return 'Tu es l\'architecte de l\'arborescence Google Drive personnelle de Marc. On te donne ' +
+    'la liste des dossiers (#n | chemin (x fichiers ; exemples)). Propose une RÉORGANISATION des ' +
+    'DOSSIERS seulement (les fichiers sont classés par un autre système).\n' +
+    'Réponds en JSON COMPACT sur UNE seule ligne, sans indentation, aucun texte hors du JSON :\n' +
+    '{"actions": [{"type": "deplacer"|"fusionner"|"creer"|"renommer", "dossier": n, "vers": n, ' +
+    '"parent": n, "nom": "…", "raison": "…"}], "synthese": "…"}\n' +
+    '- "dossier", "vers", "parent" : des NOMBRES JSON (3 — jamais "3" ni "#3").\n' +
+    '- "deplacer" : dossier #n déplacé SOUS le dossier #vers.\n' +
+    '- "fusionner" : le CONTENU du dossier #n rejoint #vers (le dossier #n devient vide).\n' +
+    '- "creer" : nouveau dossier "nom" DANS le dossier #parent. Un dossier créé n\'a PAS de ' +
+    'numéro : ne déplace/fusionne JAMAIS vers un dossier que tu viens de créer.\n' +
+    '- "renommer" : dossier #n renommé "nom" (jamais de « / » dans un nom).\n' +
+    '- "raison" : une phrase COURTE (≤ 12 mots). "synthese" : 1 à 2 phrases.\n' +
+    'RÈGLES STRUCTURELLES (non négociables) :\n' +
+    '- Les racines de domaine « NN · … » sont INTOUCHABLES (ni deplacer, ni fusionner, ni renommer).\n' +
+    '- Les sous-dossiers d\'année « AAAA » sont STRUCTURELS : jamais fusionnés entre eux, jamais renommés.\n' +
+    '- Les sous-dossiers de schéma (Bail & contrat, Factures, Assurance, Relevés, Correspondance, ' +
+    'Entretien & réparations, …) gardent leur NOM exact — le classement route par nom.\n' +
+    '- Ne fusionne JAMAIS un dossier d\'ENTITÉ (nom propre) : ni dans la racine de son domaine, ni ' +
+    'dans un dossier de regroupement. "fusionner" DÉTRUIT le dossier source — il ne sert qu\'à réunir ' +
+    'DEUX dossiers de la MÊME entité (doublons de graphie). Pour REGROUPER, utilise TOUJOURS "deplacer".\n' +
+    '- Ne déplace JAMAIS un dossier vers un dossier d\'ANNÉE (« 2026 ») ni de type de pièce ' +
+    'd\'identité (« Passeport ») : ce ne sont jamais des parents de regroupement.\n' +
+    '- Anti-synonyme : si un dossier de regroupement thématique pertinent EXISTE DÉJÀ (même vide ou ' +
+    'partiellement rempli — il a un numéro dans la liste), tu DOIS l\'utiliser avec "deplacer" ' +
+    'plutôt que d\'en "creer" un nouveau. Deux regroupements synonymes côte à côte (« Anciens ' +
+    'employeurs » et « Employeurs passés ») sont une ERREUR.\n' +
+    '- "creer" sert aux dossiers STRUCTURELS (sous-dossier de schéma, année) et aux dossiers de ' +
+    'REGROUPEMENT thématique (règle suivante) — jamais à inventer une nouvelle entité.\n' +
+    '- Loi de Miller (ADR-0027) : un dossier marqué « ⚠️ TROP DE DOSSIERS » a dépassé la limite ' +
+    'cognitive (~' + CONFIG.REORG_MAX_SOUS_DOSSIERS_IDEAL + ' sous-dossiers) et devient illisible. ' +
+    'D\'ABORD, REGARDE s\'il contient DÉJÀ un dossier de regroupement adapté (il a un numéro dans la ' +
+    'liste) : si oui, DÉPLACE dedans les dossiers concernés — n\'en crée PAS un second. Sinon, ' +
+    'propose d\'y CRÉER un dossier de regroupement thématique (ex. « Anciens employeurs », ' +
+    '« Anciens véhicules », « Projets passés »). ATTENTION : un dossier que tu viens de créer n\'a ' +
+    'PAS de numéro — tu ne peux donc PAS y déplacer les dossiers dans CE plan ; les déplacements ' +
+    'seront proposés au plan SUIVANT, une fois qu\'il aura un numéro. Un seul "creer" de regroupement ' +
+    'par dossier saturé. Ne regroupe QUE des dossiers d\'ENTITÉ (un nom propre : employeur, véhicule, ' +
+    'logement, école) : JAMAIS une année « AAAA », JAMAIS un sous-dossier de schéma (Factures, ' +
+    'Assurance, …), JAMAIS un dossier de type de pièce d\'identité (Passeport, Permis de conduire, …).\n' +
+    'Au plus 40 actions, ordonnées de la plus importante à la moins importante ; peu d\'actions à ' +
+    'fort impact (doublons de dossiers, noms incohérents). Si l\'arborescence est déjà saine : ' +
+    '{"actions": [], "synthese": "Rien à changer."}. Ne référence les dossiers QUE par leur numéro.\n' +
+    'Exemple — entrée :\n' +
+    '#1 | 03 · Logement & véhicule (2 fichiers)\n' +
+    '#2 | 03 · Logement & véhicule/Assurance habitation (5 fichiers)\n' +
+    '#3 | 08 · Perso & projets/assurance maison (4 fichiers ; ex. attestation.pdf)\n' +
+    'Sortie :\n' +
+    '{"actions":[{"type":"fusionner","dossier":3,"vers":2,"raison":"Doublon d\'assurance habitation"}],' +
+    '"synthese":"Regroupe les deux dossiers d\'assurance habitation."}';
+}
+
+/**
+ * Parse et WHITELISTE le plan de réorg (sortie LLM = donnée non fiable). PURE (testée).
+ * Rejets par ACTION (jamais tout le plan pour une action invalide) : index hors 1..N (les
+ * chaînes « 3 »/« #3 » sont tolérées), auto-référence (même index OU même id — multi-parents),
+ * RACINE mutée (deplacer/fusionner/renommer d'un chemin sans « / » : domaines intouchables),
+ * cible/parent DESCENDANT du dossier muté (cycle), nom vide ou contenant « / ».
+ * Plan sans action valide alors qu'il en proposait → null ; plan explicitement vide → honnête.
+ * @param {?string} texte
+ * @param {Array} inventaire  [{id, chemin, …}] — les indices du plan pointent dedans
+ * @return {?{actions: Array, synthese: string}}
+ */
+/**
+ * Vrai si `nom` ne peut JAMAIS être le PARENT d'un regroupement : dossier d'ANNÉE (« 2026 ») ou de
+ * TYPE D'IDENTITÉ (« Passeport »). Y déplacer une entité fragmenterait la taxonomie (ADR-0023 :
+ * une entité = UN dossier, jamais `2026/Alphatek`). PURE (testée).
+ */
+function estCibleInterdite_(nom) {
+  var propre = String(nom).trim();
+  if (/^\d{4}$/.test(propre)) return true;
+  return (typeof TYPES_IDENTITE !== 'undefined' ? TYPES_IDENTITE : []).indexOf(propre) !== -1;
+}
+
+/**
+ * @param {?string} texte
+ * @param {Array} inventaire
+ * @param {Object} [idsEntites]  {dossierId: true} des entités VALIDÉES (référentiel) — sert au verrou
+ *   « jamais fusionner une entité ailleurs que dans une autre entité ». Absent ⇒ aucune action
+ *   `fusionner` sur un dossier non identifié n'est bloquée par ce verrou (les autres gardes tiennent).
+ */
+function parserPropositionReorg_(texte, inventaire, idsEntites) {
+  if (!texte) return null;
+  var brut = null;
+  try {
+    brut = JSON.parse(texte);
+  } catch (e) {
+    var m = String(texte).match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try { brut = JSON.parse(m[0]); } catch (e2) { return null; }
+  }
+  if (!brut || typeof brut !== 'object' || !Array.isArray(brut.actions)) return null;
+
+  var nb = inventaire.length;
+  var index = function (v) {
+    if (typeof v === 'string' && /^#?\d+$/.test(v)) v = Number(v.replace('#', ''));
+    return (typeof v === 'number' && v >= 1 && v <= nb && v % 1 === 0) ? v : null;
+  };
+  var estRacine = function (n) { return inventaire[n - 1].chemin.indexOf('/') === -1; };
+  var descendDe = function (n, deN) {
+    return inventaire[n - 1].chemin.indexOf(inventaire[deN - 1].chemin + '/') === 0;
+  };
+  // Segments structurels (années AAAA, schémas d'entité) : le router les find-or-create par NOM
+  // — les muter rendrait le plan non convergent (re-créés au prochain classement).
+  var estStructurel = function (n) { return estSegmentStructurel_(dernierSegment_(inventaire[n - 1].chemin)); };
+  var nomReserve = function (nm) { return nm.charAt(0) === '_' || /^\d{2} · /.test(nm); };
+  // Un dossier d'ENTITÉ se reconnaît à son `Dossier ID` au référentiel (ADR-0028), jamais à son nom.
+  var estEntite = function (n) { return !!(idsEntites && idsEntites[inventaire[n - 1].id]); };
+  var actions = [];
+  for (var i = 0; i < brut.actions.length && actions.length < CONFIG.REORG_ACTIONS_MAX; i++) {
+    var a = brut.actions[i];
+    if (!a || typeof a !== 'object') continue;
+    var nom = typeof a.nom === 'string' ? a.nom.trim().slice(0, 80) : '';
+    if (nom.indexOf('/') !== -1) continue; // « / » corromprait chemins et contrat de lecture
+    var raison = typeof a.raison === 'string' ? a.raison.trim().slice(0, 150) : '';
+    if (a.type === 'deplacer' || a.type === 'fusionner') {
+      var dossier = index(a.dossier);
+      var vers = index(a.vers);
+      if (dossier === null || vers === null || dossier === vers) continue;
+      if (inventaire[dossier - 1].id === inventaire[vers - 1].id) continue; // même dossier, 2 chemins
+      if (estRacine(dossier)) continue; // un domaine racine ne se déplace/fusionne jamais
+      if (estStructurel(dossier)) continue; // année/schéma : jamais déplacé ni fusionné
+      if (descendDe(vers, dossier)) continue; // cycle : cible à l'intérieur du dossier muté
+      // La CIBLE n'était pas contrôlée (asymétrie relevée en revue) : « deplacer #Entité vers #2026 »
+      // passait et produisait « 02 · Finances/2026/Alphatek » — ce qu'ADR-0023 interdit (une entité =
+      // UN dossier, jamais fragmentée par année). Les dossiers d'ANNÉE et de TYPE D'IDENTITÉ ne sont
+      // jamais des parents de regroupement. (Les schémas restent des cibles légitimes de `fusionner`
+      // pour le drainage de l'existant.)
+      if (estCibleInterdite_(dernierSegment_(inventaire[vers - 1].chemin))) continue;
+      // VERROU §2 (revue C28-31) : `fusionner` DÉTRUIT le dossier source et re-pointe
+      // `Entités.Dossier ID` vers la cible (`repointerEntites_`). Fusionner un dossier d'ENTITÉ dans
+      // un dossier de REGROUPEMENT ferait donc disparaître l'entité et ferait pointer deux entités
+      // sur le même fourre-tout — sous une ligne d'apparence anodine que Marc validerait. Le
+      // regroupement se fait TOUJOURS par `deplacer`. Entité → entité (fusion de doublons, C21-06)
+      // reste permis : c'est le seul usage légitime de `fusionner` sur une entité.
+      if (a.type === 'fusionner' && estEntite(dossier) && !estEntite(vers)) continue;
+      actions.push({ type: a.type, dossier: dossier, vers: vers, raison: raison });
+    } else if (a.type === 'creer') {
+      var parent = index(a.parent);
+      if (parent === null || !nom || nomReserve(nom)) continue;
+      actions.push({ type: 'creer', parent: parent, nom: nom, raison: raison });
+    } else if (a.type === 'renommer') {
+      var cible = index(a.dossier);
+      if (cible === null || !nom || nomReserve(nom)) continue;
+      if (estRacine(cible)) continue; // les noms « NN · … » appartiennent au self-healing NOMS_DOMAINES_TAG
+      if (estStructurel(cible)) continue; // année/schéma : le nom EST le contrat de routage
+      actions.push({ type: 'renommer', dossier: cible, nom: nom, raison: raison });
+    }
+  }
+  var synthese = typeof brut.synthese === 'string' ? brut.synthese.trim().slice(0, 300) : '';
+  if (actions.length === 0 && brut.actions.length > 0) return null; // tout était invalide → plan illisible
+  return { actions: actions, synthese: synthese };
+}
+
+/**
+ * Ligne d'onglet pour une action (en-têtes : Clé | Type | ID | Chemin actuel | Chemin proposé |
+ * Statut | Détail | Horodaté). PURE (testée) — les chemins affichés sont le contrat de lecture
+ * de l'app (C21-05, relatifs à la PORTÉE de l'analyse) ; l'application (C21-06) raisonne par ID,
+ * jamais par chemin. Colonne ID = « source→cible » (séparateur « → », jamais dans un fileId) :
+ * deplacer/fusionner portent les deux, creer porte « →parent », renommer la source seule.
+ */
+function lignePourAction_(tag, n, a, inventaire, horodate) {
+  var cle = tag + '|' + n;
+  var de = a.dossier ? inventaire[a.dossier - 1] : null;
+  if (a.type === 'deplacer') {
+    var vers = inventaire[a.vers - 1];
+    return [cle, 'deplacer', de.id + '→' + vers.id, de.chemin, vers.chemin + '/' + de.chemin.split('/').pop(), 'proposé', a.raison, horodate];
+  }
+  if (a.type === 'fusionner') {
+    var cibleF = inventaire[a.vers - 1];
+    return [cle, 'fusionner', de.id + '→' + cibleF.id, de.chemin, cibleF.chemin, 'proposé', a.raison, horodate];
+  }
+  if (a.type === 'creer') {
+    var parent = inventaire[a.parent - 1];
+    return [cle, 'creer', '→' + parent.id, '', parent.chemin + '/' + a.nom, 'proposé', a.raison, horodate];
+  }
+  // renommer
+  var chemin = de.chemin.split('/');
+  chemin[chemin.length - 1] = a.nom;
+  return [cle, 'renommer', de.id, de.chemin, chemin.join('/'), 'proposé', a.raison, horodate];
+}

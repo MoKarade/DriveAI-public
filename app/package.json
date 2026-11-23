@@ -1,0 +1,37 @@
+{
+  "name": "driveai-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DriveAI — app web (Phase 4, ADR-0008) : tableau de bord santé + corrections",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "portes": "node qualite/portes.mjs",
+    "portes:maj": "node qualite/portes.mjs --maj"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@mokarade/hub-contract": "github:MoKarade/hub-contract#v1.6.0",
+    "@playwright/test": "^1.65.1",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "@vitest/coverage-v8": "^5.1.0",
+    "dependency-cruiser": "^18.7.2",
+    "jsdom": "^28.1.0",
+    "knip": "^6.45.1",
+    "typescript": "^5.7.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.0.1"
+  }
+}

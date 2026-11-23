@@ -1,0 +1,15 @@
+{
+  "name": "driveai-moteur-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Filet de tests de la logique pure du moteur DriveAI (ADR-0006). Charge les .gs Apps Script dans un bac a sable Node (mocks Google) et verifie la logique de decision : routage, nommage, dates, garde zone protegee (§1), predicats de collecte, invariant vie privee (ADR-0007). Zero dependance : node --test.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "typecheck": "npm --prefix app exec -- tsc --noEmit -p app",
+    "lint": "node scripts/syntaxe-gs.mjs",
+    "build": "npm --prefix app run build"
+  }
+}

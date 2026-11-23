@@ -1,0 +1,1225 @@
+/**
+ * Décision « doublon » RAPIDE (fast path P1-20) — SANS classification (ni OCR ni LLM) : on sait déjà,
+ * par l'empreinte, que ce contenu est déjà classé ailleurs. On l'écarte dans « _Doublons » en gardant
+ * son NOM D'ORIGINE (nettoyé, préfixé de la date) : un exemplaire redondant, le nom parfait importe peu.
+ * Déplacement/copie seul, jamais de suppression (§2).
+ * @param {string} nomOriginal
+ * @param {Date} dateRef
+ * @param {string} ext
+ */
+function doublonRapide_(nomOriginal, dateRef, ext) {
+  var date = Utilities.formatDate(dateRef, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var base = String(nomOriginal || '').replace(/\.[^.\/]+$/, ''); // retire l'extension d'origine
+  return {
+    statut: 'doublon', domaine: '', chemin: '_Doublons',
+    nom: date + '_' + (champ_(base) || 'Copie') + ext,
+    dossierId: dossierDoublons_().getId()
+  };
+}
+
+/**
+ * Dossier de destination pour un doc TRANSVERSE (sans entité) — logique Phase 1.
+ * @param {Object} classif
+ * @param {string} date  AAAA-MM-JJ (pour le sous-dossier année)
+ * @return {string} ID de dossier Drive
+ */
+function dossierCible_(classif, date) {
+  var courant = DriveApp.getFolderById(idDomaine_(classif.domaine));
+
+  var cats = CONFIG.CATEGORIES[classif.domaine];
+  if (cats && classif.categorie && cats[classif.categorie]) {
+    courant = DriveApp.getFolderById(cats[classif.categorie]);
+  }
+  if (CONFIG.DOMAINES_PAR_ANNEE.indexOf(classif.domaine) !== -1) {
+    courant = sousDossier_(courant, date.substring(0, 4));
+  }
+  return courant.getId();
+}
+
+/** Vrai si `domaine` est un domaine reconnu : un des 7 fixes (ID en dur) OU un domaine auto-créé. */
+function domaineConnu_(domaine) {
+  return !!(CONFIG.DOMAINES[domaine]) || (CONFIG.DOMAINES_AUTO || []).indexOf(domaine) !== -1;
+}
+
+/** ID du dossier d'un domaine : ID fixe (CONFIG.DOMAINES) ou dossier auto-créé (find-or-create). */
+function idDomaine_(domaine) {
+  return CONFIG.DOMAINES[domaine] || dossierDomaineAuto_(domaine).getId();
+}
+
+/**
+ * Le dossier d'ID donné, ou `null` s'il n'existe plus OU s'il est À LA CORBEILLE.
+ *
+ * Un ID mémorisé en Script Property SURVIT au corbeillage : `getFolderById` rend le dossier sans
+ * broncher, et le classement continue d'y déposer des documents — qui sont purgés AVEC lui à
+ * 30 jours. C'est une SUPPRESSION AUTOMATIQUE, le garde-fou §1.2 non négociable, et elle vise les
+ * racines les plus sensibles du projet : `_Doublons` (§1.1c — « un doublon, MÊME SENSIBLE, va dans
+ * `_Doublons`, jamais effacé »), `_Médias`, `_Technique`, et les domaines AUTO (`07 · Santé`).
+ * Relevé en revue C28-93 : le remède de `sousDossier_` gardait la FEUILLE de la chaîne, pas ses
+ * RACINES. Rien n'interdit à Marc de corbeiller un de ces dossiers depuis Drive — la garde de nom
+ * qui les protège vit dans l'APP, elle ne couvre pas un clic droit dans Drive. Et ce lot livre
+ * précisément le bouton qui l'invite à faire le ménage.
+ * @param {string} id
+ * @return {Folder|null}
+ */
+function dossierVivantOuNull_(id) {
+  if (!id) return null;
+  try {
+    var d = DriveApp.getFolderById(id);
+    return d.isTrashed() ? null : d;   // corbeillé → on n'y dépose plus rien, on en recrée un
+  } catch (e) {
+    return null;                       // ID mort/illisible → recréation par nom (comportement d'origine)
+  }
+}
+
+/**
+ * Premier homonyme VIVANT parmi les enfants directs, ou un dossier neuf. Même motif que
+ * `sousDossier_` : `getFoldersByName` rend AUSSI les corbeillés.
+ * @param {Folder} parent
+ * @param {string} nom
+ * @return {Folder}
+ */
+function racineVivanteOuCreee_(parent, nom) {
+  var it = parent.getFoldersByName(nom);
+  while (it.hasNext()) {
+    var candidat = it.next();
+    if (!candidat.isTrashed()) return candidat;
+  }
+  return parent.createFolder(nom);
+}
+
+/**
+ * Renvoie (ou crée) le dossier d'un domaine AUTO-créé (ex. « 07 · Santé »), placé À CÔTÉ des domaines
+ * existants (même parent que le domaine par défaut). ID mémorisé en Script Property. Zéro clic, jamais
+ * de suppression. Idempotent (réutilise le dossier s'il existe déjà par nom, jamais un corbeillé).
+ * @param {string} nom
+ * @return {Folder}
+ */
+function dossierDomaineAuto_(nom) {
+  var props = PropertiesService.getScriptProperties();
+  var cle = 'DriveAI_DOM_' + nom;
+  var memorise = dossierVivantOuNull_(props.getProperty(cle));
+  if (memorise) return memorise;
+  var ref = DriveApp.getFolderById(CONFIG.DOMAINES[CONFIG.DOMAINE_DEFAUT]); // domaine de référence (01)
+  var parents = ref.getParents();
+  var racine = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  var dossier = racineVivanteOuCreee_(racine, nom);
+  props.setProperty(cle, dossier.getId());
+  return dossier;
+}
+
+/**
+ * Dossier cible À L'INTÉRIEUR d'une entité connue : sous-dossier fixe selon le
+ * type de doc, puis sous-dossier année si fort volume. Le sous-dossier n'est
+ * créé que s'il APPARTIENT au schéma fixe du type d'entité (jamais de dossier
+ * hors schéma). Le chemin lisible est dérivé de la LIGNE d'entité (ent), pas du
+ * classif du document.
+ * @param {{dossierId:string, type:string, entite:string, domaine:string, categorie:string}} ent
+ * @param {Object} classif
+ * @param {string} date
+ * @return {{id:string, chemin:string}}
+ */
+function dossierEntiteCible_(ent, classif, date) {
+  var courant = DriveApp.getFolderById(ent.dossierId);
+  var sousNom = sousDossierPourType_(classif.type_doc, ent.type);
+  if (sousNom) {
+    courant = sousDossier_(courant, sousNom);
+    if (CONFIG.SOUS_DOSSIERS_PAR_ANNEE.indexOf(sousNom) !== -1) {
+      courant = sousDossier_(courant, date.substring(0, 4));
+    }
+  }
+  var chemin = champ_(ent.domaine) || 'Domaine ?';
+  if (ent.categorie) chemin += '/' + champ_(ent.categorie);
+  chemin += '/' + (champ_(ent.entite) || 'Entité');
+  if (sousNom) chemin += '/' + sousNom;
+  return { id: courant.getId(), chemin: chemin };
+}
+
+/**
+ * Sous-dossier d'entité correspondant à un type de document, ou null.
+ * Garde-fou : on ne renvoie un sous-dossier que s'il fait partie du schéma fixe
+ * du type d'entité — sinon racine d'entité (évite des dossiers hors schéma).
+ * @param {string} typeDoc
+ * @param {string} typeEntite
+ * @return {?string}
+ */
+function sousDossierPourType_(typeDoc, typeEntite) {
+  var sousNom = CONFIG.SOUS_DOSSIER_PAR_TYPE[normaliserCle_(typeDoc)] || null;
+  if (!sousNom) return null;
+  var schema = CONFIG.SCHEMAS_ENTITE[typeEntite];
+  return (schema && schema.indexOf(sousNom) !== -1) ? sousNom : null;
+}
+
+/**
+ * Autres entités connues citées par le doc (pour les raccourcis multi-entités).
+ * Exclut le dossier primaire. Renvoie une liste d'IDs de dossiers d'entité.
+ * @param {Object} classif
+ * @param {string} dossierPrimaire
+ * @return {string[]}
+ */
+function autresEntitesConnues_(classif, dossierPrimaire) {
+  if (!classif.entites || !classif.entites.length) return [];
+  var ids = [];
+  for (var i = 0; i < classif.entites.length; i++) {
+    var nom = classif.entites[i];
+    if (!nom) continue;
+    var ent = resoudreEntite_({ domaine: classif.domaine, entite: nom });
+    if (ent.etat === 'connue' && ent.dossierId && ent.dossierId !== dossierPrimaire &&
+        ids.indexOf(ent.dossierId) === -1) {
+      ids.push(ent.dossierId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Crée le fichier dans le dossier cible à partir d'un blob (cas Gmail : copie).
+ * @param {Blob} blob
+ * @param {string} dossierId
+ * @param {string} nom
+ * @return {string} ID du fichier créé.
+ */
+function deposer_(blob, dossierId, nom) {
+  return DriveApp.getFolderById(dossierId).createFile(blob.setName(nom)).getId();
+}
+
+/**
+ * Renvoie (ou crée) un sous-dossier par nom.
+ * @param {Folder} parent
+ * @param {string} nom
+ * @return {Folder}
+ */
+function sousDossier_(parent, nom) {
+  // ⚠️ `getFoldersByName` rend AUSSI les dossiers à la corbeille. Sans ce filtre, un dossier
+  // corbeillé (par ADR-0014, au clic de Marc) redeviendrait une CIBLE de classement : les documents
+  // y seraient déposés, puis purgés avec lui à 30 jours — une SUPPRESSION AUTOMATIQUE, §1.2, le
+  // garde-fou non négociable. Défaut pré-existant, rendu atteignable par C28-93 qui débloque le
+  // bouton « tout corbeiller » : relevé en revue, fermé ici plutôt que laissé au backlog.
+  // ⚠️ Effet de bord assumé : si Marc RESTAURE dans les 30 jours un dossier qu'on a remplacé, il se
+  // retrouve avec deux homonymes. Le cas d'un dossier corbeillé par l'APP est inoffensif (il était
+  // vide) ; celui d'un dossier corbeillé À LA MAIN avec du contenu est le prix à payer pour ne
+  // jamais déposer dans une corbeille — un doublon se répare, une purge à 30 jours non.
+  return racineVivanteOuCreee_(parent, nom);
+}
+
+/**
+ * Renvoie un sous-dossier par nom s'il EXISTE (vivant, jamais un corbeillé) — et `null` sinon.
+ * Find-ONLY : ne crée JAMAIS (ADR-0060). C'est ce qui distingue « viser un dossier qui a reçu des
+ * fichiers » de « fabriquer un dossier vide pour avoir un ID à viser ».
+ * @param {Folder} parent
+ * @param {string} nom
+ * @return {?Folder}
+ */
+function sousDossierExistant_(parent, nom) {
+  var it = parent.getFoldersByName(nom);
+  while (it.hasNext()) {
+    var d = it.next();
+    if (!d.isTrashed()) return d;
+  }
+  return null;
+}
+
+/**
+ * Renvoie (ou crée) le dossier « _Doublons » où sont écartés les doublons (déplacement seul,
+ * jamais de suppression). Placé à côté de `00·À trier` (même parent = racine DriveAI). L'ID est
+ * mémorisé en Script Property pour éviter de le re-chercher à chaque doublon.
+ * @return {Folder}
+ */
+function dossierDoublons_() {
+  return dossierRacineParNom_('_Doublons', 'DriveAI_DOUBLONS_ID');
+}
+
+/** Renvoie (ou crée) le dossier `_Technique` (code/CAO écartés du classement), à côté de `_Doublons`. */
+function dossierTechnique_() {
+  return dossierRacineParNom_('_Technique', 'DriveAI_TECHNIQUE_ID');
+}
+
+/**
+ * Renvoie (ou crée) un dossier de service placé à la RACINE DriveAI (même parent que `00 · À trier`),
+ * hors domaines — ex. `_Doublons`, `_Technique`. ID mémorisé en Script Property. Déplacement seul,
+ * jamais de suppression. Idempotent (réutilise le dossier existant par nom).
+ * @param {string} nom
+ * @param {string} cleProp
+ * @return {Folder}
+ */
+function dossierRacineParNom_(nom, cleProp) {
+  var props = PropertiesService.getScriptProperties();
+  var memorise = dossierVivantOuNull_(props.getProperty(cleProp));
+  if (memorise) return memorise;
+  var aTrier = DriveApp.getFolderById(CONFIG.DOSSIERS.A_TRIER);
+  var parents = aTrier.getParents();
+  var racine = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  var dossier = racineVivanteOuCreee_(racine, nom);
+  props.setProperty(cleProp, dossier.getId());
+  return dossier;
+}
+
+/** Vrai si le fichier est TECHNIQUE (code/CAO) d'après son extension — écarté du classement documentaire. */
+function estTechnique_(nom) {
+  var ext = (extension_(nom) || '').toLowerCase();
+  return !!ext && CONFIG.EXT_TECHNIQUES.indexOf(ext) !== -1;
+}
+
+/**
+ * Décision de routage d'un fichier TECHNIQUE (ADR-0002 §3) : `_Technique`, nom = date + nom d'origine
+ * nettoyé (pas d'OCR/LLM, ce n'est pas un document à classer). Déplacement/copie seul, jamais supprimé.
+ * @param {string} nomOrigine
+ * @param {Date} dateRef
+ * @param {string} ext
+ */
+function routageTechnique_(nomOrigine, dateRef, ext) {
+  var date = Utilities.formatDate(dateRef, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var base = String(nomOrigine || '').replace(/\.[^.\/]+$/, '');
+  return {
+    statut: 'technique', domaine: '', chemin: '_Technique',
+    nom: date + '_' + (champ_(base) || 'Fichier') + ext,
+    dossierId: dossierTechnique_().getId()
+  };
+}
+
+/* ---------- Chantier #11 (ADR-0009 §2) : médias bruts → `_Médias` ---------- */
+
+/** Renvoie (ou crée) le dossier `_Médias` (hors domaines). ID mémorisé en Script Property. */
+function dossierMedias_() {
+  return dossierRacineParNom_('_Médias', 'DriveAI_MEDIAS_ID');
+}
+
+/** Vrai si l'extension est un média DIRECT (vidéo/audio/gif — jamais un document). PUR. */
+function estMediaDirect_(nom) {
+  var ext = extension_(nom).toLowerCase();
+  return !!ext && CONFIG.EXT_MEDIAS_DIRECT.indexOf(ext) !== -1;
+}
+
+/** Vrai si l'extension est une photo (candidate au fast-path SI nom non-documentaire ET OCR vide). PUR. */
+function estPhoto_(nom) {
+  var ext = extension_(nom).toLowerCase();
+  return !!ext && CONFIG.EXT_PHOTOS.indexOf(ext) !== -1;
+}
+
+/**
+ * Vrai si le NOM est manifestement non-documentaire : identifiant numérique d'export (Facebook :
+ * « 251319877474117.jpg »), compteur d'appareil (« IMG_2734 », « DSC_0042 », « PXL_2023… »),
+ * capture (« Screenshot… », « WhatsApp Image… »). Un nom PORTEUR DE SENS (« CV Marc.jpg »,
+ * « 2024-03-05_Facture_X.jpg ») renvoie false → le document garde son analyse complète. PUR.
+ * @param {string} nom
+ * @return {boolean}
+ */
+function estNomNonDocumentaire_(nom) {
+  var base = String(nom || '').replace(/\.[^.\/]+$/, '').trim();
+  if (!base) return false;
+  // R3 (défense en profondeur, §1) : un mot-clé de la zone protégée dans le NOM rend le fichier
+  // documentaire quoi qu'il arrive (« Photo 2024 passeport.jpg » garde son analyse complète).
+  var minuscule = base.toLowerCase();
+  var proteges = CONFIG.MOTS_CLES_PROTEGES_INTENTIONS || [];
+  for (var i = 0; i < proteges.length; i++) {
+    if (proteges[i].length > 4 && minuscule.indexOf(proteges[i]) !== -1) return false;
+    if (proteges[i].length <= 4 && new RegExp('\\b' + proteges[i] + '\\b').test(minuscule)) return false;
+  }
+  if (/^[\d\s_\-()]+$/.test(base) && (base.match(/\d/g) || []).length >= 8) return true; // ID numérique long
+  if (/^(img|dsc|dscn|dscf|pxl|mvimg|photo|video|vid|image)[ _\-]?\d/i.test(base)) return true; // compteur d'appareil
+  if (/^(screenshot|capture d.écran|capture|whatsapp (image|video)|signal-)/i.test(base)) return true; // captures
+  return false;
+}
+
+/**
+ * Décision de routage d'un MÉDIA BRUT : `_Médias`, nom d'ORIGINE conservé (traçabilité — les noms
+ * d'export sont leurs identifiants). Jamais re-collecté : `_Médias` est hors domaines (racine `_`),
+ * comme `_Doublons`/`_Technique`.
+ * @param {string} nomOrigine
+ * @return {{statut:string, domaine:string, chemin:string, nom:string, dossierId:string}}
+ */
+function routageMedia_(nomOrigine) {
+  return {
+    statut: 'média', domaine: '', chemin: '_Médias',
+    nom: String(nomOrigine || 'média'),
+    dossierId: dossierMedias_().getId()
+  };
+}
+
+/* ============================================================================
+ * DÉCISION NON-DOCUMENT (refonte 2026-07-07). Un export Facebook, un fichier système, une photo sans
+ * texte ne sont PAS des documents → `_Technique`/`_Médias`, JAMAIS un domaine (surtout pas la zone
+ * protégée 04). Garde DOMINANTE : une pièce d'identité / un doc 01|04 / un vrai scan documentaire
+ * n'est JAMAIS écarté — même en image, même OCR pauvre. Fonctions PURES.
+ * ==========================================================================*/
+
+/** Reprise nominale du filtre TECHNIQUE par extension (code/CAO). PUR. */
+function extensionEstTechnique_(nom) {
+  return estTechnique_(nom);
+}
+
+/**
+ * Vrai si le fichier est un EXPORT DE DONNÉES de compte (Facebook/Instagram…) : .html/.htm/.json ET
+ * (nom évocateur OU gros HTML sans émetteur). Distingue une facture .html légitime (émetteur, petite). PUR.
+ * @param {{nomFichier:string, taille?:number, emetteur?:string}} meta
+ */
+function estExportDonnees_(meta) {
+  meta = meta || {};
+  var nom = String(meta.nomFichier || '');
+  var ext = (extension_(nom) || '').toLowerCase();
+  if (['.html', '.htm', '.json'].indexOf(ext) === -1) return false;
+  var k = normaliserCle_(nom.replace(/\.[^.]+$/, ''));
+  if (/facebook|instagram|messenger|whatsapp|linkedin|snapchat|export|votre information|your information|friends|posts|messages|donnee/.test(k)) return true;
+  // Export de MAIL / correspondance (Message_…, Correspondance_…) sur-capté vers `_Technique`
+  // (recensement 2026-07-16 : 169 « Inconnu » dans _Technique) : ce n'est PAS un export de données
+  // brut → on le laisse au pipeline pour un classement au DOMAINE (ADR-0025, axe 2). Placé APRÈS le
+  // filtre social : un vrai export Messenger (« messages » pluriel) y est déjà capté ci-dessus.
+  // Lookahead `(?!_?\d)` (revue code-reviewer C28-28) : un export Facebook nomme ses fils
+  // `message_1.html`/`conversation_3.html` (singulier + chiffre) — ceux-là RESTENT des exports.
+  if (/(^|[_ ])(message(?!_?\d)|correspondance|courriel|courrier|conversation(?!_?\d))(_| |$)/.test(k)) return false;
+  // Gros HTML de navigation SANS émetteur identifié → export (une facture .html porte un émetteur).
+  return ext !== '.json' && (meta.taille || 0) > CONFIG.EXPORT_TAILLE_MIN &&
+    !(meta.emetteur && String(meta.emetteur).trim());
+}
+
+/** Vrai si média SANS TEXTE (vidéo/audio/gif toujours ; photo si nom non-documentaire ET OCR pauvre). PUR. */
+function estMediaSansTexte_(meta, extraitOcr) {
+  meta = meta || {};
+  var nom = String(meta.nomFichier || '');
+  if (estMediaDirect_(nom)) return true;
+  return estPhoto_(nom) && estNomNonDocumentaire_(nom) &&
+    String(extraitOcr || '').length < CONFIG.MEDIAS_OCR_MAX_CARS;
+}
+
+/**
+ * Garde DOMINANTE anti-faux-négatif : `true` = VRAI document, à NE PAS écarter. Vrai si pièce
+ * d'identité, OU domaine 01|04 (identité / zone protégée), OU (domaine valide + type documentaire +
+ * émetteur OU titulaire). Empêche qu'un passeport/facture PHOTOGRAPHIÉ (même OCR pauvre) parte en média. PUR.
+ */
+function distinguerVraiScan_(classif) {
+  if (!classif) return false;
+  if (classif.estDocumentIdentite === true) return true;
+  var num = String(classif.domaine || '').slice(0, 2);
+  if (num === '01' || num === '04') return true; // identité / immigration (protégée) — jamais un « média »
+  var aType = !!(classif.type_doc && String(classif.type_doc).trim());
+  var aTiers = !!((classif.emetteur && String(classif.emetteur).trim()) ||
+    (classif.titulaire && String(classif.titulaire).trim()));
+  return domaineConnu_(classif.domaine) && aType && aTiers;
+}
+
+/**
+ * Décision NON-DOCUMENT — ordre EXPLICITE (spec revue) :
+ *  (0) vrai document (distinguerVraiScan_) → NON écarté, SAUF export de données déterministe (un
+ *      export ne porte jamais de domaine, encore moins la zone 04) ;
+ *  (1) sinon écarté si le LLM le dit, ou extension technique, ou export, ou média sans texte ;
+ *  (2) routage `_Technique` (code/export/système) ou `_Médias` (photo/vidéo sans texte).
+ * Ne route JAMAIS vers un domaine, JAMAIS vers 04. PUR.
+ * @param {Object} classif
+ * @param {{nomFichier:string, taille?:number, extraitOcr?:string, emetteur?:string}} meta
+ * @return {{estNonDoc:boolean, routage:('_Technique'|'_Médias'|null)}}
+ */
+function decisionNonDocument_(classif, meta) {
+  meta = meta || {};
+  var estExport = estExportDonnees_(meta);
+  if (distinguerVraiScan_(classif) && !estExport) return { estNonDoc: false, routage: null };
+  var technique = estExport || extensionEstTechnique_(meta.nomFichier);
+  var media = estMediaSansTexte_(meta, meta.extraitOcr);
+  if ((classif && classif.estNonDocument === true) || technique || media) {
+    var routage = technique ? '_Technique' : (media ? '_Médias'
+      : (classif && (classif.routageHorsDomaine === '_Technique' || classif.routageHorsDomaine === '_Médias')
+        ? classif.routageHorsDomaine : '_Médias'));
+    return { estNonDoc: true, routage: routage };
+  }
+  return { estNonDoc: false, routage: null };
+}
+
+/* ============================================================================
+ * FAIL-SAFE HYBRIDE ULTRA-STRICT (ADR-0016, décision Marc 2026-07-07). Révise §2.1 ÉTROITEMENT : on
+ * ré-introduit `00 · À vérifier`, mais UNIQUEMENT quand l'analyse n'a produit AUCUN fait exploitable
+ * (`domaine` inconnu ET `emetteur` absent ET `type_doc` absent). Sinon, classé au mieux comme avant.
+ * La conjonction ET garantit l'anti-saturation (un seul fait présent suffit à classer). PURES + I/O.
+ * ==========================================================================*/
+
+// Valeurs SENTINELLES que le LLM émet pour « je ne sais pas » (Haiku n'offre PAS `null` pour type_doc
+// → il écrit « Inconnu ») : à traiter comme ABSENTES, sinon le fail-safe RATE le cas vide dans le
+// chemin live et le doc atterrit au hasard dans `01 · Administratif` (revue code #26).
+var SENTINELLES_VIDES = ['inconnu', 'inconnue', 'unknown', 'null', 'undefined', 'na', 'none',
+  'aucun', 'aucune', 'so', 'vide', 'nc', 'indetermine'];
+
+/** Vrai si un champ de classification est réellement RENSEIGNÉ : non vide ET pas une sentinelle. PUR. */
+function estRenseigne_(v) {
+  if (v == null) return false;
+  var s = String(v).trim();
+  if (!s || !champ_(v)) return false;
+  var k = s.toLowerCase().replace(/[^a-z0-9]/g, ''); // 'N/A'→'na', '-'→'', 'Inconnu'→'inconnu'
+  return k !== '' && SENTINELLES_VIDES.indexOf(k) === -1;
+}
+
+/**
+ * Vrai si l'analyse ne porte AUCUN fait exploitable (fail-safe ADR-0016) : domaine inconnu/hors-liste
+ * ET émetteur ET type_doc ET entité ET descripteur tous absents (sentinelles incluses). Le MOINDRE
+ * fait présent ⇒ false (on classe au mieux — « granularité = enrichissement, jamais frein » : entité
+ * et descripteur comptent, révision code #26). Ne dépend d'AUCUNE I/O. PUR.
+ * @param {Object} classif
+ * @return {boolean}
+ */
+function estClassificationVide_(classif) {
+  if (!classif) return true; // aucune classif du tout → à vérifier
+  return !domaineConnu_(classif.domaine) &&
+    !estRenseigne_(classif.emetteur) &&
+    !estRenseigne_(classif.type_doc) &&
+    !estRenseigne_(classif.entite) &&          // un fait exploitable (entité) suffit à classer
+    !estRenseigne_(classif.descripteur);       // v2 : descripteur toujours produit → jamais vide en v2
+}
+
+/**
+ * Dossier `00 · À vérifier` (fail-safe) : réutilise l'ID configuré s'il vit encore, sinon find-or-create
+ * à la racine DriveAI (Marc a pu supprimer l'ancien dossier vide). Déplacement seul, jamais supprimé.
+ * @return {Folder}
+ */
+function dossierAVerifier_() {
+  try { return DriveApp.getFolderById(CONFIG.DOSSIERS.A_VERIFIER); }
+  catch (e) { return dossierRacineParNom_('00 · À vérifier', 'DriveAI_A_VERIFIER_ID'); }
+}
+
+/**
+ * Décision fail-safe : document déplacé vers `00 · À vérifier` (validation humaine via l'app). Nom au
+ * mieux (jamais « Inconnu ») : `nommerDocument_` retombe sur « …_Type.ext » quand tout est absent.
+ * @param {Object} classif
+ * @param {string} date  AAAA-MM-JJ
+ * @param {string} ext
+ * @return {{statut:string, domaine:string, chemin:string, nom:string, dossierId:string, autresEntites:string[]}}
+ */
+function routageAVerifier_(classif, date, ext) {
+  return {
+    statut: 'à vérifier', domaine: '', chemin: '00 · À vérifier',
+    nom: nommerDocument_(classif, date, ext),
+    dossierId: dossierAVerifier_().getId(), autresEntites: []
+  };
+}
+
+/* ---------- Nommage (docs/NAMING.md) ---------- */
+
+/**
+ * @param {Object} classif        sortie du LLM
+ * @param {Date} dateReference    date de réception (Gmail) ou de dépôt (intake), fallback de date
+ * @param {string} ext            extension d'origine (".pdf"…)
+ * @return {{statut:string, domaine:string, chemin:string, nom:string,
+ *           dossierId?:string, raison?:string, autresEntites?:string[]}}
+ */
+function deciderRoutage_(classif, dateReference, ext) {
+  var date = dateNormalisee_(classif.date_doc, dateReference); // AAAA-MM-JJ
+
+  // FAIL-SAFE (ADR-0016) : aucun fait exploitable → filet humain `00 · À vérifier` au lieu d'un
+  // rangement au hasard. Ultra-strict → rare (anti-saturation). Garde identité symétrique avec le
+  // chemin v2 (aujourd'hui toujours vraie en Haiku : `estDocumentIdentite` est un champ v2 — mais la
+  // symétrie protège si Haiku venait à produire ce signal).
+  if (!estDocumentIdentitePersonnel_(classif) && estClassificationVide_(classif)) {
+    return routageAVerifier_(classif, date, ext);
+  }
+
+  // (Le cas DOUBLON vit en AMONT, au fast-path du Pipeline (P1-20) — plus jamais ici.)
+  // 1) Domaine introuvable (LLM hors-liste/malformé) : on CLASSE au mieux dans le domaine par défaut
+  // (le cas tout-vide est déjà parti en revue ci-dessus). Zéro fichier en limbo.
+  // `domaineConnu_` accepte les 7 domaines fixes ET les domaines auto-créés (07 · Santé, ADR-0002).
+  if (!domaineConnu_(classif.domaine)) classif.domaine = CONFIG.DOMAINE_DEFAUT;
+
+  // 2) Granularité entité (Phase 2). L'entité est un ENRICHISSEMENT, jamais un frein :
+  //    - entité connue (validée)        → dossier d'entité granulaire ;
+  //    - entité inconnue / en attente    → on CLASSE au niveau domaine (comportement Phase 1)
+  //                                        et on PROPOSE l'entité (ligne « en_attente ») pour
+  //                                        plus tard — surtout pas le document en revue ;
+  //    - entité null (transverse)        → dossier générique du domaine.
+  // Anti-prolifération préservé : proposer une entité n'est pas créer un dossier.
+  var ent = resoudreEntite_(classif);
+  var dossierId, chemin;
+  if (ent.etat === 'connue') {
+    var cible = dossierEntiteCible_(ent, classif, date);
+    dossierId = cible.id;
+    chemin = cible.chemin;
+  } else {
+    if (ent.etat === 'inconnue' || ent.etat === 'en_attente') entiteEnAttenteAjouter_(classif);
+    dossierId = dossierCible_(classif, date);
+    chemin = cheminLisible_(classif);
+  }
+
+  var nom = nomParType_(date, classif.type_doc, classif.emetteur, ext);
+  return {
+    statut: 'classé', domaine: classif.domaine, chemin: chemin, nom: nom,
+    dossierId: dossierId, autresEntites: autresEntitesConnues_(classif, dossierId)
+  };
+}
+
+/* ============================================================================
+ * ROUTAGE V2 (refonte #26, C26-06) — consomme le schéma étendu de l'analyse 2 passes. ACTIF seulement
+ * si `CONFIG.ANALYSE_V2` (gate au Pipeline). Différences avec `deciderRoutage_` :
+ *  (1) NON-DOCUMENT écarté vers `_Technique`/`_Médias` (jamais un domaine, jamais 04) ;
+ *  (2) pièce d'IDENTITÉ rangée PAR TYPE (dossier partagé Marc + proches), nom = titulaire ;
+ *  (3) classement à PLAT par défaut (ADR-0023) — sous-dossier UNIQUEMENT pour une entité majeure canonique ou un type d'identité ;
+ *  (4) nom via `nommerDocument_` (jamais « Inconnu » — descripteur en repli).
+ * `planRoutageV2_` est le cœur PUR (aucune I/O) ; `deciderRoutageV2_` en est l'enveloppe Drive.
+ * ==========================================================================*/
+
+/**
+ * Cœur PUR de la décision v2 : détermine le TYPE de placement (non-document vs classé), le domaine,
+ * le sous-dossier et le nom final — sans aucune I/O Drive (testable). PUR.
+ * @param {Object} classif  sortie de l'analyse 2 passes (schéma v2)
+ * @param {{nomFichier:string, taille?:number, extraitOcr?:string, emetteur?:string}} meta
+ * @param {string} date  AAAA-MM-JJ (déjà normalisée)
+ * @param {string} ext
+ * @param {Object} [validees]  carte des entités VALIDÉES (cleCanoniqueEntite_ → libellé canonique,
+ *   cf. entitesValideesParCle_). ABSENTE/vide ⇒ AUCUN dossier d'entité (verrou : « un dossier
+ *   d'entité SEULEMENT si validée par Marc » — le prompt seul ne suffit pas, ADR-0023 révisé).
+ * @return {{type:('non-doc'|'classé'), routage?:('_Technique'|'_Médias'), domaine?:string, sousDossier?:string, nom?:string}}
+ */
+function planRoutageV2_(classif, meta, date, ext, validees) {
+  // (1) Non-document → hors domaines (la garde DOMINANTE de decisionNonDocument_ protège identité/01/04).
+  var nd = decisionNonDocument_(classif, meta);
+  if (nd.estNonDoc) return { type: 'non-doc', routage: nd.routage };
+
+  var c = classif || {};
+  // (2) FAIL-SAFE (ADR-0016) : analyse TOUT-NULL → `00 · À vérifier` (une pièce d'identité a un
+  // type/titulaire → jamais vide → jamais déviée). Ultra-strict, donc rare.
+  if (!estDocumentIdentitePersonnel_(c) && estClassificationVide_(c)) return { type: 'à vérifier' };
+
+  // (3) Domaine introuvable (LLM hors-liste/malformé) → domaine par défaut (jamais de limbo).
+  if (!domaineConnu_(c.domaine)) c.domaine = CONFIG.DOMAINE_DEFAUT;
+
+  var nom = nommerDocument_(c, date, ext);
+  var di = estDocumentIdentitePersonnel_(c) ? dossierIdentite_(c) : null; // identité → domaine dérivé du TYPE
+  // ADR-0058 (décision Marc : « mes paies ne devraient pas arriver dans employeur mais seulement
+  // dans finances ») — DEUXIÈME type dont le domaine est une PROPRIÉTÉ du document, jamais une
+  // interprétation du LLM. Même patron que la ligne d'identité juste au-dessus, et pour la même
+  // raison : une paie NOMME un employeur, donc le LLM répond « 05 » — ce qui n'est pas absurde,
+  // c'est la mauvaise règle pour ce type-là. Les MISSIONS le savaient (« le domicile UNIQUE des
+  // paies est 02 »), le FLUX non : elles rangeaient, il dé-rangeait, et comme elles convergent puis
+  // s'arrêtent, c'est lui qui avait le dernier mot sur tout ce qui arrive désormais.
+  // Évalué sur le nom FINAL — celui que `cheminCibleReset_` reçoit trois lignes plus bas, avec la
+  // MÊME extraction de type : une seule règle, deux consommateurs.
+  var domaine = di ? di.domaine
+    : (estRevenuEmployeurReset_(nom, c.type_doc) ? CONFIG.DOMAINE_REVENUS
+      : (c.domaine !== '04 · Immigration' &&
+         typeof estFactureOuRecuPaiementReset_ === 'function' &&
+         estFactureOuRecuPaiementReset_(nom, c.type_doc) ? CONFIG.DOMAINE_REVENUS : c.domaine));
+
+  // (4) UNIFICATION (ADR-0033, décision Marc) : le flux DÉLÈGUE son sous-chemin à la MÊME fonction
+  // pure que le Reset (`cheminCibleReset_`) sur le nom FINAL → convergence flux↔reset par
+  // construction (tripwire). Le flux ne calcule jamais un chemin HORS du domaine (aucune sortie 04).
+  var relReset = cheminCibleReset_(domaine, nom);
+  if (relReset) {
+    var segs = relReset.split('/');
+    return { type: 'classé', domaine: domaine, sousDossier: segs.join('/'),
+      segments: segs, dossierIdCible: '', nom: nom };
+  }
+
+  // (5) REPLI historique (le Reset rend null → il laisserait ce doc à sa passe LLM du reliquat ; le
+  // flux, sans 2ᵉ passe LLM par doc, retombe sur son classement actuel — jamais de limbo) : identité
+  // par TYPE ; sinon entité VALIDÉE au référentiel (sinon année/racine, règle unique consolidation).
+  var sousDossier, dossierIdCible = ''; // ADR-0028 : l'ID prime sur le nom quand il existe
+  if (di) {
+    // REPLI IDENTITÉ (C28-72) : la table vient de REFUSER d'attribuer ce document. On dégrade DANS
+    // `Pièces d'identité`, jamais vers un frère de niveau 1 — cf. `repliIdentite_`.
+    sousDossier = repliIdentite_(di);
+  } else {
+    var candidat = sousDossierPourNom_(c);
+    var cleEnt = candidat ? cleCanoniqueEntite_(domaine, candidat) : null;
+    var entiteValidee = (cleEnt && validees && validees[cleEnt]) ? validees[cleEnt] : null;
+    var cible = sousCheminDomaine_({
+      domaine: domaine, entite: entiteValidee,
+      annee: /^\d{4}/.test(date || '') ? date.substring(0, 4) : null,
+      nom: nom, // ADR-0052 : ouvre le repli PAR TYPE, dernier échelon avant la racine
+    });
+    sousDossier = cible.nom;
+    dossierIdCible = cible.id;
+  }
+  // ADR-0052 — un sous-chemin MULTI-SEGMENTS (« Reçus & factures/2025 ») doit être créé NIVEAU PAR
+  // NIVEAU. Sans cette conversion, la branche `else` de `deciderRoutageV2_` appliquait `champ_` au
+  // chemin ENTIER — et `champ_` remplace `/` par `-` : on obtenait UN dossier nommé
+  // « Reçus & factures-2025 », là où `ConsolidationExec` (`src/ConsolidationExec.gs`) découpe puis
+  // assainit segment par segment et vise « Reçus & factures/2025 ». Deux dossiers concurrents, et
+  // la consolidation qui re-propose « Déplacer » à chaque passe.
+  //
+  // ⚠️ `.map(champ_).filter(Boolean)` est EXACTEMENT le traitement du jumeau : c'est ce qui rend les
+  // deux côtés identiques, et c'est aussi ce qui protège des entrées dégénérées. Le cas n'est PAS
+  // théorique (trouvé par la revue sécurité) : `entitesValideesParCle_` rend `dossierId: ''` pour une
+  // entité validée dont le dossier n'existe pas encore, donc une entité au libellé « Banques//X »
+  // arrive ici — sans `filter(Boolean)`, `sousDossier_(cible, '')` lève `createFolder('')` EN PLEIN
+  // INTAKE. Si le découpage ne laisse rien (libellé fait de barres obliques), on retombe sur le
+  // comportement historique plutôt que de viser la racine.
+  // `!dossierIdCible` : une entité qui PORTE un ID de dossier se résout par cet ID (ADR-0028,
+  // topologie d'abord, à n'importe quelle profondeur) — la découper par son nom la re-créerait à
+  // plat. Le découpage ne concerne donc que les chemins SANS identité propre : repli par type,
+  // buckets d'année, et entité validée dont le dossier n'existe pas encore.
+  if (!dossierIdCible && sousDossier.indexOf('/') !== -1) {
+    var segsRepli = segmentsChemin_(sousDossier);
+    if (segsRepli.length) {
+      return { type: 'classé', domaine: domaine, sousDossier: segsRepli.join('/'),
+        segments: segsRepli, dossierIdCible: '', nom: nom };
+    }
+  }
+  return { type: 'classé', domaine: domaine, sousDossier: sousDossier,
+    dossierIdCible: dossierIdCible, nom: nom };
+}
+
+/**
+ * Décision de routage V2 (enveloppe I/O de `planRoutageV2_`) : find-or-create du sous-dossier sous le
+ * domaine, anti-écrasement du nom (garantirNomUnique_). Ne route JAMAIS un non-document vers un domaine.
+ * @param {Object} classif
+ * @param {{nomFichier:string, taille?:number, extraitOcr?:string, emetteur?:string}} meta
+ * @param {Date} dateReference
+ * @param {string} ext
+ * @return {{statut:string, domaine:string, chemin:string, nom:string, dossierId:string, autresEntites:string[]}}
+ */
+// Entités déjà re-pointées CE run (ADR-0033 Point 4, dédup — voir `deciderRoutageV2_`). Frais à
+// chaque exécution Apps Script (un tick = une exécution → variable de module ré-initialisée).
+var _repointesRun = {};
+
+function deciderRoutageV2_(classif, meta, dateReference, ext) {
+  var date = dateNormalisee_(classif && classif.date_doc, dateReference);
+  // Carte des entités VALIDÉES (1 lecture de cache/run — le cache Entités est déjà chargé par le
+  // tick) : le verrou « dossier d'entité seulement si validée » vit dans planRoutageV2_ (PUR).
+  var validees;
+  try { validees = entitesValideesParCle_(); } catch (e) { validees = {}; } // échec fermé : à plat
+  var plan = planRoutageV2_(classif, meta, date, ext, validees);
+
+  if (plan.type === 'non-doc') {
+    return plan.routage === '_Technique'
+      ? routageTechnique_(meta.nomFichier, dateReference, ext)
+      : routageMedia_(meta.nomFichier);
+  }
+  if (plan.type === 'à vérifier') return routageAVerifier_(classif, date, ext); // fail-safe (ADR-0016)
+
+  var dom = DriveApp.getFolderById(idDomaine_(plan.domaine));
+  // ADR-0023 : sous-dossier VIDE = classement à PLAT à la racine du domaine (plus de repli
+  // « Divers »). Sinon, assainit le nom (caractères interdits Drive → '-', comme pour les noms
+  // de fichiers) : `plan.sousDossier` vient d'une entité LLM libre, jamais d'un ID fixe.
+  var cible, segments;
+  if (plan.segments) {
+    // ADR-0033 — chemin thématique MULTI-NIVEAUX délégué au Reset : créé segment par segment avec
+    // EXACTEMENT `sousDossier_` (comme `resoudreCibleReset_`, Reset.gs) → structure identique au
+    // Reset, donc convergence réelle sur le Drive (pas seulement dans la formule).
+    cible = dom;
+    for (var s = 0; s < plan.segments.length; s++) cible = sousDossier_(cible, plan.segments[s]);
+    segments = plan.segments;
+    // ADR-0033 Point 4 (revue structure-keeper) : si le DERNIER segment est une entité VALIDÉE dont
+    // le référentiel pointe AILLEURS, re-pointer son `Dossier ID` vers ce nœud thématique — EXACTEMENT
+    // comme `resoudreCibleReset_` (Reset.gs). Sans ça, une entité-table relocalisée (seed à plat,
+    // regroupement ADR-0027) laisserait un `Dossier ID` périmé et un dossier concurrent ; les 3
+    // consommateurs (flux, conso, reset) re-pointent désormais À L'IDENTIQUE.
+    // DÉDUP RUN-SCOPE (revue code-reviewer) : `entitesValideesParCle_` RECONSTRUIT sa carte à CHAQUE
+    // document depuis `_entitesCache` (jamais rechargé en cours de tick, ni mis à jour par
+    // `repointerEntites_` qui écrit la Sheet) — muter `ent.dossierId` ne déduperait donc RIEN d'un doc
+    // à l'autre. `_repointesRun` (set frais par exécution Apps Script) mémorise l'ancien ID déjà
+    // re-pointé → l'onglet Entités n'est relu QU'UNE fois par entité périmée et par run, jamais N fois.
+    var dernierSeg = plan.segments[plan.segments.length - 1];
+    var cleEnt = cleCanoniqueEntite_(plan.domaine, dernierSeg);
+    var ent = cleEnt ? validees[cleEnt] : null;
+    if (ent && ent.dossierId && ent.dossierId !== cible.getId() && !_repointesRun[ent.dossierId]) {
+      var ancienId = ent.dossierId;
+      try { repointerEntites_(ancienId, cible.getId()); _repointesRun[ancienId] = true; }
+      catch (e) { journalErreur_('Router', 'Re-pointage d\'entité différé (' + dernierSeg + ') : ' + e); }
+    }
+  } else {
+    var sousNom = champ_(plan.sousDossier) || '';
+    // ADR-0028 — TOPOLOGIE D'ABORD : si le plan porte l'ID du dossier d'entité, on y range le
+    // document LÀ OÙ IL EST (même imbriqué sous un regroupement, ADR-0027) au lieu de le re-créer à
+    // plat. Trois conditions pour l'utiliser, sinon repli par NOM (comportement historique) :
+    // l'ID s'ouvre, le dossier est TOUJOURS sous ce domaine, et sa chaîne est lisible.
+    var parId = dossierEntiteParId_(plan.dossierIdCible, dom); // null ⇒ repli par nom (voir la fonction)
+    cible = parId ? parId.dossier : (sousNom ? sousDossier_(dom, sousNom) : dom);
+    segments = parId ? parId.segments : (sousNom ? [sousNom] : []);
+  }
+  var nom = garantirNomUnique_(plan.nom, nomsDansDossier_(cible.getId()));
+  return {
+    statut: 'classé', domaine: plan.domaine,
+    // Chemin RÉELLEMENT obtenu (pas le nominal) — sinon `cheminsSyncCompatibles_` juge l'Index
+    // incompatible avec le Drive et marque le fichier « déplacé » en vidant son domaine.
+    chemin: plan.domaine + (segments.length ? '/' + segments.join('/') : ''),
+    nom: nom, dossierId: cible.getId(), autresEntites: []
+  };
+}
+
+/**
+ * ADR-0028 — CONFINEMENT + CHEMIN RÉEL en un seul passage. Remonte la chaîne du PREMIER parent de
+ * `dossier` jusqu'au domaine `domaineId` et renvoie les segments traversés (du plus haut au plus
+ * bas), ou `null` si le domaine n'est pas un ANCÊTRE (dossier déplacé hors de son domaine, ID
+ * périmé, chaîne illisible, profondeur anormale).
+ *
+ * `null` est un signal de REPLI, pas une erreur : l'appelant retombe alors sur la résolution par
+ * NOM sous le domaine. Deux raisons de ne PAS se contenter d'ouvrir l'ID :
+ *  1. GARDE : un `Dossier ID` périmé ou déplacé ne doit jamais faire classer un document HORS de
+ *     son domaine (ni, silencieusement, sous la zone protégée `04`) — le gain topologique vaut
+ *     À L'INTÉRIEUR du domaine, pas au-delà ;
+ *  2. CHEMIN HONNÊTE : l'Index doit porter le chemin RÉELLEMENT obtenu (« domaine/Anciens
+ *     employeurs/Alphatek »), sinon la maintenance de sync (`cheminsSyncCompatibles_`, comparaison
+ *     par suffixe) le juge incompatible, marque le fichier « déplacé » et VIDE son domaine.
+ * Borné par `CONFIG.ROUTAGE_PROFONDEUR_MAX` (anti-cycle multi-parents).
+ * @param {Folder} dossier
+ * @param {string} domaineId
+ * @return {?string[]} segments sous le domaine ([] si c'est le domaine lui-même), ou null
+ */
+function segmentsSousDomaine_(dossier, domaineId) {
+  var segments = [];
+  try {
+    var courant = dossier;
+    for (var i = 0; i <= CONFIG.ROUTAGE_PROFONDEUR_MAX; i++) {
+      if (courant.getId() === domaineId) return segments;
+      segments.unshift(courant.getName());
+      var parents = courant.getParents();
+      if (!parents.hasNext()) return null; // racine atteinte sans croiser le domaine
+      courant = parents.next();            // premier parent (même convention que positionActuelleFichier_)
+    }
+  } catch (e) {
+    return null; // chaîne illisible → repli par nom (jamais un classement sur du flou)
+  }
+  return null;   // trop profond (ou cycle) → repli
+}
+
+/**
+ * ADR-0028 — RÉSOLUTION UNIQUE du dossier d'entité par ID, partagée par le flux vivant
+ * (`deciderRoutageV2_`) et par l'exécution du plan (`dossierCiblePlan_`). UNE seule fonction pour
+ * les DEUX exécutants : la divergence « la décision dit OK / l'exécution recrée à plat » devient
+ * impossible par CONSTRUCTION, au lieu d'être surveillée par un test.
+ *
+ * Rend `null` = REPLI par nom (jamais une erreur) dans TOUS les cas douteux :
+ *  - pas d'ID au référentiel (entité validée dont le dossier n'est pas encore créé) ;
+ *  - ID périmé/illisible (dossier supprimé) ;
+ *  - dossier **CORBEILLÉ** — `getFolderById` rend un dossier en corbeille : y ranger un document
+ *    le ferait purger avec lui à 30 jours (perte SILENCIEUSE). L'app peut corbeiller un dossier
+ *    d'entité devenu vide (ADR-0014) sans toucher `Entités.Dossier ID` : garde indispensable ;
+ *  - dossier sorti de son DOMAINE (`segmentsSousDomaine_`) — le gain topologique vaut à
+ *    l'intérieur du domaine, jamais au-delà (ni, silencieusement, sous la zone protégée).
+ * @param {?string} dossierId
+ * @param {Folder} domaine
+ * @return {?{dossier: Folder, segments: string[]}}
+ */
+function dossierEntiteParId_(dossierId, domaine) {
+  if (!dossierId) return null;
+  try {
+    var candidat = DriveApp.getFolderById(dossierId);
+    if (candidat.isTrashed()) return null; // corbeillé → jamais une cible de classement
+    var segments = segmentsSousDomaine_(candidat, domaine.getId());
+    return segments ? { dossier: candidat, segments: segments } : null;
+  } catch (e) {
+    return null; // ID mort/illisible → repli par nom (échec OUVERT, jamais un blocage)
+  }
+}
+
+/**
+ * Noms des fichiers déjà présents dans un dossier (borné) — pour l'anti-écrasement `garantirNomUnique_`.
+ * Borne à 500 pour ne pas faire exploser le quota sur un dossier atypiquement gros. Dégrade en [] si l'API échoue.
+ * @param {string} dossierId
+ * @return {string[]}
+ */
+function nomsDansDossier_(dossierId) {
+  var noms = [];
+  try {
+    var it = DriveApp.getFolderById(dossierId).getFiles();
+    var n = 0;
+    while (it.hasNext() && n < 500) { noms.push(it.next().getName()); n++; }
+  } catch (e) { /* dossier illisible → pas d'anti-écrasement, sans planter */ }
+  return noms;
+}
+
+/** `AAAA-MM-JJ_Type_Émetteur.ext` — format historique (granularité JOUR). */
+function nomNormalise_(date, type, emetteur, ext) {
+  // Un type SENTINELLE (« Inconnu »/« N/A ») ne doit jamais s'écrire dans le nom (revue Vague 1b — la
+  // correction de `nommerDocument_` ne couvrait que le tiers, pas le segment TYPE) → `estRenseigne_`,
+  // repli « Document ». L'émetteur, lui, est déjà filtré en amont par `nommerDocument_` ; le repli
+  // « Inconnu » ci-dessous ne subsiste que pour les appels BAS NIVEAU directs (émetteur vide).
+  var t = estRenseigne_(type) ? champ_(type) : 'Document';
+  var e = champ_(emetteur) || 'Inconnu';
+  return date + '_' + t + '_' + e + ext;
+}
+
+/**
+ * Nommage PAR TYPE de document (ADR-0002 §6) : la granularité de date et le libellé s'adaptent au
+ * type. Ex. un relevé bancaire est mensuel (`AAAA-MM_Relevé_<Banque>`), un diplôme annuel
+ * (`AAAA_Diplôme_<Établissement>`), une facture au jour (défaut). Logique PURE (testée). Dégrade
+ * gracieusement : un type inconnu retombe sur le format historique `nomNormalise_` (jamais un blocage).
+ * @param {string} date  AAAA-MM-JJ (issu de dateNormalisee_)
+ * @param {string} type  type_doc du LLM
+ * @param {string} emetteur
+ * @param {string} ext
+ * @return {string}
+ */
+function nomParType_(date, type, emetteur, ext) {
+  var sc = schemaNommage_(type);
+  if (sc.gran === 'jour' && !sc.label) return nomNormalise_(date, type, emetteur, ext); // défaut historique
+  var d = tronquerDate_(date, sc.gran);
+  var label = champ_(sc.label || type) || 'Document';
+  var e = champ_(emetteur) || 'Inconnu';
+  return d + '_' + label + '_' + e + ext;
+}
+
+/* ============================================================================
+ * DOCUMENTS D'IDENTITÉ & TITULAIRE (refonte 2026-07-07, demande Marc). Les pièces d'identité se
+ * rangent PAR TYPE (dossier « Passeport », « Permis de conduire »…) contenant TOUS les titulaires
+ * (Marc ET les autres) ; le nom de la PERSONNE va dans le fichier. Aucun dossier « Tiers ». PURES.
+ * ==========================================================================*/
+
+// Types d'identité CANONIQUES : un même type (variantes du LLM incluses) tombe dans le MÊME dossier,
+// que le titulaire soit Marc ou un proche.
+var TYPES_IDENTITE = ['Passeport', 'Carte d’identité', 'Permis de conduire', 'Acte de naissance',
+  'Acte de mariage', 'Certificat de citoyenneté', 'Carte d’assurance maladie', 'Carte de résident permanent',
+  // NAS (ADR-0048) : le document le plus sensible du Drive, et il n'était nommé nulle part — donc
+  // classé comme un papier administratif quelconque. Ajouté ICI **et** dans la table
+  // (`cheminCibleReset_`, branche 01) dans le MÊME commit : le type seul enverrait un NAS
+  // canoniquement nommé au repli, puisque c'est la TABLE qui décide de la cible depuis ADR-0033.
+  'Numéro d’assurance sociale'];
+
+/** Ramène un type d'identité à sa forme canonique (dossier partagé). Type inconnu → nettoyé, jamais rejeté. PUR. */
+function normaliserTypeIdentite_(sousDossierType) {
+  var k = normaliserCle_(sousDossierType); // minuscule, sans accents, apostrophes → espace
+  if (!k) return '';
+  if (k.indexOf('passeport') !== -1 || k.indexOf('passport') !== -1) return 'Passeport';
+  if (k.indexOf('permis de conduire') !== -1 || k.indexOf('permis conduire') !== -1 ||
+      k.indexOf('driver') !== -1 || k === 'permis') return 'Permis de conduire';
+  if (k.indexOf('acte de naissance') !== -1 || k.indexOf('naissance') !== -1 || k.indexOf('birth') !== -1) return 'Acte de naissance';
+  if (k.indexOf('acte de mariage') !== -1 || k.indexOf('mariage') !== -1 || k.indexOf('marriage') !== -1) return 'Acte de mariage';
+  if (k.indexOf('citoyennete') !== -1 || k.indexOf('citizenship') !== -1) return 'Certificat de citoyenneté';
+  if (k.indexOf('assurance maladie') !== -1 || k.indexOf('ramq') !== -1 || k.indexOf('carte soleil') !== -1) return 'Carte d’assurance maladie';
+  if (k.indexOf('resident permanent') !== -1 || k.indexOf('residence permanente') !== -1 || k.indexOf('permanent resident') !== -1) return 'Carte de résident permanent';
+  if (k.indexOf('carte d identite') !== -1 || k.indexOf('carte identite') !== -1 || k === 'cni' || k.indexOf('identity card') !== -1) return 'Carte d’identité';
+  // Graphies réelles rencontrées dans `Documents ID` : « NAS », « NAS_JUILLET2025 ». `nas` est testé
+  // en MOT ENTIER (jamais en sous-chaîne) — sinon « naissance » et « Thomas » matcheraient.
+  if (k.indexOf('assurance sociale') !== -1 || k.indexOf('social insurance') !== -1 ||
+      /(^|[^a-z])nas([^a-z]|$)/.test(k) || /(^|[^a-z])sin([^a-z]|$)/.test(k)) {
+    return 'Numéro d’assurance sociale';
+  }
+  return casseTitreEntite_(String(sousDossierType == null ? '' : sousDossierType).replace(/\s+/g, ' ').trim());
+}
+
+/** Vrai ssi c'est une pièce d'identité PERSONNELLE reconnue (→ rangement par type + titulaire). PUR. */
+function estDocumentIdentitePersonnel_(classif) {
+  if (!classif || classif.estDocumentIdentite !== true) return false;
+  return TYPES_IDENTITE.indexOf(normaliserTypeIdentite_(classif.sousDossierType)) !== -1;
+}
+
+/** Domaine des pièces d'identité NON liées au statut ni à la santé. */
+var DOMAINE_IDENTITE_01 = '01 · Administratif & identité';
+
+/**
+ * Nœud de REPLI par domaine d'identité. Chaque valeur est un nœud QUI EXISTE DANS
+ * `STRUCTURE_CIBLE_RESET` — verrouillé par un test qui compare cette carte à la table (jamais une
+ * recopie libre : la résolution se fait par NOM, donc un libellé qui dérive de la table ferait
+ * naître un dossier jumeau, comme « 1202 route Fictive Rivage » à côté de « 1202 rte Fictive Rivage »).
+ * C'est aussi ce qui garantit que le repli reste VISIBLE de `verifierStructureCibleReset_` (≤ 7) :
+ * un nœud hors table est invisible du validateur.
+ */
+var REPLI_IDENTITE_PAR_DOMAINE = {
+  '01 · Administratif & identité': 'Pièces d\'identité & permis',
+  '04 · Immigration': 'Résidence permanente',
+  '07 · Santé': 'Assurances santé',
+};
+
+/** Domaine + sous-dossier de type d'une pièce d'identité (jamais par personne, jamais « Tiers »). PUR. */
+function dossierIdentite_(classif) {
+  var t = normaliserTypeIdentite_(classif && classif.sousDossierType);
+  var domaine = DOMAINE_IDENTITE_01;
+  if (t === 'Carte de résident permanent') domaine = '04 · Immigration';       // lié au statut (protégé)
+  else if (t === 'Carte d’assurance maladie') domaine = '07 · Santé';
+  return { domaine: domaine, sousDossier: t };
+}
+
+/**
+ * PURE — sous-chemin de REPLI d'une pièce d'identité, utilisé UNIQUEMENT quand la table
+ * (`cheminCibleReset_`) a rendu `null`, c'est-à-dire quand elle a **refusé d'attribuer** le
+ * document : titulaire ni Marc, ni une autorité émettrice, ni une personne déclarée dans
+ * `RESET_PERSONNES_AUTRES`. Ce refus est VOULU (« jamais deviné » — le passeport d'un proche non
+ * listé ne doit pas finir chez Marc).
+ *
+ * Le flux, lui, ne peut pas laisser le document en limbo. Mais il ne doit pas non plus **inventer
+ * un FRÈRE** de `Pièces d'identité` au niveau 1 du domaine : c'est ainsi qu'est né
+ * `01 · Administratif/Permis de conduire` le 2026-08-12, qui ne contient qu'un permis de TIERS
+ * pendant que celui de Marc dormait dans `_Doublons` (C28-72). On dégrade d'un cran **DANS** le
+ * conteneur canonique — le nom du fichier porte déjà le type ET le titulaire, et un fichier posé à
+ * la racine de `Pièces d'identité` (à côté de `Marc/` et `Autres/…`) dit exactement ce qu'il est :
+ * une pièce d'identité que personne n'a su attribuer. C'est la leçon §9 « granularité =
+ * enrichissement, jamais frein » : dégrader vers le niveau PRÉCÉDENT, jamais vers un nœud parallèle.
+ *
+ * 04 et 07 n'ont pas de conteneur d'identité, mais ils ont chacun LEUR nœud pour ces documents
+ * (`Résidence permanente`, `Assurances santé`) : le repli y atterrit aussi. Ces deux branches sont
+ * MORTES aujourd'hui — `nommerDocument_` produit un nom que la table sait router — et on les
+ * verrouille précisément pour qu'elles le restent sans danger : si un type d'identité était ajouté
+ * demain, l'ancien repli aurait créé `07 · Santé/Carte d'assurance maladie` au niveau 1, hors table,
+ * sur la seule place libre de 07. Le même défaut, sur le domaine d'à côté.
+ * @param {?{domaine:string, sousDossier:string}} di  sortie de `dossierIdentite_`
+ * @return {string}
+ */
+function repliIdentite_(di) {
+  if (!di) return '';
+  // Domaine inattendu (AUTO, défaut) : on rend le type plutôt que rien — mais aucun `dossierIdentite_`
+  // ne peut le produire aujourd'hui (test d'exhaustivité sur ses trois sorties possibles).
+  return REPLI_IDENTITE_PAR_DOMAINE[di.domaine] || di.sousDossier;
+}
+
+/** Casse Titre d'un NOM DE PERSONNE (contrairement aux entités, on normalise MÊME l'ALL-CAPS). PUR. */
+function casseNomPersonne_(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/(^|[\s'’-])([a-zà-ÿ])/g,
+    function (m, sep, c) { return sep + c.toUpperCase(); });
+}
+
+/** Titulaire (personne concernée) nettoyé pour le NOM du fichier. Marc y est un titulaire VALIDE. null si absent. PUR. */
+function titulairePourNom_(classif) {
+  var t = classif && classif.titulaire;
+  if (!estRenseigne_(t)) return null; // sentinelle « Inconnu »/« N/A » ⇒ pas de titulaire (jamais « _Inconnu »)
+  return casseNomPersonne_(String(t).replace(/\s+/g, ' ').trim()) || null;
+}
+
+/** Nom d'un document SANS émetteur ni titulaire (« AAAA-MM-JJ_Type.ext ») — jamais « _Inconnu ». PUR. */
+function nomSansTiers_(date, type, ext) {
+  var sc = schemaNommage_(type);
+  return tronquerDate_(date, sc.gran) + '_' + (champ_(sc.label || type) || 'Document') + ext;
+}
+
+/**
+ * NOM FINAL d'un document (aiguillage). JAMAIS « Inconnu » (exigence Marc 2026-07-07) : le 3ᵉ segment
+ * est TOUJOURS renseigné et précis, par priorité TITULAIRE (pièce d'identité) > ÉMETTEUR (organisation)
+ * > DESCRIPTEUR (2-6 mots : ce que c'est + le sujet + qui l'a produit). Aucun des trois → « …_Type.ext »
+ * (jamais « _Inconnu »). PUR.
+ * @param {Object} classif  {date_doc, type_doc, emetteur, descripteur, estDocumentIdentite, sousDossierType, titulaire}
+ * @param {string} dateReception  AAAA-MM-JJ (repli si date_doc absente)
+ * @param {string} ext
+ */
+function nommerDocument_(classif, dateReception, ext) {
+  classif = classif || {};
+  var date = (classif.date_doc && /^\d{4}-\d{2}-\d{2}$/.test(classif.date_doc)) ? classif.date_doc : (dateReception || '');
+  if (estDocumentIdentitePersonnel_(classif)) {
+    var type = normaliserTypeIdentite_(classif.sousDossierType);
+    var titu = titulairePourNom_(classif);
+    return titu ? nomParType_(date, type, titu, ext) : nomSansTiers_(date, type, ext);
+  }
+  // Émetteur d'abord, sinon descripteur ; aucun des deux → type seul. `estRenseigne_` (pas `champ_`)
+  // pour que les sentinelles « Inconnu »/« N/A » comptent comme ABSENTES — sinon un émetteur
+  // sentinelle produit « …_Facture_Inconnu.pdf », précisément le nom que la campagne m2-inconnu
+  // éradique (revue de fond 2026-07-31 : le fail-safe neutralisait « Inconnu », le nommeur non).
+  var tiers = estRenseigne_(classif.emetteur) ? classif.emetteur
+    : (estRenseigne_(classif.descripteur) ? classif.descripteur : '');
+  return tiers ? nomParType_(date, classif.type_doc, tiers, ext) : nomSansTiers_(date, classif.type_doc, ext);
+}
+
+/**
+ * SOUS-DOSSIER d'un document (ADR-0023 : classement à PLAT par défaut — révise l'exigence 2026-07-07
+ * « rien à la racine » ; retour Marc 2026-07-16 : la profondeur forcée a produit ~500 dossiers dont
+ * ~100 vides, recensement docs/diagnostics/2026-07-16-recensement-drive.md). Priorité : pièce
+ * d'identité → TYPE (« Passeport ») ; sinon ENTITÉ canonique UNIFIÉE si l'analyse en fournit une
+ * (entité MAJEURE seulement — employeur, école, véhicule, banque — le prompt v2 laisse `entite`
+ * null sinon) ; sinon CHAÎNE VIDE = à PLAT à la racine du domaine. Plus JAMAIS de dossier par
+ * émetteur ponctuel (l'ancien repli `emetteur` a créé un dossier par marchand), par catégorie
+ * (« Cours », « Devoirs ») ni « Divers ». PUR.
+ * @param {Object} classif  {estDocumentIdentite, sousDossierType, entite, emetteur, sousDossier, type_doc}
+ * @return {string} nom du sous-dossier (sans le domaine), '' = racine du domaine
+ */
+function sousDossierPourNom_(classif) {
+  classif = classif || {};
+  if (estDocumentIdentitePersonnel_(classif)) return normaliserTypeIdentite_(classif.sousDossierType);
+  // Champ `sousDossier` (PAS `entite`) : c'est LUI que le prompt v2 gate « entité majeure ou null » —
+  // `entite` reste un champ RICHE (référentiel, few-shot) légitimement rempli pour un émetteur
+  // ponctuel ; router dessus ferait revenir le dossier-par-émetteur (revue structure-keeper C28-26).
+  var ent = classif.sousDossier ? canoniserEntite_(classif.sousDossier) : null;
+  return ent || '';
+}
+
+/**
+ * RÈGLE UNIQUE de sous-chemin sous un domaine (ADR-0023, arbitrage Marc 2026-07-16 « entité OU
+ * année ») — PARTAGÉE par le flux vivant (planRoutageV2_) et la cible de consolidation
+ * (cheminCibleConsolidation_), verrouillée par un tripwire test : toute divergence entre les deux
+ * ferait re-proposer « Déplacer » en boucle ce que le flux vivant vient de classer.
+ *  1. ENTITÉ (majeure, VALIDÉE) → dossier d'entité, SANS année (une entité = UN dossier) ;
+ *  2. domaine par ANNÉE (DOMAINES_PAR_ANNEE) + année lisible → dossier « AAAA » ;
+ *  3. sinon '' = racine du domaine (à plat). PUR.
+ *
+ * ⚠️ Le cas « type d'IDENTITÉ → dossier de TYPE » a été RETIRÉ (C28-72) : il rendait un dossier de
+ * niveau 1 HORS de `STRUCTURE_CIBLE_RESET`, donc invisible du validateur ≤ 7, et c'est lui qui a
+ * fabriqué `01 · Administratif/Permis de conduire` en prod. L'identité a désormais sa propre règle
+ * partagée, `repliIdentite_`, appelée par les DEUX consommateurs. Le paramètre a été supprimé plutôt
+ * que neutralisé : un paramètre qui « ne sert plus » se remet à servir au premier appelant distrait.
+ *
+ * ADR-0028 : renvoie un COUPLE `{nom, id}`. `id` n'est renseigné que pour une ENTITÉ VALIDÉE portant
+ * un `Dossier ID` — c'est ce qui permet au flux vivant ET à la consolidation de retrouver le dossier
+ * d'entité À N'IMPORTE QUELLE PROFONDEUR (ex. sous un regroupement « Anciens employeurs », ADR-0027)
+ * au lieu de le re-créer à plat. Les segments de TYPE et d'ANNÉE restent résolus par NOM (`id` vide) :
+ * le moteur les find-or-create sous le domaine, ils n'ont pas d'identité propre au référentiel.
+ * @param {{domaine:string, entite:?(string|{nom:string,dossierId:string}),
+ *   annee:?string}} d  `entite` : objet du référentiel (ADR-0028) ; une CHAÎNE reste tolérée
+ *   (appelant historique / test) et vaut alors un id vide → repli par nom.
+ * @return {{nom:string, id:string}}
+ */
+function sousCheminDomaine_(d) {
+  d = d || {};
+  if (d.entite) {
+    return typeof d.entite === 'string'
+      ? { nom: d.entite, id: '' }
+      : { nom: d.entite.nom || '', id: d.entite.dossierId || '' };
+  }
+  if (d.annee && (CONFIG.DOMAINES_PAR_ANNEE || []).indexOf(d.domaine) !== -1) return { nom: d.annee, id: '' };
+  // ADR-0052 D1/D2 — DERNIER échelon avant la racine. On ne sait ni À QUI ni À QUOI le document se
+  // rattache, mais on sait peut-être CE QUE C'EST : `bucketTypeDomaine_` (Reset.gs, PURE) rend un
+  // nœud EXISTANT du domaine, ou '' si le type lui-même n'apprend rien. Branché ICI et nulle part
+  // ailleurs : c'est le point que le flux vivant ET la consolidation partagent déjà, donc une seule
+  // règle pour les deux (leçon §9). Le domaine n'est jamais remis en cause ⇒ aucune sortie de 04.
+  // `faible: true` — ADR-0052 D8. Ce dernier échelon ne sait PAS à qui le document se rattache : il
+  // ne lit que son TYPE. C'est assez pour éviter la racine, ce n'est PAS assez pour contredire un
+  // rangement existant. Le drapeau voyage jusqu'à `decisionConsolidation_`, qui refuse alors de
+  // DÉPLACER un fichier déjà posé dans un sous-dossier (mesuré : sans lui, 2 des 8 fichiers de
+  // `03/Logement/1201 rue Exemple Alpha` seraient remontés dans `Contrats`/`Correspondance` à la première
+  // passe de consolidation — la mission qui les y avait mis n'a pas d'équivalent dans la table).
+  if (d.nom) {
+    var bucket = bucketTypeDomaine_(d.domaine, d.nom) || '';
+    if (bucket) return { nom: bucket, id: '', faible: true };
+  }
+  return { nom: '', id: '' };
+}
+
+/**
+ * ANTI-ÉCRASEMENT (revue) : deux pièces distinctes de personnes différentes, même type, date absente
+ * → même nom, hash différent ⇒ ce ne sont PAS des doublons. Suffixe incrémental avant l'extension.
+ * Garantit qu'aucun dépôt n'écrase un fichier existant (violerait « aucune suppression »). PUR.
+ * @param {string} nom
+ * @param {string[]} nomsExistants  noms déjà présents dans le dossier cible
+ */
+function garantirNomUnique_(nom, nomsExistants) {
+  var existants = nomsExistants || [];
+  if (existants.indexOf(nom) === -1) return nom;
+  var s = String(nom), dot = s.lastIndexOf('.');
+  var base = dot > 0 ? s.slice(0, dot) : s, ext = dot > 0 ? s.slice(dot) : '';
+  var i = 2, candidat;
+  do { candidat = base + '_' + i + ext; i++; } while (existants.indexOf(candidat) !== -1);
+  return candidat;
+}
+
+/**
+ * Schéma de nommage pour un type_doc : granularité de date + libellé fixe éventuel. Règles ORDONNÉES
+ * (le 1er motif trouvé gagne) — « relevé de notes » (annuel) doit passer AVANT « relevé » (mensuel).
+ * @param {string} typeDoc
+ * @return {{gran:('jour'|'mois'|'annee'), label?:string}}
+ */
+function schemaNommage_(typeDoc) {
+  var t = normaliserCle_(typeDoc); // minuscules, sans accents, apostrophes → espace
+  // Règles ORDONNÉES (1er match gagne). `motifs` = sous-chaînes ; `re` = motif ANCRÉ (mot entier)
+  // pour les jetons courts ambigus — « paie » ne doit pas matcher « paiement », « tp » pas « … ».
+  var regles = [
+    { motifs: ['releve de note', 'bulletin de note'], gran: 'annee' },                          // études (avant « releve »)
+    { motifs: ['bulletin de paie', 'fiche de paie', 'bulletin de salaire', 'talon de paie'], re: /(^| )(paie|salaire)( |$)/, gran: 'jour', label: 'Bulletin de paie' }, // ADR-0080 : jour + Bulletin de paie
+    // ⚠️ LE NUMÉRO DU FEUILLET SE CONSERVE, et ces règles passent AVANT « releve » (ADR-0058 / ADR-0080).
+    // Sans elles, « Relevé 1 » devenait `…_Relevé_X` et tombait parmi les relevés bancaires mensuels.
+    { re: /(^| )t4( |$)/, motifs: [], gran: 'annee', label: 'T4' },                              // feuillet fédéral (ANNUEL)
+    { motifs: ['releve 1', 'rl 1', 'rl-1'], gran: 'annee', label: 'Relevé 1' },
+    { motifs: ['releve 31', 'rl 31', 'rl-31'], gran: 'annee', label: 'Relevé 31' },
+    { re: /(^| )(t5|releve 3|rl 3|rl-3)( |$)/, motifs: ['t183', 'tp 1000', 'tp-1000'], gran: 'annee' },
+    { motifs: ['avis d imposition', 'avis de cotisation', 'impot', 'declaration de revenus', 'feuillet'], gran: 'annee' },
+    { motifs: ['releve bancaire', 'releve de compte', 'releve de carte', 'releve'], gran: 'mois', label: 'Relevé' },
+    { motifs: ['curriculum'], re: /(^| )cv( |$)/, gran: 'jour', label: 'CV' },                   // ADR-0080 : CV envoyés tracés au jour
+    { motifs: ['travaux pratiques', 'devoir', 'examen', 'cours'], re: /(^| )tp\d*( |$|\d)/, gran: 'annee' } // études : TP, TP4…
+    // Tout le reste (facture, contrat, diplôme, immigration, santé, attestation…) → JOUR, libellé = type nettoyé.
+  ];
+  for (var i = 0; i < regles.length; i++) {
+    var r = regles[i], hit = r.re ? r.re.test(t) : false;
+    for (var j = 0; !hit && j < r.motifs.length; j++) if (t.indexOf(r.motifs[j]) !== -1) hit = true;
+    if (hit) return { gran: r.gran, label: r.label };
+  }
+  return { gran: 'jour' };
+}
+
+/** Tronque une date AAAA-MM-JJ à la granularité voulue (annee → AAAA, mois → AAAA-MM, jour → complet). */
+function tronquerDate_(date, gran) {
+  var s = String(date || '');
+  if (gran === 'annee') return s.substring(0, 4);
+  if (gran === 'mois') return s.substring(0, 7);
+  return s;
+}
+
+/**
+ * Devine le TYPE d'un document depuis son NOM d'origine (ADR-0002 §5) — filet quand le LLM ne rend
+ * pas de type. Ex. `MODE2D_TP4_MARC_EXEMPLE.pdf` → « TP ». Séparateurs (`_ - .`) traités comme des
+ * espaces avant matching (les noms de fichiers collent souvent les mots). Logique PURE (testée).
+ * @param {string} nom
+ * @return {string} type canonique deviné, ou '' si rien de sûr.
+ */
+function devinerTypeDepuisNom_(nom) {
+  var base = String(nom || '').replace(/\.[^.\/]+$/, '');    // retire l'extension
+  var t = normaliserCle_(base.replace(/[_\-.]+/g, ' '));     // séparateurs → espace, puis minuscule/sans accents
+  var regles = [
+    { re: /(^| )tp ?\d*( |$)/, type: 'TP' },                 // TP, TP4, TP 4…
+    { motifs: ['releve de note', 'bulletin de note'], type: 'Relevé de notes' },
+    { motifs: ['facture'], type: 'Facture' },
+    { re: /(^| )(paie|salaire)( |$)/, motifs: ['bulletin de paie', 'fiche de paie'], type: 'Bulletin de paie' },
+    { motifs: ['releve'], type: 'Relevé' },
+    { re: /(^| )cv( |$)/, motifs: ['curriculum'], type: 'CV' },
+    { motifs: ['contrat', 'bail'], type: 'Contrat' },
+    { motifs: ['diplome'], type: 'Diplôme' },
+    { motifs: ['ordonnance'], type: 'Ordonnance' },
+    { motifs: ['avis imposition', 'avis d imposition', 'impot', 'avis de cotisation'], type: 'Avis d\'imposition' },
+    { motifs: ['attestation'], type: 'Attestation' }
+  ];
+  for (var i = 0; i < regles.length; i++) {
+    var r = regles[i], hit = r.re ? r.re.test(t) : false;
+    for (var j = 0; !hit && r.motifs && j < r.motifs.length; j++) if (t.indexOf(r.motifs[j]) !== -1) hit = true;
+    if (hit) return r.type;
+  }
+  return '';
+}
+
+/**
+ * Enrichit la classification depuis le nom d'origine QUAND le LLM n'a pas fourni de type (Inconnu/vide) :
+ * on complète `type_doc` par un type deviné du nom (ADR-0002 §5). N'écrase JAMAIS un type déjà trouvé.
+ * @param {Object} classif
+ * @param {string} nom
+ * @return {Object} le classif (muté)
+ */
+function enrichirClassifDepuisNom_(classif, nom) {
+  if (!classif) return classif;
+  var t = normaliserCle_(classif.type_doc);
+  if (!t || t === 'inconnu') {
+    var devine = devinerTypeDepuisNom_(nom);
+    if (devine) classif.type_doc = devine;
+  }
+  return classif;
+}
+
+/** Chemin lisible « Domaine/Catégorie » (chaque segment nettoyé, le « / » préservé). */
+function cheminLisible_(classif) {
+  var p = champ_(classif.domaine) || 'Domaine ?';
+  if (classif.categorie) p += '/' + champ_(classif.categorie);
+  return p;
+}
+
+/** Nettoie un champ : caractères interdits Drive → '-', pas d'underscore interne. */
+function champ_(valeur) {
+  if (valeur == null) return '';
+  return String(valeur)
+    .replace(/[\/\\:*?"<>|]/g, '-')
+    .replace(/_/g, '-')
+    .trim();
+}
+
+/**
+ * DÉCOUPAGE + ASSAINISSEMENT d'un sous-chemin en segments de dossiers — LA règle, partagée par le
+ * flux vivant (`planRoutageV2_`) et par l'exécuteur de consolidation (`ConsolidationExec.gs`).
+ *
+ * Elle existait en DEUX exemplaires : l'exécuteur découpait puis assainissait segment par segment,
+ * le flux appliquait `champ_` au chemin ENTIER — or `champ_` remplace `/` par `-`. Le flux créait
+ * donc `A-B` là où l'exécuteur visait `A/B` : deux dossiers concurrents, et la consolidation qui
+ * re-propose « Déplacer » à chaque passe. Une seule fonction, deux consommateurs (leçon §9).
+ *
+ * Trois familles de segments sont ÉCARTÉES, pas assainies — aucune ne peut nommer un dossier :
+ *  - le segment VIDE (« A//B », ou un libellé qui commence par `/`) : `createFolder('')` LÈVE, et
+ *    ce serait en plein intake ;
+ *  - `.` et `..` : ils ressemblent à un chemin relatif. Drive s'adresse par ID et ne traverse pas,
+ *    donc `..` ne sort de nulle part — mais il créerait un dossier littéralement nommé `..`, visible
+ *    dans l'Index et dans l'app, que rien ne viendrait résorber ;
+ *  - un segment qui ne survit pas à `champ_` (fait de caractères interdits).
+ * Le cas n'est pas théorique : `entitesValideesParCle_` rend `dossierId: ''` pour une entité validée
+ * dont le dossier n'existe pas encore, et son libellé est du texte LIBRE saisi par Marc.
+ * @param {string} chemin  sous-chemin relatif au domaine (« Reçus & factures/2025 »)
+ * @return {string[]} segments assainis, éventuellement vide
+ */
+function segmentsChemin_(chemin) {
+  return String(chemin == null ? '' : chemin).split('/')
+    .map(champ_)
+    .filter(function (seg) { return seg !== '' && seg !== '.' && seg !== '..'; });
+}
+
+/** Extension d'origine (casse préservée), point inclus (ex ".pdf"), ou '' si absente. */
+function extension_(nom) {
+  var m = /(\.[A-Za-z0-9]{1,8})$/.exec(nom || '');
+  return m ? m[1] : '';
+}
+
+/* ---------- Dates ---------- */
+
+/** date_doc valide → AAAA-MM-JJ ; sinon date de réception/dépôt. */
+function dateNormalisee_(dateDoc, dateReference) {
+  if (dateDoc && /^\d{4}-\d{2}-\d{2}$/.test(dateDoc)) return dateDoc;
+  return Utilities.formatDate(dateReference, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}

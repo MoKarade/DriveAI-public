@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <!-- CSP (durcissement) : scripts self + GIS ; réseau limité aux API Google utilisées.
+         Les popups OAuth ne sont pas gouvernées par la CSP de l'ouvrant (flux GIS intact).
+         ⚠️ Cette CSP-ci est ENFORCÉE (celle de `vercel.json` est en Report-Only) : tout script tiers
+         ajouté au code doit être déclaré ICI, sinon il est refusé SILENCIEUSEMENT.
+         `@vercel/analytics` n'y figure PAS, volontairement : en production, le paquet charge
+         `/_vercel/insights/script.js` — MÊME ORIGINE, donc déjà couvert par `'self'`. Le refus vu en
+         console le 2026-09-10 venait du serveur de DEV, qui charge `va.vercel-scripts.com/…/
+         script.debug.js` ; élargir la CSP SERVIE pour un besoin de développement aurait ajouté un
+         tiers à l'app de Marc sans rien mesurer de plus (revue flotte 2026-09-12). -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://accounts.google.com; connect-src 'self' https://sheets.googleapis.com https://www.googleapis.com https://accounts.google.com https://script.google.com https://script.googleusercontent.com; frame-src https://accounts.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'"
+    />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icone.svg" type="image/svg+xml" />
+    <!-- iOS ignore le manifeste pour l'icône d'accueil : il lui faut celle-ci, OPAQUE
+         (Safari ne gère pas la transparence et la remplacerait par du noir). -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="DriveAI" />
+    <meta name="theme-color" content="#07090d" />
+    <title>DriveAI</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

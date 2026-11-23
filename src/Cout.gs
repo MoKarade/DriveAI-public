@@ -1,0 +1,452 @@
+/**
+ * Cout.gs — Mesure RÉELLE du coût LLM (point ouvert P1-09), Phase 1+.
+ *
+ * Chaque appel Anthropic renvoie `usage.input_tokens`/`output_tokens` ; on les accumule
+ * (par run, puis on agrège dans une Script Property mensuelle) pour passer d'une ESTIMATION
+ * à un coût mesuré, et détecter tôt une dérive avant qu'elle n'approche la cible < 10 $/mois.
+ *
+ * Aucun appel réseau ici : pure comptabilité locale. Concurrence : l'accumulation par run
+ * vit dans une variable de module (le run est sérialisé par le LockService de tickDriveAI),
+ * et le flush mensuel est une lecture+écriture unique en fin de run.
+ */
+
+// Accumulateur du run courant (remis à zéro au tick, vidé en fin de tick).
+var _usageRun = null;
+
+/** À appeler en tête de run. `cw`/`cr` = tokens d'ÉCRITURE / LECTURE de cache (prompt caching, Vague 3). */
+function reinitialiserUsage_() {
+  _usageRun = { hin: 0, hout: 0, hcw: 0, hcr: 0, sin: 0, sout: 0, scw: 0, scr: 0, s5in: 0, s5out: 0, s5cw: 0, s5cr: 0, h55in: 0, h55out: 0, h55cw: 0, h55cr: 0, s55in: 0, s55out: 0, s55cw: 0, s55cr: 0, g38in: 0, g38out: 0, g38cw: 0, g38cr: 0, gl35in: 0, gl35out: 0, gl35cw: 0, gl35cr: 0, appels: 0, ops: {} };
+}
+
+/**
+ * Nombre MAX d'opérations distinctes retenues dans la ventilation mensuelle (C28-58). Le surplus
+ * tombe dans `OP_AUTRES` : jamais perdu, jamais faussé. Borne DURE de la Script Property (~9 Ko,
+ * leçon §7) : ~60 × ~45 caractères ≈ 2,7 Ko, très en deçà — et le test au plafond le vérifie.
+ * Les clés viennent de `etapeSuivie_` (≈ 35 aujourd'hui) : la marge couvre les missions à venir.
+ */
+var COUT_OPS_MAX = 60;
+var OP_AUTRES = '(autres)';
+var OP_HORS_ETAPE = '(hors étape)';
+
+/**
+ * Famille de compteurs d'un modèle (préfixe des champs `<p>in/<p>out/<p>cw/<p>cr`). PURE (testée).
+ * `sonnet-5` est un préfixe de `sonnet-5-5` : la 5.5 se teste d'abord, sinon elle prendrait le tarif
+ * de Sonnet 5. Un identifiant inconnu tombe dans `h` (Haiku 4.5, le plus bas des anciens tarifs).
+ * @param {string} modele
+ * @return {string} 'g38' | 'gl35' | 'h55' | 's55' | 's5' | 's' | 'h'
+ */
+function prefixeUsage_(modele) {
+  var m = String(modele);
+  // Gemini (ADR-0073) : « flash-lite » se teste AVANT « flash ». Un Gemini inconnu tombe dans `g38`, le
+  // plus cher des deux : un budget surestimé freine trop tôt, jamais trop tard.
+  if (m.indexOf('gemini-') === 0) return m.indexOf('flash-lite') !== -1 ? 'gl35' : 'g38';
+  if (m.indexOf('sonnet-5-5') !== -1) return 's55';
+  if (m.indexOf('haiku-5-5') !== -1) return 'h55';
+  if (m.indexOf('sonnet-5') !== -1) return 's5';
+  if (m.indexOf('sonnet') !== -1) return 's';
+  return 'h';
+}
+
+/**
+ * Comptabilise l'usage d'un appel. Sépare Haiku et Sonnet (prix différents), et INPUT régulier /
+ * écriture cache / lecture cache (prompt caching, Vague 3 — sinon le budget §2.6 sous-estimerait :
+ * la réponse Anthropic met la part cachée dans `cache_read_input_tokens`, HORS `input_tokens`).
+ * @param {string} modele
+ * @param {{input_tokens:number, output_tokens:number, cache_creation_input_tokens:number, cache_read_input_tokens:number}} usage
+ */
+function enregistrerUsage_(modele, usage) {
+  if (!_usageRun || !usage) return;
+  var inTok = usage.input_tokens || 0, outTok = usage.output_tokens || 0;
+  var cwTok = usage.cache_creation_input_tokens || 0, crTok = usage.cache_read_input_tokens || 0;
+  // ⚠️ CHAQUE FAMILLE A SES PROPRES COMPTEURS : les prix ne se suivent pas d'une génération à l'autre
+  // (Haiku 5.5 = 0,10 $/0,50 $ contre 1 $/5 $ pour Haiku 4.5 ; Sonnet 5.5 relit son cache à 0,10 $
+  // contre 0,20 $ pour Sonnet 5). Rangé avec une autre, chaque appel serait compté 10× trop cher
+  // (ou trop peu) — et c'est ce total que lit le frein budget des campagnes. Les compteurs
+  // `h`, `s` et `s5` ne reçoivent plus d'appel : ils restent pour chiffrer les mois DÉJÀ comptés.
+  var pre = prefixeUsage_(modele);
+  _usageRun[pre + 'in'] += inTok; _usageRun[pre + 'out'] += outTok;
+  _usageRun[pre + 'cw'] += cwTok; _usageRun[pre + 'cr'] += crTok;
+  _usageRun.appels += 1;
+
+  // VENTILATION par opération (C28-58). On stocke des DOLLARS (déjà tarifés) et un compte
+  // d'appels, pas 8 compteurs de tokens par opération : la Property mensuelle reste petite.
+  // TOUT le bloc est enveloppé (revue flotte) : `enregistrerUsage_` est appelée sur le chemin
+  // critique, juste après une réponse Anthropic DÉJÀ PAYÉE et sans try/catch chez l'appelant —
+  // une exception ici perdrait la classification qu'on vient d'acheter. Le détail est un CONFORT,
+  // les tokens ci-dessus sont la comptabilité : jamais l'un au prix de l'autre.
+  try {
+    if (!_usageRun.ops) _usageRun.ops = {};
+    var op = _operationCouranteSure_();
+    var ligne = _usageRun.ops[op] || (_usageRun.ops[op] = { d: 0, n: 0 });
+    var delta = {};
+    delta[pre + 'in'] = inTok; delta[pre + 'out'] = outTok; delta[pre + 'cw'] = cwTok; delta[pre + 'cr'] = crTok;
+    ligne.d += coutDollars_(delta);
+    ligne.n += 1;
+  } catch (e) { /* détail perdu pour cet appel — les tokens, eux, sont comptés */ }
+}
+
+/**
+ * Opération courante, robuste : `Suivi.gs` peut ne pas être chargé (tests unitaires ciblés) et un
+ * appel LLM peut venir de hors-tick (web app). Jamais d'exception ici — la comptabilité ne
+ * doit pas pouvoir casser un appel LLM réussi.
+ * @return {string}
+ */
+function _operationCouranteSure_() {
+  try {
+    var op = typeof operationCourante_ === 'function' ? operationCourante_() : '';
+    return op || OP_HORS_ETAPE;
+  } catch (e) { return OP_HORS_ETAPE; }
+}
+
+/**
+ * Vide l'accumulateur du run dans le total mensuel (Script Property `DriveAI_COUT_AAAA-MM`).
+ * À appeler en fin de run (même si une erreur survient avant : enveloppé par l'appelant).
+ */
+function flushUsage_() {
+  if (!_usageRun || !_usageRun.appels) return;
+  var props = PropertiesService.getScriptProperties();
+  var cle = cleCoutMois_();
+  var t = lireCoutMois_(props, cle);
+  t.hin += _usageRun.hin; t.hout += _usageRun.hout; t.hcw += _usageRun.hcw; t.hcr += _usageRun.hcr;
+  t.sin += _usageRun.sin; t.sout += _usageRun.sout; t.scw += _usageRun.scw; t.scr += _usageRun.scr;
+  t.s5in += _usageRun.s5in; t.s5out += _usageRun.s5out; t.s5cw += _usageRun.s5cw; t.s5cr += _usageRun.s5cr;
+  t.h55in += _usageRun.h55in; t.h55out += _usageRun.h55out; t.h55cw += _usageRun.h55cw; t.h55cr += _usageRun.h55cr;
+  t.s55in += _usageRun.s55in; t.s55out += _usageRun.s55out; t.s55cw += _usageRun.s55cw; t.s55cr += _usageRun.s55cr;
+  t.g38in += _usageRun.g38in; t.g38out += _usageRun.g38out; t.g38cw += _usageRun.g38cw; t.g38cr += _usageRun.g38cr;
+  t.gl35in += _usageRun.gl35in; t.gl35out += _usageRun.gl35out; t.gl35cw += _usageRun.gl35cw; t.gl35cr += _usageRun.gl35cr;
+  t.appels += _usageRun.appels;
+  t.ops = fusionnerOps_(t.ops, _usageRun.ops);
+  // FILET (revue flotte C28-58) : cette Property porte AUSSI les totaux que lit le frein budget
+  // §2.6. Si l'encodage venait à dépasser la limite (~9 Ko), un `setProperty` qui lève ferait
+  // perdre les TOKENS eux-mêmes : le frein relirait une valeur figée et ne s'enclencherait plus
+  // pendant que les campagnes dépensent. On dégrade donc comme sa fonction sœur `flusherSuiviOps_` :
+  // on sacrifie le DÉTAIL, jamais la comptabilité qui protège le budget.
+  try {
+    props.setProperty(cle, JSON.stringify(t));
+  } catch (e) {
+    t.ops = {};
+    props.setProperty(cle, JSON.stringify(t));
+    try { journalErreur_('Cout', 'Ventilation des coûts abandonnée ce mois-ci (Property trop grosse) : ' + e); } catch (e2) { }
+  }
+  _usageRun = null;
+}
+
+/**
+ * FREIN BUDGET des campagnes (R3, §2.6) : vrai si le coût MENSUEL mesuré atteint
+ * CONFIG.LLM_BUDGET_CAMPAGNES. Lu au plus une fois par run (cache), journalisé UNE fois par
+ * mois quand il s'enclenche. Le flux vivant n'est jamais gaté par ce frein.
+ */
+var _freinBudget = null;
+function reinitialiserFreinBudget_() { _freinBudget = null; }
+function budgetCampagnesAtteint_() {
+  if (_freinBudget !== null) return _freinBudget;
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var cle = cleCoutMois_();
+    _freinBudget = coutDollars_(lireCoutMois_(props, cle)) >= CONFIG.LLM_BUDGET_CAMPAGNES;
+    if (_freinBudget) {
+      // Signalement best-effort dans son PROPRE try : une panne de journal/Property ne doit pas
+      // relever un frein correctement MESURÉ (la mesure prime sur l'annonce). La mémoire « déjà
+      // signalé » inclut le SEUIL : si Marc relève le plafond en cours de mois et que le frein se
+      // re-déclenche au nouveau niveau, la re-pause est re-annoncée (jamais silencieuse).
+      try {
+        var marque = cle + '|' + CONFIG.LLM_BUDGET_CAMPAGNES;
+        if (props.getProperty('DriveAI_FREIN_BUDGET') !== marque) {
+          props.setProperty('DriveAI_FREIN_BUDGET', marque);
+          journalInfo_('Cout', 'Budget campagnes atteint (' + CONFIG.LLM_BUDGET_CAMPAGNES +
+            ' $/mois) — rangement/migration/historique EN PAUSE jusqu\'au mois prochain ; le flux vivant continue.');
+        }
+      } catch (e2) { /* annonce différée au prochain run */ }
+    }
+  } catch (e) {
+    _freinBudget = false; // mesure illisible → on ne bloque pas (le budget reste une cible, pas un fusible dur)
+  }
+  return _freinBudget;
+}
+
+/** Clé de Script Property du mois courant. */
+/**
+ * Préfixe des Script Properties de comptabilité mensuelle. Une clé par mois, JAMAIS supprimée —
+ * c'est ce qui rend le cumul depuis toujours récupérable (`syntheseCoutTotal_`).
+ * `cleCoutMois_` en dérive : le lecteur du cumul et l'écrivain du mois ne peuvent pas diverger.
+ */
+var PREFIXE_COUT = 'DriveAI_COUT_';
+
+function cleCoutMois_() {
+  return PREFIXE_COUT + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM');
+}
+
+/** Lit (ou initialise) le total d'un mois. Normalise les champs cache (absents des JSON d'AVANT
+ * la Vague 3) à 0 — sinon `flushUsage_` ferait `undefined + n = NaN` et corromprait le compteur. */
+function lireCoutMois_(props, cle) {
+  var brut = props.getProperty(cle);
+  if (brut) {
+    try {
+      var t = JSON.parse(brut);
+      t.hin = t.hin || 0; t.hout = t.hout || 0; t.hcw = t.hcw || 0; t.hcr = t.hcr || 0;
+      t.sin = t.sin || 0; t.sout = t.sout || 0; t.scw = t.scw || 0; t.scr = t.scr || 0;
+      // Absents des mois d'AVANT l'ADR-0063 : `undefined + n` rendrait NaN et le frein lirait
+      // un budget qui ne se compare plus à rien.
+      t.s5in = t.s5in || 0; t.s5out = t.s5out || 0; t.s5cw = t.s5cw || 0; t.s5cr = t.s5cr || 0;
+      // Idem pour les mois d'AVANT la génération 5.5 (28/10/2026).
+      t.h55in = t.h55in || 0; t.h55out = t.h55out || 0; t.h55cw = t.h55cw || 0; t.h55cr = t.h55cr || 0;
+      t.s55in = t.s55in || 0; t.s55out = t.s55out || 0; t.s55cw = t.s55cw || 0; t.s55cr = t.s55cr || 0;
+      // Idem pour les mois d'AVANT Gemini (ADR-0073, 05/11/2026).
+      t.g38in = t.g38in || 0; t.g38out = t.g38out || 0; t.g38cw = t.g38cw || 0; t.g38cr = t.g38cr || 0;
+      t.gl35in = t.gl35in || 0; t.gl35out = t.gl35out || 0; t.gl35cw = t.gl35cw || 0; t.gl35cr = t.gl35cr || 0;
+      t.appels = t.appels || 0;
+      // `ops` absent = mois entamé AVANT C28-58 : la ventilation démarre à zéro et ne prétend
+      // rien sur le passé (elle sera INCOMPLÈTE ce mois-ci — dit explicitement dans l'onglet).
+      t.ops = t.ops && typeof t.ops === 'object' ? t.ops : {};
+      return t;
+    } catch (e) { /* corrompu → on repart à zéro */ }
+  }
+  return { hin: 0, hout: 0, hcw: 0, hcr: 0, sin: 0, sout: 0, scw: 0, scr: 0, s5in: 0, s5out: 0, s5cw: 0, s5cr: 0, h55in: 0, h55out: 0, h55cw: 0, h55cr: 0, s55in: 0, s55out: 0, s55cw: 0, s55cr: 0, g38in: 0, g38out: 0, g38cw: 0, g38cr: 0, gl35in: 0, gl35out: 0, gl35cw: 0, gl35cr: 0, appels: 0, ops: {} };
+}
+
+/**
+ * Fusionne la ventilation du run dans celle du mois. PURE (testée).
+ *
+ * BORNÉE (leçon §7 « une Property qui persiste une liste se borne ») : au-delà de `COUT_OPS_MAX`
+ * opérations distinctes, les nouvelles sont agrégées dans `(autres)` — le TOTAL reste juste, seul
+ * le détail des plus petites se perd. Les dollars sont arrondis à 6 décimales : sur un mois, l'écart
+ * cumulé est inférieur au centième de cent, et l'encodage reste compact.
+ * @param {?Object} mois
+ * @param {?Object} run
+ * @return {Object}
+ */
+function fusionnerOps_(mois, run) {
+  var out = {};
+  var k;
+  for (k in (mois || {})) if (Object.prototype.hasOwnProperty.call(mois, k)) {
+    out[k] = { d: Number(mois[k].d) || 0, n: Number(mois[k].n) || 0 };
+  }
+  for (k in (run || {})) if (Object.prototype.hasOwnProperty.call(run, k)) {
+    var cible = k;
+    // Nouvelle opération alors que le plafond est atteint ⇒ on la verse dans `(autres)` plutôt
+    // que de laisser la Property croître sans borne (ou pire, de perdre le montant).
+    if (!out[cible] && nbClefs_(out) >= COUT_OPS_MAX) cible = OP_AUTRES;
+    var ligne = out[cible] || (out[cible] = { d: 0, n: 0 });
+    ligne.d = Math.round((ligne.d + (Number(run[k].d) || 0)) * 1e6) / 1e6;
+    ligne.n += Number(run[k].n) || 0;
+  }
+  return out;
+}
+
+/** @param {Object} o @return {number} */
+function nbClefs_(o) {
+  var n = 0;
+  for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) n++;
+  return n;
+}
+
+/**
+ * Ventilation du mois, TRIÉE du plus cher au moins cher, avec la part en %. PURE (testée).
+ * `restant` = ce que le total mesuré porte EN PLUS de la somme ventilée : sur un mois entamé avant
+ * C28-58 il vaut presque tout, et c'est exactement ce qu'il faut DIRE plutôt que de laisser croire
+ * que la ventilation couvre tout (no-fake-data).
+ * @param {{ops:Object}} t  total mensuel (cf. `lireCoutMois_`)
+ * @param {number} totalDollars  coût total mesuré du mois
+ * @return {{lignes:Array<{op:string, dollars:number, appels:number, part:number}>,
+ *           ventile:number, restant:number}}
+ */
+function ventilationCoutMois_(t, totalDollars) {
+  var ops = (t && t.ops) || {};
+  var lignes = [];
+  var ventile = 0;
+  for (var k in ops) if (Object.prototype.hasOwnProperty.call(ops, k)) {
+    var d = Number(ops[k].d) || 0;
+    ventile += d;
+    lignes.push({ op: k, dollars: d, appels: Number(ops[k].n) || 0, part: 0 });
+  }
+  ventile = Math.round(ventile * 1e6) / 1e6;
+  var base = Number(totalDollars) || 0;
+  for (var i = 0; i < lignes.length; i++) {
+    lignes[i].part = base > 0 ? Math.round(lignes[i].dollars / base * 1000) / 10 : 0;
+  }
+  lignes.sort(function (a, b) { return b.dollars - a.dollars || (a.op < b.op ? -1 : 1); });
+  return { lignes: lignes, ventile: ventile, restant: Math.round((base - ventile) * 1e6) / 1e6 };
+}
+
+/**
+ * Coût $ estimé d'un total de tokens, d'après les prix par MTok (CONFIG.LLM_PRIX).
+ * @param {{hin:number,hout:number,sin:number,sout:number}} t
+ * @return {number} dollars
+ */
+function coutDollars_(t) {
+  var p = CONFIG.LLM_PRIX;
+  // Tous les champs gardés `|| 0` : un total partiel (delta, dry-run, objet sans cache) ne doit
+  // JAMAIS produire NaN — un budget NaN ne freinerait plus rien (§2.6).
+  return ((t.hin || 0) * p.haiku_in + (t.hout || 0) * p.haiku_out +
+          (t.hcw || 0) * p.haiku_cw + (t.hcr || 0) * p.haiku_cr +
+          (t.sin || 0) * p.sonnet_in + (t.sout || 0) * p.sonnet_out +
+          (t.scw || 0) * p.sonnet_cw + (t.scr || 0) * p.sonnet_cr +
+          (t.s5in || 0) * p.sonnet5_in + (t.s5out || 0) * p.sonnet5_out +
+          (t.s5cw || 0) * p.sonnet5_cw + (t.s5cr || 0) * p.sonnet5_cr +
+          (t.h55in || 0) * p.haiku55_in + (t.h55out || 0) * p.haiku55_out +
+          (t.h55cw || 0) * p.haiku55_cw + (t.h55cr || 0) * p.haiku55_cr +
+          (t.s55in || 0) * p.sonnet55_in + (t.s55out || 0) * p.sonnet55_out +
+          (t.s55cw || 0) * p.sonnet55_cw + (t.s55cr || 0) * p.sonnet55_cr +
+          (t.g38in || 0) * p.gemini38_in + (t.g38out || 0) * p.gemini38_out +
+          (t.g38cw || 0) * p.gemini38_cw + (t.g38cr || 0) * p.gemini38_cr +
+          (t.gl35in || 0) * p.geminil35_in + (t.gl35out || 0) * p.geminil35_out +
+          (t.gl35cw || 0) * p.geminil35_cw + (t.gl35cr || 0) * p.geminil35_cr) / 1e6;
+}
+
+/**
+ * Coût $ d'un document isolé par différence de 2 relevés de `usageRunSnapshot_` (avant/après son
+ * classement). PURE. Sert le dry-run C26-07 : un coût PAR LIGNE, sans compteur dédié qui dupliquerait
+ * (et pourrait diverger de) la comptabilité mensuelle déjà tenue par `enregistrerUsage_`/`flushUsage_`.
+ * @param {{hin:number,hout:number,sin:number,sout:number}} avant
+ * @param {{hin:number,hout:number,sin:number,sout:number}} apres
+ * @return {number} dollars
+ */
+function coutDollarsDelta_(avant, apres) {
+  return coutDollars_({
+    hin: apres.hin - avant.hin, hout: apres.hout - avant.hout,
+    hcw: (apres.hcw || 0) - (avant.hcw || 0), hcr: (apres.hcr || 0) - (avant.hcr || 0),
+    sin: apres.sin - avant.sin, sout: apres.sout - avant.sout,
+    scw: (apres.scw || 0) - (avant.scw || 0), scr: (apres.scr || 0) - (avant.scr || 0),
+    s5in: (apres.s5in || 0) - (avant.s5in || 0), s5out: (apres.s5out || 0) - (avant.s5out || 0),
+    s5cw: (apres.s5cw || 0) - (avant.s5cw || 0), s5cr: (apres.s5cr || 0) - (avant.s5cr || 0),
+    h55in: (apres.h55in || 0) - (avant.h55in || 0), h55out: (apres.h55out || 0) - (avant.h55out || 0),
+    h55cw: (apres.h55cw || 0) - (avant.h55cw || 0), h55cr: (apres.h55cr || 0) - (avant.h55cr || 0),
+    s55in: (apres.s55in || 0) - (avant.s55in || 0), s55out: (apres.s55out || 0) - (avant.s55out || 0),
+    s55cw: (apres.s55cw || 0) - (avant.s55cw || 0), s55cr: (apres.s55cr || 0) - (avant.s55cr || 0),
+    g38in: (apres.g38in || 0) - (avant.g38in || 0), g38out: (apres.g38out || 0) - (avant.g38out || 0),
+    g38cw: (apres.g38cw || 0) - (avant.g38cw || 0), g38cr: (apres.g38cr || 0) - (avant.g38cr || 0),
+    gl35in: (apres.gl35in || 0) - (avant.gl35in || 0), gl35out: (apres.gl35out || 0) - (avant.gl35out || 0),
+    gl35cw: (apres.gl35cw || 0) - (avant.gl35cw || 0), gl35cr: (apres.gl35cr || 0) - (avant.gl35cr || 0)
+  });
+}
+
+/**
+ * Copie de l'accumulateur du run courant (jamais la référence — l'appelant ne doit pas pouvoir
+ * muter `_usageRun`). Sert à mesurer un coût PAR DOCUMENT par différence de 2 relevés (dry-run
+ * C26-07) sans dupliquer la comptabilité de `enregistrerUsage_`. Un objet ZÉRO (jamais `{}` — le
+ * delta marche sans garde supplémentaire côté appelant) si aucun run en cours.
+ * @return {{hin:number,hout:number,sin:number,sout:number,appels:number}}
+ */
+function usageRunSnapshot_() {
+  return _usageRun
+    ? { hin: _usageRun.hin, hout: _usageRun.hout, hcw: _usageRun.hcw, hcr: _usageRun.hcr,
+        sin: _usageRun.sin, sout: _usageRun.sout, scw: _usageRun.scw, scr: _usageRun.scr,
+        s5in: _usageRun.s5in, s5out: _usageRun.s5out, s5cw: _usageRun.s5cw, s5cr: _usageRun.s5cr,
+        h55in: _usageRun.h55in, h55out: _usageRun.h55out, h55cw: _usageRun.h55cw, h55cr: _usageRun.h55cr,
+        s55in: _usageRun.s55in, s55out: _usageRun.s55out, s55cw: _usageRun.s55cw, s55cr: _usageRun.s55cr,
+        g38in: _usageRun.g38in, g38out: _usageRun.g38out, g38cw: _usageRun.g38cw, g38cr: _usageRun.g38cr,
+        gl35in: _usageRun.gl35in, gl35out: _usageRun.gl35out, gl35cw: _usageRun.gl35cw, gl35cr: _usageRun.gl35cr,
+        appels: _usageRun.appels }
+    : { hin: 0, hout: 0, hcw: 0, hcr: 0, sin: 0, sout: 0, scw: 0, scr: 0, s5in: 0, s5out: 0, s5cw: 0, s5cr: 0, h55in: 0, h55out: 0, h55cw: 0, h55cr: 0, s55in: 0, s55out: 0, s55cw: 0, s55cr: 0, g38in: 0, g38out: 0, g38cw: 0, g38cr: 0, gl35in: 0, gl35out: 0, gl35cw: 0, gl35cr: 0, appels: 0 };
+}
+
+/**
+ * Copie de la VENTILATION du run courant (jamais la référence). Symétrique de
+ * `usageRunSnapshot_` : sert aux tests et à tout appelant qui veut le détail sans attendre le
+ * flush mensuel. Objet VIDE si aucun run en cours.
+ * @return {Object<string,{d:number,n:number}>}
+ */
+function usageRunOpsSnapshot_() {
+  var out = {};
+  if (!_usageRun || !_usageRun.ops) return out;
+  for (var k in _usageRun.ops) if (Object.prototype.hasOwnProperty.call(_usageRun.ops, k)) {
+    out[k] = { d: _usageRun.ops[k].d, n: _usageRun.ops[k].n };
+  }
+  return out;
+}
+
+/**
+ * Jetons du mois PAR FAMILLE, cache compris. PURE. Des NOMBRES seulement (ADR-0007).
+ *
+ * POURQUOI : la preuve d'un passage de modèle demande deux choses que le total en dollars ne dit
+ * pas — quelle famille a réellement été appelée (`haiku55`, `sonnet55`) et si le cache a été relu
+ * (`cacheLu` > 0). Les compteurs existaient, aucune surface ne les montrait. Les anciens modèles
+ * (`h`, `s`, `s5`) sont sommés dans `anciens` : ils ne bougent plus, mais les mois déjà comptés
+ * les portent encore.
+ * @param {Object} t  un mois lu par `lireCoutMois_` (champs absents = 0)
+ * @return {{haiku55:Object, sonnet55:Object, anciens:Object}}  chacun {entree,sortie,cacheEcrit,cacheLu}
+ */
+function jetonsParFamille_(t) {
+  function n(v) { return typeof v === 'number' && isFinite(v) ? v : 0; }
+  function somme(pres) {
+    var o = { entree: 0, sortie: 0, cacheEcrit: 0, cacheLu: 0 };
+    for (var i = 0; i < pres.length; i++) {
+      o.entree += n(t[pres[i] + 'in']); o.sortie += n(t[pres[i] + 'out']);
+      o.cacheEcrit += n(t[pres[i] + 'cw']); o.cacheLu += n(t[pres[i] + 'cr']);
+    }
+    return o;
+  }
+  return { haiku55: somme(['h55']), sonnet55: somme(['s55']), gemini38: somme(['g38']), gemini35lite: somme(['gl35']),
+    anciens: somme(['h', 's', 's5']) };
+}
+
+/**
+ * Synthèse du coût du mois courant (pour le résumé hebdo).
+ * @return {{appels:number, dollars:number, tokens:number}}
+ */
+function syntheseCoutMois_() {
+  var t = lireCoutMois_(PropertiesService.getScriptProperties(), cleCoutMois_());
+  return {
+    appels: t.appels,
+    dollars: coutDollars_(t),
+    tokens: t.hin + t.hout + t.hcw + t.hcr + t.sin + t.sout + t.scw + t.scr +
+      t.s5in + t.s5out + t.s5cw + t.s5cr + t.h55in + t.h55out + t.h55cw + t.h55cr +
+      t.s55in + t.s55out + t.s55cw + t.s55cr + t.g38in + t.g38out + t.g38cw + t.g38cr +
+      t.gl35in + t.gl35out + t.gl35cw + t.gl35cr
+  };
+}
+
+/**
+ * Synthèse du coût CUMULÉ depuis toujours — la somme de tous les mois comptabilisés.
+ *
+ * ── POURQUOI C'EST POSSIBLE SANS RIEN STOCKER DE NEUF ───────────────────────────────
+ *
+ * `flushUsage_` écrit une Script Property PAR MOIS (`DriveAI_COUT_aaaa-MM`) et ne les
+ * supprime jamais. Le cumul depuis le premier jour est donc déjà là, éparpillé : il suffit
+ * de le rassembler. Aucun compteur supplémentaire à tenir — et surtout aucun qui pourrait
+ * DIVERGER de la comptabilité mensuelle, ce que ce fichier s'interdit déjà ailleurs
+ * (cf. `coutDollarsDelta_`, qui calcule par différence plutôt que par compteur dédié).
+ *
+ * ── POURQUOI LE HUB EN A BESOIN ─────────────────────────────────────────────────────
+ *
+ * Le hub refuse d'additionner des montants qui ne couvrent pas la même période : FinanceAI
+ * publie un cumul, DriveAI publiait le mois courant, et les additionner donnait un total
+ * faux et SOUS-ESTIMÉ (correctif du 31/07 côté hub — les mois passés de DriveAI manquaient).
+ * En publiant le cumul, DriveAI s'aligne et le hub peut enfin afficher UN seul montant
+ * honnête. Le budget mensuel n'est pas perdu : il devient un `quota` avec sa limite.
+ *
+ * ⚠️ UN SEUL appel `getProperties()`, pas N `getProperty()` : le quota Properties d'Apps
+ * Script est une ressource rare, et cette fonction tourne à chaque rafraîchissement du
+ * résumé du hub.
+ *
+ * Une clé illisible (JSON corrompu) est IGNORÉE et COMPTÉE, jamais traitée comme un zéro
+ * silencieux : le mois concerné manque au total, et l'appelant peut le dire. Un cumul
+ * discrètement amputé serait pire qu'une erreur visible.
+ *
+ * @return {{dollars:number, mois:number, ignores:number}}
+ */
+function syntheseCoutTotal_() {
+  var toutes = PropertiesService.getScriptProperties().getProperties();
+  var dollars = 0, mois = 0, ignores = 0;
+  for (var cle in toutes) {
+    if (cle.indexOf(PREFIXE_COUT) !== 0) continue;
+    try {
+      var t = JSON.parse(toutes[cle]);
+      // Mêmes normalisations que `lireCoutMois_` : un JSON d'AVANT la Vague 3 n'a pas les
+      // champs de cache, et `undefined` propagerait un NaN dans TOUT le cumul.
+      dollars += coutDollars_({
+        hin: t.hin || 0, hout: t.hout || 0, hcw: t.hcw || 0, hcr: t.hcr || 0,
+        sin: t.sin || 0, sout: t.sout || 0, scw: t.scw || 0, scr: t.scr || 0,
+        s5in: t.s5in || 0, s5out: t.s5out || 0, s5cw: t.s5cw || 0, s5cr: t.s5cr || 0,
+        h55in: t.h55in || 0, h55out: t.h55out || 0, h55cw: t.h55cw || 0, h55cr: t.h55cr || 0,
+        s55in: t.s55in || 0, s55out: t.s55out || 0, s55cw: t.s55cw || 0, s55cr: t.s55cr || 0,
+        g38in: t.g38in || 0, g38out: t.g38out || 0, g38cw: t.g38cw || 0, g38cr: t.g38cr || 0,
+        gl35in: t.gl35in || 0, gl35out: t.gl35out || 0, gl35cw: t.gl35cw || 0, gl35cr: t.gl35cr || 0
+      });
+      mois += 1;
+    } catch (e) {
+      ignores += 1;
+    }
+  }
+  return { dollars: dollars, mois: mois, ignores: ignores };
+}

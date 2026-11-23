@@ -1,0 +1,39 @@
+name: Fumée de production
+
+# Après chaque déploiement de production réussi, sonde l'app EN LIGNE : une CI verte ne prouve pas que le site répond.
+# Le contrôle est le workflow commun de MoKarade/.github (plan de standardisation du 15/10/2026, décision 5) ; ce fichier
+# ne fait que l'appeler (tâche #775).
+#
+# Contrôles (rouge si l'un échoue après 3 essais) : santé (/api/sante, api/_sante.ts), summary du hub refusé sans jeton puis
+# valide avec le jeton (/api/hub/summary), entrée de la connexion (/api/login : redirection vers Google, jamais suivie).
+# Le journal ne contient ni corps de réponse ni jeton.
+#
+# L'adresse de production n'est PAS écrite ici : le garde de données personnelles (test/pii-guard.test.js) refuse le nom de
+# domaine dans un fichier versionné. Elle vient de la variable du dépôt GitHub URL_PRODUCTION (une variable, pas un secret),
+# posée par le PC. Variable absente ou vide : le job est SAUTÉ, jamais rouge. C'est le cran d'armement : une fumée rouge DEMANDE
+# le retour arrière de la production, donc on la lance d'abord à la main (« Run workflow »), on la voit verte, puis seulement on
+# arme le déclenchement automatique.
+#
+# Le workflow commun reçoit le jeton sous le nom `hub-token` (un nom de secret GitHub ne peut pas porter de tiret, donc
+# l'héritage automatique des secrets ne le remplit jamais) : on le passe explicitement depuis HUB_TOKEN. HUB_DISPATCH_TOKEN (retour en
+# arrière de la production quand la fumée est rouge) se passe de la même façon ; sans lui le workflow dit « rouge » et ne
+# touche à rien.
+on:
+  deployment_status:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fumee:
+    name: Fumée de production
+    if: vars.URL_PRODUCTION != '' && (github.event_name == 'workflow_dispatch' || (github.event.deployment_status.state == 'success' && github.event.deployment_status.environment == 'Production'))
+    uses: MoKarade/.github/.github/workflows/fumee.yml@bd0c4e413fc6d769b8ade920f37bed0bbcbbe440 # v1
+    with:
+      url-base: ${{ vars.URL_PRODUCTION }}
+      chemin-summary: /api/hub/summary
+      chemin-connexion: /api/login
+    secrets:
+      hub-token: ${{ secrets.HUB_TOKEN }}
+      HUB_DISPATCH_TOKEN: ${{ secrets.HUB_DISPATCH_TOKEN }}

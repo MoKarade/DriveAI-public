@@ -1,0 +1,119 @@
+# ADR-0051 — App v7 : le téléphone d'abord, une colonne, zéro phrase inutile
+
+- **Statut** : accepté (2026-09-09) — en construction (C28-82, six PR)
+- **Décideurs** : Marc (demande + quatre réponses sur maquettes, 2026-09-09), Claude
+- **Remplace** visuellement : ADR-0013 (v3 « Salle des machines »), ADR-0019 (v4), C28-41 (v6).
+  **Conserve** intégralement le socle technique et ses garde-fous : Vite/React/TS, BFF Vercel,
+  lecture de la Sheet depuis le navigateur (ADR-0007), `corbeille.ts` seul autorisé à corbeiller
+  (ADR-0014, tripwire CI), aucune permission nouvelle, aucune suppression nouvelle.
+
+## 1. Problème
+
+Marc, 2026-09-09 : « l'interface est pas du tout intuitive, trop de texte, trop de déchets,
+trop moche, pas assez simple, pas assez beau — je veux une refonte visuelle et utilitaire,
+parfaite pour téléphone et pour PC ».
+
+Constaté sur captures réelles (mode mock, 390 px et 1 280 px) — pas de mémoire :
+
+- **Le téléphone est un PC rétréci.** L'heure de synchro s'empile sur trois lignes, l'avatar sort
+  de l'écran, le champ de recherche se réduit à « Rec », les noms de dossiers se cassent sur trois
+  lignes. La CI ne photographiait qu'à 1 280 px : personne ne l'a vu.
+- **Du texte partout.** 14 paragraphes d'explication (≥ 90 caractères), un pied de page
+  « Garde-fous actifs… » sur chaque écran, une phrase sous chaque liste — 3 949 caractères de
+  libellés pour cinq écrans.
+- **Des chiffres qui n'aident pas.** « — $ / 10 $ » sur l'accueil, le coût LLM affiché deux fois,
+  une page Moteur de huit blocs et trois jauges.
+- **L'agenda s'ouvre à minuit** sur téléphone : huit heures vides avant le premier rendez-vous.
+- **Une barre latérale qui ne sert qu'à l'Agenda** (mini-calendrier, « Mes agendas ») occupe
+  240 px sur tous les écrans du PC.
+- **Cinq icônes, quatre styles** (◐ ▦ ▤ 💬 ⚙), un thème sombre unique.
+
+## 2. Décisions du propriétaire (2026-09-09, questions groupées sur maquettes)
+
+| Question | Réponse |
+|---|---|
+| Ambiance | **B · « Nuit »** — sombre, nettoyé (pas la recommandation A « Papier » clair) |
+| PC | **Une colonne centrée, rail à gauche** — la même app que le téléphone, plus large |
+| Accueil | **Comme aujourd'hui, en plus propre** — alertes, journée, coût, classements |
+| Page Moteur | **Réglages : trois chiffres + « Avancé » replié** — engrenage, jamais devant |
+
+Hypothèses prises par défaut (annoncées, non contestées) : Atkinson Hyperlegible + IBM Plex
+Mono ; un jeu d'icônes SVG au trait, plus d'emoji dans l'interface ; un seul accent (bleu),
+rouge/ambre/vert réservés aux états ; FR/EN conservés ; barre latérale, mini-calendrier, lien
+« ← Hub », horloge de synchro et pied de page retirés de la coquille (leur contenu vit dans
+Réglages ou dans l'Agenda) ; PWA conservée ; animations courtes, aucune sous
+`prefers-reduced-motion`.
+
+## 3. Principes (appliqués à chaque écran)
+
+1. **Une ligne = une chose, un bouton.** Ce qui demande une action est une liste ; chaque ligne
+   porte au plus une action visible. Aucune phrase pour l'expliquer.
+2. **L'aide vit derrière un « ? »**, jamais sous la liste. Le pied de page devient une ligne dans
+   Réglages.
+3. **Le téléphone d'abord.** Chaque écran est dessiné à 390 px puis élargi. Le PC reçoit la même
+   app avec un rail — jamais une autre app.
+4. **Quatre entrées** : Aujourd'hui · Agenda · Documents · Assistant. Réglages (ex-Moteur) est
+   à part : engrenage en haut à droite sur téléphone, bas du rail sur PC.
+5. **Un jeu d'icônes, une police, un accent.**
+6. **Les noms de fichiers en monospace** : `AAAA-MM-JJ_Devis_Garage.pdf` se lit
+   d'un coup d'œil — c'est la signature de DriveAI.
+
+## 4. Plan (C28-82) — six PR, chacune livrable seule
+
+| PR | Livre | Vérifie |
+|---|---|---|
+| 0 | Cet ADR ; polices auto-hébergées (`app/public/fonts`, CSP `default-src 'self'` — aucun appel à Google Fonts au runtime) ; `Icone.tsx` ; coquille `App.tsx` (barre haute + onglets bas / rail + colonne) ; suppression de `Sidebar.tsx` et `MiniCalendrier.tsx` ; « Mes agendas » en puces dans l'Agenda, « + » de création dans son en-tête ; `Moteur.tsx` → `Reglages.tsx` + carte Compte (langue, synchro, hub, déconnexion, ligne des garde-fous) ; tokens v7 dans `styles.css` (noms v6 conservés) ; **captures E2E à deux tailles** (`pc`, `tel`) | vitest · tsc · build · captures tel + pc · revue flotte |
+| 1 | Accueil « plus propre » (mêmes briques, une action par ligne, zéro paragraphe) ; Réglages réduit à trois chiffres + « Avancé » replié | idem + captures avant/après |
+| 2 | Documents : recherche unique (nom / contenu / IA), dossiers et fichiers en lignes, déplacement conservé. *Amendé à la livraison : pas de compte par dossier (un appel Drive par dossier), pas de cadenas ni d'arbre PC — une colonne partout (choix Marc) ; pendant une recherche l'Ariane est remplacée par le compte de résultats (glisser un résultat sur un ancêtre n'est plus possible).* | + tests du sélecteur de recherche (pur) |
+| 3 | Agenda : liste par jour sur téléphone (bande 7 jours), grille dès 7 h avec défilement sur « maintenant », filtres dans la page | + tests purs grille/liste |
+| 4 | Assistant : fil plein écran, propositions Réorg en cartes Valider / Écarter dans le fil, raccourcis quand le fil est vide, « Analyser la structure » rapatrié ici | + tests d'assemblage fil ↔ propositions |
+| 5 | Nettoyage : paragraphes `.explication` retirés (aide « ? »), i18n 134 → ~80 clés, GUIDE.md et captures docs, revue flotte finale | `grep` : zéro `.explication` restante hors aide |
+
+## 5. Risques et garde-fous
+
+- **Régression fonctionnelle silencieuse** (une commande de la v6 qui disparaît sans remplaçant).
+  Parade : chaque PR liste ce qui bouge et OÙ ça revit (PR 0 : Créer → en-tête Agenda ; Mes
+  agendas → puces Agenda ; langue / synchro / hub / déconnexion / garde-fous → Réglages · Compte).
+- **Le téléphone reste invisible.** Parade structurelle : les captures CI passent à deux tailles
+  dès PR 0 — la première chose que la refonte livre est l'œil qui manquait.
+- **Polices** : auto-hébergées (latin + latin-ext, 168 Ko pour 12 fichiers, `font-display: swap`)
+  parce que la CSP de `index.html` est `default-src 'self'` ; `fonts.gstatic.com` n'y entrera pas.
+- **Les tests app (243) ne couvrent que la logique** (`etat`, `agenda`, `explorateur`, BFF…) :
+  aucune vue n'est testée par rendu. La preuve visuelle reste la capture, la preuve
+  fonctionnelle reste Marc sur son téléphone après chaque PR.
+
+## 6. Ce qui ne change PAS
+
+`google.ts`, `etat.ts`, `agenda.ts`, `agendasStore.ts`, `explorateur.ts`, `corbeille.ts`,
+`garde-fous.ts`, tout `api/`, les scopes OAuth, le contrat hub. La refonte ne touche que ce qui
+s'affiche.
+
+---
+
+## 7. Révision du 2026-09-21 — un CINQUIÈME onglet : « Lecture »
+
+**Décidé par Marc**, le jour même, après deux messages : « ça ne m'explique toujours pas
+l'avancement », puis « je veux vraiment un onglet précis pour l'avancement, avec ce qui est en
+train d'être lu, ce qui a déjà été lu etc etc ». La question a été posée en choix explicite —
+5ᵉ onglet, page dans Documents, ou page dans Réglages — et il a tranché pour le 5ᵉ onglet.
+
+**Ce que cet ADR avait figé** : quatre entrées dans la barre du bas, « le téléphone d'abord ».
+La raison tenait : une barre chargée est une barre qu'on ne vise pas.
+
+**Ce que la mesure a ajouté.** L'avancement de la lecture vivait dans une ligne de Santé, au
+milieu de quinze autres, dans **Réglages** — l'écran qu'on ouvre le moins. Le propriétaire a dit deux
+fois qu'il ne trouvait pas l'information ; elle était là, et c'est exactement le défaut qu'un
+onglet corrige. Un cinquième onglet coûte de la largeur ; l'information introuvable coûtait la
+confiance dans tout le reste.
+
+**Ce qui tient encore**, et qui ne se re-négocie pas ici :
+- la barre du bas reste la navigation du téléphone, et rien ne s'y ajoute sans arbitrage ;
+- **cinq cases de 64 à 72 px** sur un écran de 320 à 360 px : au-dessus du seuil tactile de
+  44 px, mesuré avant de livrer ;
+- ⚠️ la grille CSS était figée à `repeat(4, 1fr)`. Elle est passée à 5 **et** une garde la
+  DÉRIVE désormais de `SECTIONS_NAV.length` (`app/test/lecture.test.ts`) : la valeur avait
+  survécu au passage à cinq sans qu'aucun test ne rougisse, et une case de trop dans une
+  grille figée ne se voit que sur un téléphone.
+
+**Ce que la révision N'autorise PAS** : un sixième onglet. La question se reposera à Marc, avec
+ce que ça coûte en largeur, et la mesure à l'appui.

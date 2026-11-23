@@ -1,0 +1,204 @@
+# ADR-0026 — Onglet Assistant : chat Claude (Q&A sur fichiers + opérations de dossiers)
+
+- **Statut** : **Abrogé** le 05/11/2026 par l'ADR-0074 (le chat à outils `chat-assistant` est retiré ; les rangements « À valider » de l'onglet Réorg restent). Était : accepté (chantier C28-30, décision Marc 2026-07-23, verbatim : « je veux un chatbot
+  qui marche avec claude … retrouver des fichiers et les analyser pour que je pose des questions
+  dessus … utiliser ce chatbot plutôt que la page apprentissage pour créer des nouveaux dossiers,
+  en fusionner etc. … un onglet assistant … une partie où je peux chat et une autre où ça me pose
+  des questions par rapport aux dossiers à créer … crée un dossier garage dans le dossier qui
+  correspond … la liste des fichiers à déplacer et je peux décider lequel déplacer »).
+- **Révision 28/10/2026 (DriveAI#732)** : l'onglet Assistant décrit ici est retiré de l'app ; il n'y a plus qu'une seule LIA (Marc : « tout passe par LIA »). Les cartes de rangement à valider restent, en bandeau « À valider » dans Documents ; les actions moteur `chat-assistant` et `recherche-ia` demeurent pour le MCP.
+- **Design validé par l'architecte NotebookLM (C28-30)** — exécution en 3 PR séquentielles. Cet ADR
+  est le cadrage §8 du chantier (le seul changement `Llm.gs`/`WebApp.gs` de fond : un nouvel appel
+  « messages » multi-tours + boucle Tool Use ; **aucune** modification de la logique de classement).
+- **Remplace** la section réorg de l'app (ADR-0019/#21) par l'onglet Assistant : la réorg gardée
+  (C21-06, `appliquerUneAction_`) devient le moteur d'exécution des opérations demandées par chat,
+  jamais une nouvelle surface de mutation.
+
+## Problème
+
+L'auto-rangement classe bien, mais (a) Marc ne peut pas *interroger* ses documents (« donne mon
+NAS » = chercher, lire, extraire) et (b) piloter la structure (créer/fusionner/déplacer/renommer,
+« organiser un dossier ») passe par une page de réorg rigide. Il veut un assistant conversationnel
+unique, avec aperçu + validation avant toute mutation, et un budget borné.
+
+## Décision (chantier phasé)
+
+1. **PR1 — Moteur, cœur du chat & outils de LECTURE (Q&A en escalade).** *(← ce commit)*
+   - Nouvel appel `appelAnthropicMessages_` (un tour `/v1/messages`, gère panne/usage) + boucle
+     `appelAnthropicChat_` (Tool Use bornée `CHAT_TOOL_ITERATIONS_MAX`) dans `Llm.gs` — **sans I/O
+     Drive** (l'exécution des outils est un callback fourni par l'appelant).
+   - Action web app `chat-assistant` (`WebApp.gs`) : 3 outils **LECTURE SEULE** — `recherche_nom`
+     (`title`), `recherche_contenu` (`fullText`), `lire_fichier` (texte borné `CHAT_LIRE_MAX_CARS`,
+     taille ≤ `OCR_TAILLE_MAX`). Escalade : nom → contenu → lecture. Aucune mutation possible.
+   - **Budget §2.6** : plafond QUOTIDIEN `CHAT_COUT_JOUR_MAX` (**0,33 $**, échec fermé au-delà) +
+     anti-rafale + Sonnet (raisonnement multi-outils). 0,33 × 30 ≈ 9,9 $/mois GARANTIT la cible
+     < 10 $/mois même saturé chaque jour (revue llm-cost : 0,50 aurait plafonné à 15 $/mois). Coût
+     mesuré par `usageRunSnapshot_` (le contexte doPost réinitialise l'usage lui-même : le tick n'a
+     pas tourné). **Suivi (revue llm-cost, non bloquant)** : le plus gros levier restant est le
+     *prompt caching* du préfixe système+outils+historique (renvoyé jusqu'à 5×/message) — ~−90 % sur
+     l'entrée répétée ; à implémenter après vérif de la doc Anthropic (min-préfixe cacheable + TTL),
+     inaccessible via le proxy au moment de PR1.
+   - **ADR-0007** : rien du contenu n'est persisté — l'historique vit côté navigateur (éphémère),
+     le texte lu ne fait que transiter vers Claude ; seules des métadonnées (coût $, timestamp)
+     touchent les Script Properties.
+2. **PR2 — Opérations de dossiers via la réorg GARDÉE + « épinglé Marc ».** *(← ce commit)*
+   - Outil `proposer_reorg(actions, synthese)` (`WebApp.gs`) : le chat fournit des actions avec de
+     VRAIS id Drive (obtenus par ses recherches), whitelistées PURE (`parserActionsChat_` : type
+     connu, id requis non vides, nom sans « / », plafond `REORG_ACTIONS_MAX`), écrites en lignes
+     `proposé` dans l'onglet `Réorg` (append). **Le chat ne MUTE JAMAIS le Drive** ; l'existence des
+     id et les gardes de zone sont re-vérifiées à l'APPLICATION.
+   - Nouvelle action `deplacer-fichier` dans `appliquerUneAction_` (`Reorg.gs`, chemin GARDÉ C21-06)
+     via `appliquerDeplacerFichier_` : `getFileById(source).moveTo(cible)` — **moveTo seul**
+     (réversible, jamais de suppression), garde §1 STRICTE échec-fermé des DEUX côtés (`aParentProtege_`
+     sur le FICHIER source — jamais détacher un fichier de 04 · Immigration — ET zone/racine système
+     sur la cible via `chaineMonteVersProtege_`). La **source doit être un FICHIER** : un dossier
+     (racine de domaine/catégorie/04) passé par erreur est rejeté par le MIME (revue sécurité — sinon
+     `moveTo` relogerait la racine, dérive structurelle). Application déclenchée par la **validation de
+     Marc** (par fichier) dans l'app (PR3).
+   - **Assouplissement `creer` (revue code 🟠, §8)** : créer un dossier DANS un domaine/catégorie
+     `intouchable` (ex. « crée Garage dans Véhicule » — demande explicite de Marc) est désormais
+     AUTORISÉ — créer un ENFANT ne MUTE pas le parent (ni détachement ni suppression), donc n'enfreint
+     pas l'invariant d'immunité structurelle (`intouchables` protège un dossier contre SA PROPRE
+     mutation, pas contre la réception d'un enfant). Restent interdits (préservés explicitement) :
+     zone protégée 04, files `00 · À trier`/`À vérifier` (créer dans l'intake casserait le tri) et
+     racines système `_…`. Change le guard PARTAGÉ (affecte aussi le plan réorg #21 — moins de refus
+     spurieux, aucun garde-fou perdu).
+   - **« Épinglé Marc » (convergence)** : un déplacement de fichier réussi inscrit la clé DÉDIÉE
+     `epingle|<fileId>` dans l'Index. **Adaptation au code réel (le plan supposait
+     `indexLire_('drive|…').statut`, qui n'existe pas)** : `indexAjouter_` APPEND (pas d'update) et
+     `drive|<fileId>` est déjà le namespace des dépôts classés — un namespace dédié `epingle|`,
+     checkable O(1) par `indexContient_`, évite la sur-filtration et la duplication de clé. Les
+     prédicats de collecte des campagnes de re-rangement l'IGNORENT (immunité) : `collecterConsolidation_`,
+     `estAMigrer_`, `estAReanalyser_` **et** `estAReclasserLeger_` (grand rangement, défense en
+     profondeur) — les QUATRE, pour une convergence complète.
+3. **PR3 — UI de l'onglet Assistant.** *(← ce commit)*
+   - **`assistant` = SECTION de PREMIER NIVEAU** (App.tsx `Section`/`SECTIONS`/`ICONES` 💬 + Sidebar
+     auto), **pas** un sous-onglet. La « Réorg IA » QUITTE `Documents.tsx` (sous-onglet retiré) →
+     l'Assistant REMPLACE la page réorg (demande Marc « un onglet assistant »).
+   - **`app/src/vues/Assistant.tsx`** (NOUVEAU) : layout en colonne (`.accueil`) — GAUCHE le chat
+     (historique éphémère en State React, ADR-0007 ; `envoyerMessageChat` → doPost `chat-assistant`),
+     DESSOUS la `ReorgVue` embarquée pour valider le plan. Deux actions rapides « Suggérer des
+     dossiers » / « Organiser un dossier » (prompts pré-remplis = suggestions auto + questionnaire
+     guidé). **Compteur de budget visible** : `actionChatAssistant_` renvoie désormais
+     `coutJour`/`plafond` (métadonnées seulement) → jauge « X,XX / 0,33 $ ».
+   - **Propositions du chat surfacées** : nouveau helper PUR `actionsProposeesChat` (etat.ts) remonte
+     les lignes `chatreorg|…` `proposé` (sans `demande`) ; `ReorgVue` les affiche en section dédiée
+     avec validation PAR ACTION (réutilise `poserStatut`/`ecrireCellule`). Refresh : `signalRafraichir`
+     + `viderCachePlages('Réorg')` après chaque réponse (le chat écrit côté moteur, hors cache app).
+   - Frontend pur + un ajout moteur trivial (deux nombres dans la réponse). Tests : `etat.test.ts`
+     (`actionsProposeesChat`) + `chat-assistant.test.js` (compteur) ; capture e2e de l'onglet.
+
+## Garde-fous & risques
+
+- **§2 aucune suppression / zone 04** : PR1 est **LECTURE SEULE** (verrou de surface + test) ; PR2
+  n'ajoute **aucune** surface de mutation — il réutilise le chemin gardé de la réorg (`moveTo` +
+  create + rename ; corbeille des vides = clic app, ADR-0014).
+- **Injection de requête Drive** : `rechercheDriveChat_` échappe `\` et `'` et fige `and trashed =
+  false` ; la recherche reste dans le Drive de Marc (compte du moteur).
+- **Budget §2.6** : plafond quotidien à échec fermé ; usage interactif de Marc, pas un flux
+  automatique — un run isolé est borné par `CHAT_MAX_TOKENS × CHAT_TOOL_ITERATIONS_MAX`.
+- **Confidentialité (ADR-0007) — élargissement DÉLIBÉRÉ du *quand*, assumé.** Lire le CONTENU d'un
+  doc (y compris sous 04 · Immigration / `sensible`) ne dépasse pas la frontière de transit déjà
+  assumée par le pipeline (qui envoie déjà chaque doc à Anthropic pour le classement) : aucun
+  nouveau tiers, réponse renvoyée à Marc seul via l'endpoint auth-gated, aucune persistance. Mais
+  c'est un choix explicite : `lire_fichier` envoie du contenu à Anthropic **à la demande de Marc**,
+  docs sensibles inclus, là où l'action `recherche-ia` n'envoie **volontairement aucun** contenu.
+  Décision écrite ici, pas un effet de bord hérité.
+- **« Lecture seule » ≠ zéro écriture Drive du tout (nuance OCR, sanctionnée).** `lire_fichier` sur
+  un binaire (PDF/image/Word/PPT/Excel) passe par `extraireTexte_ → convertirEtExtraire_`, qui
+  **crée puis supprime** un Google Doc temporaire `DriveAI_extract_temp` (exception OCR existante,
+  §2 : ressource créée par NOUS, jamais un fichier de Marc ; l'`id` supprimé vient de la réponse
+  d'insert, jamais de l'input du modèle). Aucun fichier de Marc n'est muté ; l'invariant §2 tient.
+- **Convergence (PR2)** : un fichier épinglé par Marc ne doit jamais être re-déplacé par le flux
+  vivant/consolidation — marque d'Index respectée des deux côtés, verrouillée par test + tripwire.
+
+## Méthode de test
+
+PR1 : fonctions PURES testables `node --test` (`validerHistoriqueChat_`, `coutChatJour_`) +
+boucle Tool Use mockée (exécute l'outil, rend un `tool_result` par `tool_use`, renvoie le texte) +
+plafond quotidien à échec fermé (aucun appel LLM au-delà) + outils de lecture bornés (`test/chat-assistant.test.js`).
+Surface verrouillée (`test/surface-moteur.test.js` : `appelAnthropicChat_`/`appelAnthropicMessages_`
+appelés en travers des modules). Revue flotte (sécurité + code + coût LLM) avant merge — verdicts et
+correctifs :
+
+- **security-auditor 🟢** : lecture seule réelle, injection Drive échappée (`\`+`'`, `trashed=false`
+  figé), budget échec fermé. Deux extensions de surface écrites explicitement ci-dessus (temp OCR de
+  `lire_fichier` ; exposition délibérée du contenu sensible à la demande).
+- **llm-cost 🟠 → corrigé** : `CHAT_COUT_JOUR_MAX` 0,50 → 0,33 (garantit < 10 $/mois même saturé).
+  Suivi : prompt caching (plus gros levier) après vérif doc Anthropic.
+- **code-reviewer 🟠 ×2 → corrigés** : (1) **garde-temps** de la boucle (`CHAT_BUDGET_MS` 4 min) —
+  le compte de tours ne bornait pas le TEMPS, un enchaînement d'OCR pouvait frôler le mur 6 min de
+  doPost ; (2) le tour final **garde `tools`** et impose `tool_choice:{type:'none'}` (retirer `tools`
+  alors que l'historique porte des `tool_use`/`tool_result` risquait un 400). 🟡 traités aussi :
+  alternance stricte validée dans `validerHistoriqueChat_`, `refusal`/`max_tokens` journalisés,
+  tests des chemins limites (multi tool_use, tour forcé, bloc non exploitable).
+
+**PR2 — revue flotte** :
+- **security-auditor 🟢** (7/7 §2) : aucune suppression, zone 04 jamais détachée (source ET cible,
+  multi-parents inclus), chat ne contourne pas la validation de Marc, injection d'ID gérée (échec-fermé
+  à l'application), convergence correcte, ADR-0007 respecté. Durcissement appliqué : rejet d'une source
+  qui est un DOSSIER (MIME) + strip du séparateur `→` dans le parser.
+- **code-reviewer 🟠 → corrigé** : `creer` refusait un parent `intouchable` (l'exemple du prompt « crée
+  dans Véhicule » revenait `refusé`) → assouplissement ci-dessus. 🟡 notés : fenêtre de course réorg
+  minuscule et PRÉ-EXISTANTE (commentaire honnêtifié) ; garde cible `_…` par nom (identique à l'existant).
+- **structure-keeper 🟢 CONFORME** (4 axes) : onglet Réorg cohérent, séparation propre fichier↔dossier,
+  structure protégée respectée, convergence conforme. Note appliquée : commentaire près de `Intake.gs`
+  expliquant que l'intake filtre `drive|` (pas `epingle|`) VOLONTAIREMENT (un re-dépôt manuel doit se
+  re-trier ; un skip y coincerait le fichier à vie).
+  **Suite (ADR-0071, 29/10/2026)** : ce commentaire promettait un re-tri que le filtre `drive|` empêchait encore ; le re-tri d'une remise est maintenant réel, jugé sur la dernière ligne d'Index du fichier.
+
+**PR3 — revue flotte** :
+- **security-auditor 🟢 CONFORME** (5/5) : aucune nouvelle surface de suppression (`envoyerMessageChat`
+  = fetch seul ; `aucune-suppression.test.ts` vert), ADR-0007 (coutJour/plafond = métadonnées), le
+  retrait du sous-onglet réorg ne perd AUCUN garde-fou (ReorgVue + corbeille ADR-0014 intactes, juste
+  embarquées dans l'Assistant), le chat n'applique/ne supprime rien, secret inchangé.
+- **code-reviewer 🔴 + 🟠 → corrigés** : (🔴) `Assistant.tsx envoyer()` ne rollbackait pas le tour
+  `user` optimiste sur erreur → un blip (anti-rafale 3 s, budget, réseau) cassait l'alternance stricte
+  du moteur et bloquait le chat jusqu'au reload → catch qui RETIRE le tour orphelin + rend la saisie ;
+  (🟠) `envoyerMessageChat` jetait `coutJour`/`plafond` sur `!ok` (compteur invisible au refus à froid,
+  retour moteur mort) → erreur ENRICHIE (`ErreurChat`) lue par le catch → `setBudget`. 🟡 aussi :
+  garde IME sur Enter, dé-duplication de l'affichage d'erreur, timestamps de test réalistes (13 chiffres).
+
+## Mise à jour 2026-07-24 (post-déploiement, retours Marc)
+
+Web app redéployée par Marc (Nouvelle version → Déployer) : le chat répond. Deux retours traités :
+1. **Troncature** — la réponse se coupait en pleine phrase (« Je te propose la réorganisation
+   suivante : » puis rien) : `CHAT_MAX_TOKENS` 1500 → **4000** (l'analyse + l'appel `proposer_reorg`
+   tenaient pas dans 1500) ; `CHAT_TOOL_ITERATIONS_MAX` 4 → **6** (chercher les dossiers cibles PUIS
+   proposer) ; prompt renforcé : « dès que tu proposes, tu DOIS appeler `proposer_reorg` — décrire en
+   texte sans appel d'outil est une ERREUR » (sinon rien n'arrive dans la file de validation).
+2. **Plafond retiré** (décision Marc « enlève le plafond ») — `CHAT_COUT_JOUR_MAX` 0,33 → **10,0 $/j**,
+   redéfini en **filet ANTI-EMBALLEMENT seulement** (un chat interactif est gaté par Marc via
+   l'anti-rafale → ne s'emballe pas seul ; le backstop haut ne sert qu'à couper un bug qui bouclerait
+   les appels — le principe §2.6 « ne jamais désactiver à zéro » tient). Au-delà de la cible §2.6 en
+   usage soutenu : **assumé par Marc**. Compteur app simplifié en « Coût aujourd'hui : X $ » (plus de
+   dénominateur/jauge). ⚠ Tout changement de `WebApp.gs`/`Config.gs` exige un **redéploiement Nouvelle
+   version** de la web app (DEPLOIEMENT.md §web app) — friction connue, candidate à automatisation.
+
+## Mise à jour 2026-07-24 (bis) — UX Assistant (plan architecte NotebookLM, 3 PR)
+
+Retours d'usage réel de Marc → chantier d'amélioration en 3 PR séquentielles.
+- **Arbitrage persistance (ADR-0007)** : l'historique du chat doit survivre au F5 sans violer
+  ADR-0007. Décision : **`sessionStorage` STRICT, jamais `localStorage`**. L'historique peut CITER du
+  contenu de doc lu par Claude → l'écrire en `localStorage` l'inscrirait DURABLEMENT sur le disque
+  (contre l'esprit ADR-0007). `sessionStorage` survit au refresh mais meurt à la fermeture d'onglet →
+  reste 100 % éphémère, même politique que le jeton OAuth (leçon §7 « localStorage interdit »).
+- **PR1 (faite)** : (a) `actionChatAssistant_` renvoie `actionsProposees` (vrai SEULEMENT si le chat a
+  appelé `proposer_reorg`) → l'app invalide le cache `Réorg` PUIS remonte `ReorgVue` (changement de
+  `key`) — corrige « propositions pas à jour » sans faux rafraîchissement ; (b) historique en
+  `sessionStorage` (init + persist + bouton « Effacer le chat »).
+- **PR2 (faite)** : (a) réponses de l'assistant rendues en **Markdown** via `react-markdown` ^10 (listes,
+  gras, liens, code) — PAS de `rehype-raw` → HTML brut inerte, URLs `javascript:` neutralisées par défaut
+  (XSS impossible, esprit ADR-0007) ; liens en `target=_blank rel="noopener noreferrer"` ; bulles user en
+  texte brut. (b) Fenêtre type claude.ai (`.chat-fil` plus haute + `min-height`, bulles arrondies, styles
+  Markdown resserrés). (c) Indicateur de charge TRÈS visible (`.chat-loader` : 3 points qui rebondissent +
+  « Analyse en cours… (jusqu'à 1 min) », `prefers-reduced-motion` respecté) — remplace le faible « … ».
+  Tripwire `session.test.ts` (jamais `localStorage`) toujours vert.
+- **PR3 (faite)** : troncature de l'historique envoyé à Anthropic aux `CONFIG.CHAT_HISTORIQUE_MAX` (13)
+  derniers messages (tokens + latence). Fonction PURE `tronquerHistoriqueChat_` (garde les N derniers,
+  coupe sur frontière PAIRE → toujours un `user` en tête, dernier message conservé) appelée en tête de
+  `validerHistoriqueChat_`. **Corrige aussi un bug latent** : avant, un historique de plus de 20 messages
+  était REJETÉ (`null` → « historique invalide ») → un chat long CASSAIT ; désormais il est TRONQUÉ, pas
+  rejeté. 13 = impair car un historique valide commence ET finit par `user` (6 échanges Q/R + la question
+  courante). Le prompt système (hors `messages`) est toujours conservé. Les tool_use/tool_result ajoutés
+  par la boucle Tool Use (intra-tour) ne sont pas touchés.

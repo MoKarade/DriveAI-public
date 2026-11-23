@@ -1,0 +1,326 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Un nouveau push sur la MÊME branche annule le run précédent : sans ça, un job figé continue de
+# tourner (et de tenir un runner) pendant que le suivant démarre. `main` est exclu du groupe —
+# on ne veut jamais annuler la validation d'un commit déjà mergé.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  validate:
+    name: Validation du scaffolding
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # [CI-PERSIST-CREDS] `actions/checkout` v2+ écrit le GITHUB_TOKEN dans la config git du
+          # runner POUR TOUT LE RESTE DU RUN : n'importe quelle étape suivante, y compris une
+          # action tierce, peut le lire. Vérifié un par un : aucun workflow de ce dépôt ne fait
+          # de `git push` ni d'appel `gh`, donc aucun n'a besoin du jeton persisté.
+          persist-credentials: false
+
+      # La convention de compte-rendu est une COPIE synchronisée de
+      # claude-config/conventions/COMPTE-RENDU.md — un CLAUDE.md ne charge rien hors de son
+      # arbre, donc le renvoi seul ne chargerait rien. Une copie sans contrôle redevient une
+      # variante locale en silence : c'est le mode de panne que ce pas rend bruyant.
+      # Pour la faire évoluer : modifier la SOURCE, propager, mettre à jour cette empreinte.
+      - name: La convention de compte-rendu n'a pas dérivé
+        run: echo "97e36acba8770c9614b6295773267b9690d07bc5bcd130b3bc0d03da996ab62b  docs/COMPTE-RENDU.md" | sha256sum -c -
+
+      # DOCUMENTATION LÉGÈRE (modeles/docs de l'Atelier) : CLAUDE.md <= 60 lignes / 10 Ko (le texte complet vit dans docs/claude/), docs/INDEX.md à jour, correspondances valides.
+      # Les copies des contrôles vivent sous .github/ci (chemin sensible : Mergify, .mergify.yml, ne les fusionne jamais).
+      - name: Documentation légère (CLAUDE.md court, INDEX à jour)
+        run: |
+          node .github/ci/verifier-longueur.mjs CLAUDE.md
+          node .github/ci/generer-index.mjs --verifier
+
+      - name: JSON parseable
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if python3 -m json.tool "$f" > /dev/null 2>&1; then
+              echo "ok: $f"
+            else
+              echo "❌ JSON invalide: $f"; fail=1
+            fi
+          done < <(find . -path ./.git -prune -o -name '*.json' -print)
+          exit $fail
+
+      - name: Workflows YAML valides
+        run: |
+          fail=0
+          for f in .github/workflows/*.yml; do
+            if python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" 2>/dev/null; then echo "ok: $f"; else echo "YAML invalide: $f"; fail=1; fi
+          done
+          exit $fail
+
+      - name: Syntaxe des scripts shell
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then echo "ok: $f"; else echo "❌ Syntaxe: $f"; fail=1; fi
+          done < <(find . -path ./.git -prune -o -name '*.sh' -print)
+          exit $fail
+
+      - name: Scan de secrets
+        run: bash .github/scripts/secret-scan.sh .
+
+      - name: Fichiers de référence présents
+        run: bash .github/scripts/check-structure.sh .
+
+      - name: Frontmatter des agents
+        run: bash .github/scripts/check-agents.sh .
+
+  test:
+    name: Tests unitaires (logique pure)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # [CI-PERSIST-CREDS] `actions/checkout` v2+ écrit le GITHUB_TOKEN dans la config git du
+          # runner POUR TOUT LE RESTE DU RUN : n'importe quelle étape suivante, y compris une
+          # action tierce, peut le lire. Vérifié un par un : aucun workflow de ce dépôt ne fait
+          # de `git push` ni d'appel `gh`, donc aucun n'a besoin du jeton persisté.
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+
+      - name: "Lint : syntaxe des .gs (un .gs cassé fige le déploiement clasp)"
+        # `npm run lint` = scripts/syntaxe-gs.mjs : `node --check` ignore l'extension .gs, donc chaque
+        # fichier est copié en .js. Ne vérifie QUE la syntaxe (pas les globals Google). Le dépôt n'a pas
+        # d'ESLint : ce contrôle est le seul « lint » réel, et la grille de conformité (ligne 3) le lit ici.
+        run: npm run lint
+
+      - name: Filet de tests du moteur (node --test, zéro dépendance)
+        # Charge les .gs Apps Script dans un bac à sable Node (mocks Google) et vérifie la
+        # logique de décision : routage, nommage, dates, garde zone protégée §1, prédicats
+        # de collecte, invariant vie privée (ADR-0006/0007). Aucun `npm install` (0 dépendance).
+        run: node --test test/*.test.js
+
+      - name: Couverture du moteur (cliquet, src/*.gs)
+        # Cliquet de couverture des lignes de src/*.gs (#493) : le seuil de .github/ci/couverture-moteur.json
+        # part de la mesure et ne recule pas ; une PR qui retire des tests ou ajoute du code non testé
+        # au point de passer dessous est rouge. Relance les tests (quelques secondes) avec la couverture
+        # intégrée de Node — zéro dépendance. Le chiffre mesuré s'affiche dans le journal du job.
+        run: node .github/ci/couverture-moteur.mjs
+
+  app:
+    name: App web (garde-fous miroir + build)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # [CI-PERSIST-CREDS] `actions/checkout` v2+ écrit le GITHUB_TOKEN dans la config git du
+          # runner POUR TOUT LE RESTE DU RUN : n'importe quelle étape suivante, y compris une
+          # action tierce, peut le lire. Vérifié un par un : aucun workflow de ce dépôt ne fait
+          # de `git push` ni d'appel `gh`, donc aucun n'a besoin du jeton persisté.
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Dépendances (npm ci, lockfile committé)
+        working-directory: app
+        # [CI-IGNORE-SCRIPTS] Un script d'installation de paquet s'exécute avec les droits du
+        # runner, qui porte les secrets du workflow. MESURÉ sur ce dépôt avant d'être posé :
+        # `npm ci --ignore-scripts` dans `app/`, puis tsc, vite build et 328 tests — tous verts.
+        run: npm ci --ignore-scripts
+
+      - name: Audit des dépendances de production (npm audit)
+        working-directory: app
+        # Mesuré le 28/10/2026 : 0 vulnérabilité. Une nouvelle faille connue rend ce pas rouge ; jamais
+        # `npm audit fix --force` pour le faire taire.
+        run: npm audit --omit=dev
+
+      - name: Typecheck (racine, délègue à app/)
+        run: npm run typecheck
+
+      - name: "Tests vitest — dont le miroir des garde-fous §1/§2 (ADR-0008 : l'app mute Drive)"
+        working-directory: app
+        run: npm test
+
+      - name: "Build (racine, délègue à app/ : tsc --noEmit && vite build)"
+        # Un AVERTISSEMENT CSS d'esbuild n'échoue pas le build : une accolade en trop a passé la CI
+        # au vert alors qu'elle faisait AVALER la règle suivante par le parseur (revue flotte
+        # 2026-09-10). En prod le minifieur rattrapait l'erreur, mais pas en dev ni dans les captures
+        # E2E — l'artefact que Marc regarde ne montrait donc pas ce que Vercel sert. On échoue dessus.
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee /tmp/build-app.log
+          if grep -q 'css-syntax-error' /tmp/build-app.log; then
+            echo "::error::CSS invalide (css-syntax-error) — une règle est silencieusement avalée"
+            exit 1
+          fi
+
+  screenshots:
+    name: Captures d'écran UI (E2E mode mock)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # [CI-PERSIST-CREDS] `actions/checkout` v2+ écrit le GITHUB_TOKEN dans la config git du
+          # runner POUR TOUT LE RESTE DU RUN : n'importe quelle étape suivante, y compris une
+          # action tierce, peut le lire. Vérifié un par un : aucun workflow de ce dépôt ne fait
+          # de `git push` ni d'appel `gh`, donc aucun n'a besoin du jeton persisté.
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Dépendances (npm ci, lockfile committé)
+        working-directory: app
+        # [CI-IGNORE-SCRIPTS] Un script d'installation de paquet s'exécute avec les droits du
+        # runner, qui porte les secrets du workflow. MESURÉ sur ce dépôt avant d'être posé :
+        # `npm ci --ignore-scripts` dans `app/`, puis tsc, vite build et 328 tests — tous verts.
+        run: npm ci --ignore-scripts
+
+      # Étape la plus FRAGILE de la CI : elle tire des paquets apt et le binaire Chromium. Vécu
+      # 2× le 19/08 — figée > 20 min sans rien produire, retenant le merge. Bornée pour qu'un
+      # blocage devienne un ÉCHEC VISIBLE et rejouable, au lieu d'une attente muette.
+      - name: Navigateur Playwright (Chromium seul)
+        working-directory: app
+        timeout-minutes: 6
+        # [CI-NPX-NO-INSTALL] `--no-install` : sans lui, `npx` TÉLÉCHARGE le paquet depuis le
+        # registre quand il ne le trouve pas localement, et exécute ses scripts de cycle de vie
+        # — la surface que `--ignore-scripts` vient de fermer deux étapes plus haut, rouverte
+        # ici, et sur une version NON figée en plus (le registre sert la dernière). Avec le
+        # drapeau, npx n'utilise que le binaire de `app/node_modules/.bin`, donc la version que
+        # le lockfile épingle, et échoue franchement s'il manque au lieu d'aller le chercher.
+        # Mesuré le 18/09 : `npm ci --ignore-scripts` puis `npx --no-install playwright
+        # --version` rend « Version 1.61.1 », le binaire local. `@playwright/test` est bien une
+        # devDependency de `app/` (c'est ce qui rend le drapeau applicable ici).
+        # Les bibliothèques système du navigateur sont préinstallées sur le robot du PC (pas de sudo).
+        run: npx --no-install playwright install chromium
+
+      # VITE_E2E_MOCK=true est injectée par playwright.config.ts (webServer) : auth bouchonnée,
+      # données locales (mockData.ts), AUCUN appel aux vraies API Google (api() lève en mock).
+      # La variable n'existe nulle part ailleurs (ni Vercel, ni dev normal) — zéro fuite en prod.
+      - name: Captures des 5 écrans × 2 tailles — pc et tel (Playwright, serveur de dev Vite mocké)
+        working-directory: app
+        run: npm run test:e2e
+
+      - name: Publier les captures en artifact
+        if: always() # même si le test échoue, les captures partielles aident au diagnostic
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: e2e-screenshots
+          path: app/e2e-screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
+  # Portes qualité de l'Atelier (S6, 24/09/2026) — même dispositif que les autres apps.
+  # Une PR verte se fusionne SANS relecture humaine (Mergify, .mergify.yml) et part en production
+  # (deploy.yml, clasp push) : ces deux jobs garantissent qu'elle ne fait RECULER ni la qualité
+  # ni la sécurité. .mergify.yml exige leurs deux checks verts avant toute fusion. Cliquet : app/qualite/seuils.json fige l'état du jour.
+  qualite:
+    timeout-minutes: 20
+    name: Qualité (lint · couverture · code mort · architecture)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false # [CI-PERSIST-CREDS] (voir job `app`)
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Dépendances (npm ci, lockfile committé)
+        working-directory: app
+        run: npm ci --ignore-scripts # [CI-IGNORE-SCRIPTS] (voir job `app`)
+      # Périmètre : app/ ET les fonctions Vercel de api/ (couvertes par les tests de app/test).
+      # Le moteur Apps Script (src/*.gs) garde son filet à lui : job « Tests unitaires ».
+      - name: Portes qualité (cliquet)
+        working-directory: app
+        run: node qualite/portes.mjs
+      - name: Rapport
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: rapport-qualite
+          path: app/qualite/rapport.json
+          if-no-files-found: ignore
+
+  securite:
+    # Secrets dans tout l'historique qui serait fusionné — main + la PR, via HEAD (gitleaks) — + analyse
+    # statique du code (Semgrep). Les autres branches relèvent de l'audit, pas de la porte : sans
+    # --log-opts, gitleaks lirait `--all` et une vieille branche ferait rougir une PR qui n'y touche pas.
+    # Complète « Scan de secrets » (job validate, motifs maison sur l'arbre courant) sans le remplacer.
+    # Mesuré le 24/09/2026 : gitleaks 1 résultat sur l'historique (581 commits), un FAUX positif — un nom
+    # de fichier Drive d'une fixture de test (« 2026-07-01_Exercice… »), listé dans .gitleaksignore ;
+    # Semgrep 1 résultat (api/_lib.ts, étiquette GCM sans longueur) CORRIGÉ dans la même PR, donc 0.
+    # Bloquant d'emblée (--error).
+    timeout-minutes: 10
+    name: Sécurité (secrets · analyse statique)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0 # gitleaks lit l'historique complet, pas seulement le dernier commit
+          persist-credentials: false
+      # Binaire officiel, version et empreinte figées : un outil de sécurité téléchargé sans
+      # vérification serait lui-même une surface d'attaque. 8.30.1 : corrige CVE-2026-63728 ; empreinte
+      # tirée de gitleaks_8.30.1_checksums.txt (release officielle), relue le 29/10/2026. Plancher de
+      # version verrouillé par test/ci-securite.test.js.
+      - name: Secrets (gitleaks, historique complet)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSfL -o gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+          ./gitleaks git . --no-banner --redact --log-opts="--full-history HEAD" --gitleaks-ignore-path .gitleaksignore
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.12"
+      - name: Analyse statique (Semgrep)
+        run: |
+          # --only-binary : aucune compilation ni script d'installation, seulement des roues publiées.
+          # La version est épinglée dans requirements-ci.txt : c'est ce fichier que Dependabot (pip) met à jour.
+          python -m pip install --quiet --only-binary :all: -r requirements-ci.txt
+          semgrep scan --metrics off --error --exclude .github \
+            --config p/typescript --config p/react \
+            --config p/secrets --config p/owasp-top-ten .
+
+  # Contrôles communs de MoKarade/.github (plan de standardisation du 15/10/2026, décisions 1 et 13).
+  # `securite-commune` s'ajoute au job `securite` sans le remplacer : le renommer changerait le contrôle
+  # « Sécurité (secrets · analyse statique) » que .mergify.yml exige. Elle apporte OSV-Scanner (lockfile de
+  # app/) et le contrôle des workflows (zizmor, non bloquant). Dépôt privé : le workflow commun choisit
+  # lui-même le robot du PC.
+  securite-commune:
+    name: Sécurité commune
+    uses: MoKarade/.github/.github/workflows/securite.yml@364e5175f55ba51bc1a8aaaec8fa843375b03030 # v1
+    with:
+      dossier-verrou: app
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  # Grille de conformité : le tableau s'écrit dans le résumé du job. `bloquant: false` tant qu'une ligne
+  # reste rouge ; passer à `true` quand toute la grille est verte.
+  conformite:
+    name: Conformité
+    uses: MoKarade/.github/.github/workflows/conformite.yml@364e5175f55ba51bc1a8aaaec8fa843375b03030 # v1
+    with:
+      bloquant: false

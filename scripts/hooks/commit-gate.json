@@ -1,0 +1,13 @@
+{
+  "_doc": "Configuration DriveAI du commit-gate (modèle commun de l'Atelier, kit 1.13.0 : logique dans commit-gate.mjs + lib/analyseCommande.mjs, copiés à l'identique). Avant tout git commit qui embarque autre chose que de la doc : tests du moteur (node --test), tests de l'app (vitest), build de l'app (tsc --noEmit + vite build). Configuration illisible ou invalide = commit BLOQUÉ (échec fermé).",
+  "sans_effet": ["\\.md$", "^docs/"],
+  "config_globale": [
+    "(^|/)(package(-lock)?\\.json|tsconfig[^/]*\\.json|vite[^/]*\\.[cm]?[jt]s|vitest[^/]*\\.[cm]?[jt]s|index\\.html)$",
+    "\\.css$"
+  ],
+  "etapes": [
+    { "nom": "tests moteur", "commande": ["npm", "test"] },
+    { "nom": "tests app", "commande": ["npm", "--prefix", "app", "test"] },
+    { "nom": "build app", "commande": ["npm", "--prefix", "app", "run", "build"] }
+  ]
+}

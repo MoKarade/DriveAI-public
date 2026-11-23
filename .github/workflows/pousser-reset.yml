@@ -1,0 +1,182 @@
+name: Pilote de la web app (rangement, audit du tri)
+
+# ADR-0032 — Marc ne lance PLUS RIEN à la main. Ce workflow fait, à sa place et plus souvent que
+# lui, ce qu'il faisait en cliquant `lancerResetTout()` dans l'éditeur Apps Script : il POSTe une
+# passe de rangement à la web app `/exec`, qui l'exécute SYNCHRONEMENT.
+#
+# Pourquoi c'est plus rapide sans rien casser : le travail arrive par la WEB APP, pas par un
+# déclencheur — il est donc hors du quota « Triggers total runtime » (~90 min/j) que les budgets
+# quotidiens du tick protègent (le franchir gèle TOUS les déclencheurs, chien de garde inclus —
+# C28-29). On n'augmente aucun budget : on ouvre le même robinet que les clics de Marc.
+#
+# Ne jamais raccourcir PAUSE_S en dessous de TICK_MINUTES (5) : c'est CE qui garantit une fenêtre
+# de tick complète entre deux passes, donc un flux vivant (mails, dépôts) jamais affamé.
+#
+# Le pilote s'ARRÊTE TOUT SEUL à la convergence (réponse `termine:true`) — plus aucun coût ensuite.
+# Secrets déjà configurés (ceux du miroir Drive) : DRIVEAI_WEBAPP_URL + DRIVEAI_SYNC_SECRET.
+#
+# Depuis le 06/11/2026 (ADR-0075 §3, Marc : « fais tout toi »), le MÊME workflow et les MÊMES secrets portent une
+# seconde action, `audit-tri` (entrée `action` du lancement manuel) : l'audit du tri sujet + corps, lecture pure,
+# que Marc lançait dans l'éditeur Apps Script. Aucune nouvelle référence à un secret : en ajouter une dans un
+# workflow est, par règle, un geste de Marc (Garde-fou) ; ici rien de nouveau n'est exposé. Ce workflow doit être
+# ACTIVÉ dans l'onglet Actions (il a été désactivé à la main le 24/09/2026, quand le cron du reset a cessé de servir).
+
+on:
+  # CRON DÉSACTIVÉ 2026-08-05 (ADR-0035, reset RETIRÉ) : `pousserResetPilote_` refuse quand
+  # RESET_ACTIF=false, donc ces POST /15 min ne feraient que du bruit (~190 `::warning:: transitoire`
+  # trompeurs/jour + POST à vide). Rien à piloter tant que le reset est éteint. `workflow_dispatch`
+  # reste pour un lancement manuel si le reset est un jour ré-activé (voir tripwire RESET_ACTIF).
+  #  schedule:
+  #    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action de la web app : pousser-reset (défaut) ou audit-tri (ADR-0075 §3 — compteurs seuls au journal)"
+        type: choice
+        default: pousser-reset
+        options:
+          - pousser-reset
+          - audit-tri
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pousser-reset
+  cancel-in-progress: false # deux passes ne doivent JAMAIS se chevaucher (le verrou côté moteur le refuserait de toute façon)
+
+jobs:
+  pousser:
+    name: Passes de rangement poussées
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    timeout-minutes: 20
+    steps:
+      - name: Vérifier la configuration
+        id: guard
+        env:
+          DRIVEAI_WEBAPP_URL: ${{ secrets.DRIVEAI_WEBAPP_URL }}
+          DRIVEAI_SYNC_SECRET: ${{ secrets.DRIVEAI_SYNC_SECRET }}
+        run: |
+          if [ -z "$DRIVEAI_WEBAPP_URL" ] || [ -z "$DRIVEAI_SYNC_SECRET" ]; then
+            echo "::notice::Pilote non configuré (secrets DRIVEAI_WEBAPP_URL / DRIVEAI_SYNC_SECRET absents). Voir docs/DEPLOIEMENT.md. On saute."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pousser l'action à la web app
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          URL: ${{ secrets.DRIVEAI_WEBAPP_URL }}
+          SECRET: ${{ secrets.DRIVEAI_SYNC_SECRET }}
+          ACTION: ${{ inputs.action || 'pousser-reset' }} # cron ou lancement sans entrée : le rangement, comme avant
+          PASSES: '2'   # passes par run — 2 × 3,5 min de travail par quart d'heure
+          PAUSE_S: '360' # 6 min > TICK_MINUTES (5) : garantit une fenêtre de tick entre deux passes
+        run: |
+          set -euo pipefail
+
+          # Encodage URL du secret : une valeur aléatoire peut contenir &, +, = ou un espace, qui
+          # couperaient silencieusement la query string (même précaution que sync-drive.yml).
+          SECRET_ENC="$(jq -rn --arg s "$SECRET" '$s|@uri')"
+
+          if [ "$ACTION" = "audit-tri" ]; then
+            # Audit du tri sujet + corps (ADR-0075 §3) — remplace le geste de Marc dans l'éditeur. Lecture pure
+            # côté moteur (aucune écriture Gmail ni Index). La réponse ne porte que des COMPTEURS et des
+            # métadonnées (ligne de l'onglet, catégories, verdicts, portes) : jamais un sujet, un domaine ni un
+            # corps, donc rien de personnel n'atteint ce journal. Le détail reste dans l'onglet « Audit tri ».
+            # Fenêtre : le moteur consomme l'anti-rafale (1 h) AVANT de tourner et se borne à BUDGET_MS (4,5 min)
+            # avant le dernier fil ; si l'exécution dépassait les 6 min de la web app, l'onglet et le Journal
+            # seraient quand même écrits (finally), seuls les compteurs manqueraient ici — relancer après 1 h.
+            rm -f /tmp/audit.json
+            CODE="$(curl -sS -L --max-time 360 -o /tmp/audit.json -w '%{http_code}' \
+              "${URL}?action=audit-tri&secret=${SECRET_ENC}" \
+              -H 'Content-Type: text/plain;charset=utf-8' \
+              --data-binary '{}' || echo "000")"
+            if [ "$CODE" = "200" ] && jq -e '.ok == true and .lance == true' /tmp/audit.json >/dev/null 2>&1; then
+              echo "── Audit du tri : compteurs ──"
+              jq -c '.audit | {fils, demandes, accordCat, accordImp, nouveaux, retires, interrompu, panne}' /tmp/audit.json
+              # Lignes qui divergent : ligne de l'onglet, verdicts, zone, portes. Les libellés (`catHier`/`catDemain`)
+              # sont les noms des libellés Gmail de Marc : ils restent dans la réponse, pas au journal.
+              echo "── Lignes qui divergent (ligne de l'onglet, verdicts, portes — jamais le sujet ni le libellé) ──"
+              jq -c '.audit.divergences[] | {ligne, impHier, impDemain, zone, portes}' /tmp/audit.json
+              if jq -e '.audit.panne == true or .audit.fils == 0' /tmp/audit.json >/dev/null 2>&1; then
+                echo "::error::Audit sans valeur : panne LLM posée pendant l'audit, ou aucun fil comparé ($(jq -r '.audit.interrompu' /tmp/audit.json))."
+                exit 1
+              fi
+              if jq -e '.audit.interrompu != ""' /tmp/audit.json >/dev/null 2>&1; then
+                echo "::warning::Audit interrompu : $(jq -r '.audit.interrompu' /tmp/audit.json) — les lignes produites sont écrites."
+              fi
+              echo "::notice::Audit terminé — détail (domaine, sujet tronqué) dans l'onglet « Audit tri » de la Sheet d'état, aux lignes citées."
+              exit 0
+            elif [ "$CODE" = "200" ] && jq -e '.ok == true' /tmp/audit.json >/dev/null 2>&1; then
+              # `lance:false` : panne LLM au départ, ou anti-rafale (moins d'une heure depuis le dernier audit).
+              echo "::error::Audit NON lancé : $(jq -r '.message // .audit.texte // "sans message"' /tmp/audit.json)"
+              exit 1
+            elif [ "$CODE" = "200" ] && jq -e 'has("erreur")' /tmp/audit.json >/dev/null 2>&1; then
+              # `erreur` : secret refusé, ou exception du moteur attrapée par le doPost (quota Gmail, Sheet…).
+              echo "::error::Audit refusé ou en erreur côté moteur : $(jq -r '.erreur' /tmp/audit.json)"
+              exit 1
+            else
+              echo "::error::Réponse inattendue (HTTP $CODE) — /exec sert peut-être une version sans l'action « audit-tri »."
+              exit 1
+            fi
+          fi
+
+          TERMINE=0
+          for i in $(seq 1 "$PASSES"); do
+            echo "── Passe $i/$PASSES ──"
+            # PAS de `-X POST` avec `-L` : cette option verrouille la méthode sur TOUTE la chaîne de
+            # redirection, or /exec redirige vers /macros/echo qui n'accepte que HEAD/GET → 405
+            # systématique. `--data-binary` pose POST sur la 1ʳᵉ requête seulement (leçon vécue).
+            # --max-time 300 : une passe dure jusqu'à ~3,5 min côté moteur, plus la latence.
+            # --max-time > mur moteur (3,5 min) + marge de démarrage d'un dernier document.
+            CODE="$(curl -sS -L --max-time 360 -o /tmp/pousse.json -w '%{http_code}' \
+              "${URL}?action=pousser-reset&secret=${SECRET_ENC}" \
+              -H 'Content-Type: text/plain;charset=utf-8' \
+              --data-binary '{}' || echo "000")"
+
+            # Le succès se juge au CONTENU (JSON ok:true), jamais au code HTTP : une panne
+            # transitoire d'Apps Script renvoie soit un non-200, soit un 200 avec une page HTML
+            # (« Script function not found: doGet ») — les deux vécues en prod.
+            if [ "$CODE" = "200" ] && jq -e '.ok == true' /tmp/pousse.json >/dev/null 2>&1; then
+              jq -c '{termine, rondes, progres, echecs, gel, stagnation, message}' /tmp/pousse.json
+              if jq -e '.termine == true' /tmp/pousse.json >/dev/null 2>&1; then
+                echo "::notice::Rangement TERMINÉ (I/O + reliquat drainé) — le pilote n'a plus rien à pousser."
+                TERMINE=1
+                break
+              fi
+              # Le moteur demande l'arrêt : soit les déclencheurs sont muets (le flux vivant prime et
+              # une alerte est partie), soit le rangement stagne (alerte envoyée aussi). Insister
+              # brûlerait du quota pour rien — on sort en SUCCÈS, l'alerte est le canal.
+              if jq -e '.gel == true or .stagnation == true' /tmp/pousse.json >/dev/null 2>&1; then
+                echo "::warning::Le moteur demande la mise en veille du pilote (gel des ticks ou stagnation) — voir le Journal / l'alerte mail."
+                break
+              fi
+            elif [ "$CODE" = "200" ] && jq -e 'has("erreur")' /tmp/pousse.json >/dev/null 2>&1; then
+              # `erreur` présent = cause PERMANENTE (secret refusé). Re-essayer ne changerait rien.
+              # ⚠️ Ne PAS traiter tout `ok:false` ainsi : le moteur renvoie aussi ok:false sur une
+              # exception TRANSITOIRE — on perdrait la passe suivante du run pour un simple blip.
+              echo "::warning::Passe refusée (cause permanente) : $(jq -r '.erreur' /tmp/pousse.json)"
+              break
+            elif [ "$CODE" = "200" ] && jq -e 'has("ok")' /tmp/pousse.json >/dev/null 2>&1; then
+              echo "::warning::Passe interrompue côté moteur (transitoire) — la passe suivante réessaie. Détail au Journal."
+            else
+              # Réponse sans `ok` = l'action est INCONNUE de la version servie par /exec (elle est
+              # tombée dans le `else` du doPost) → web app pas redéployée. Panne SILENCIEUSE
+              # classique : on la rend bruyante plutôt que de compter une passe fantôme.
+              echo "::warning::Réponse inattendue (HTTP $CODE) — /exec sert peut-être une version sans l'action « pousser-reset ». Extrait : $(head -c 200 /tmp/pousse.json)"
+            fi
+
+            if [ "$i" -lt "$PASSES" ]; then
+              # Jitter : sans lui, 5 min (tick) et 15 min (cron) sont commensurables et calés sur
+              # l'horloge murale — ce seraient TOUJOURS les mêmes créneaux de tick sacrifiés, et les
+              # passes perdraient toujours la même course. La borne PAUSE_S > TICK_MINUTES reste vraie.
+              ATTENTE=$((PAUSE_S + RANDOM % 90))
+              echo "Pause ${ATTENTE}s (fenêtre garantie pour le tick automatique : flux vivant jamais affamé)…"
+              sleep "$ATTENTE"
+            fi
+          done
+
+          if [ "$TERMINE" = "1" ]; then
+            echo "Convergence atteinte : les prochains runs ne feront rien (coût nul)."
+          fi

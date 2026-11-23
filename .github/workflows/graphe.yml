@@ -1,0 +1,21 @@
+name: Graphe
+
+# Publie l'artefact `graphe` (page de graphe lisible + meta.json) que Hubperso affiche, à chaque push sur la branche par
+# défaut. Le travail est dans le workflow commun de MoKarade/.github (tâche .github#430, mission #327) ; ici, seulement l'appel.
+# Épinglé par SHA (test/actions-epinglees.test.js) : à repointer quand le workflow commun change.
+# Job séparé : jamais un check requis d'une PR. Dépôt public = machines GitHub (gratuites), dépôt privé = robot du PC.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  graphe:
+    permissions:
+      contents: read
+    uses: MoKarade/.github/.github/workflows/graphe.yml@66b10c6645861a47a5d2c36716696e5c73176bbd # v1
+    with:
+      runner: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && '["self-hosted","pc-marc"]' || '"ubuntu-latest"' }}
+      depot: ${{ github.repository }}

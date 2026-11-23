@@ -1,0 +1,1467 @@
+/**
+ * Journal.gs — État dans la Google Sheet + notifications d'échec.
+ *
+ * Onglets : Entités | Corrections | Index | Journal | Échecs | Santé | Progression | Télémétrie | DryRunV2 (créés au premier run).
+ * - Index   : catalogue des fichiers traités (sert l'idempotence + la recherche Phase 4).
+ * - Journal : log d'exécution + erreurs.
+ * Une erreur déclenche TOUJOURS une notif mail immédiate + une ligne de Journal.
+ */
+
+// Expéditeurs DE CONFIANCE (clic « pas suspect » 1-clic de l'app, C28-19/ADR-0020).
+var COLONNES_CONFIANCE = ['Adresse', 'Ajouté le'];
+
+/** Crée les onglets et leurs en-têtes si absents. */
+function initialiserSheet_(ss) {
+  creerOnglet_(ss, 'Entités', COLONNES_ENTITES); // cf. COLONNES_ENTITES (9 colonnes, dont Variante possible ? et Vu N fois)
+  creerOnglet_(ss, 'Corrections', COLONNES_CORRECTIONS); // apprentissage : doc corrigé → exemples few-shot (ADR-0003)
+  // ⚠️ `FileId` (9ᵉ, C49-16) est AJOUTÉE EN QUEUE, jamais insérée : l'app se déploie séparément
+  // du moteur, et une insertion ferait lire chaque colonne suivante avec l'ancienne sémantique
+  // pendant la fenêtre entre les deux déploiements, sans la moindre erreur (leçon C28-44).
+  // ⚠️ Les plages de lecture de l'app ont été RECENSÉES le 21/09, comme la leçon l'exige et pas
+  // en le supposant : `etatGlobal.tsx` (et, jusqu'à l'ADR-0074, `AvancementLecture.tsx`) lit `A2:H`, `google.ts` lit
+  // `A1:H1` puis `A2:A`. Aucune ne dépasse la 8ᵉ colonne — elles IGNORENT donc la neuvième, ce
+  // qui est exactement l'effet voulu d'un ajout en queue. Et `ajouterLigne('Index', […8])` de
+  // l'app laisse la 9ᵉ VIDE : `fileIdDeLigneIndex_` retombe alors sur la clé, jamais sur un
+  // identifiant deviné.
+  creerOnglet_(ss, 'Index', ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId',
+    'Taille', 'Exemplaire']); // J, K : ADR-0077 (preuve écrite d'un doublon)
+  // #17 : la Sheet existante n'a pas l'en-tête H — réparé ici (initialiserSheet_ ne tourne que
+  // quand un onglet manque : coût nul en régime normal).
+  var fIndex = ss.getSheetByName('Index');
+  if (fIndex && String(fIndex.getRange('H1').getValue()) === '') fIndex.getRange('H1').setValue('Confiance');
+  creerOnglet_(ss, 'Journal', ['Horodatage', 'Niveau', 'Source', 'Message']);
+  creerOnglet_(ss, 'Échecs', ['Clé', 'Tentatives', 'Dernière tentative']); // compteur de quarantaine
+  creerOnglet_(ss, 'Relances', ['Clé', 'Demandé le']); // demandes de relance de quarantaine (app web, ADR-0011)
+  creerOnglet_(ss, 'TriAppris', ['Adresse', 'Libellé', 'Appris le']); // table adresse→libellé du tri Gmail (#16)
+  creerOnglet_(ss, 'Confiance', COLONNES_CONFIANCE); // expéditeurs « pas suspect » (C28-19, ADR-0020)
+  creerOnglet_(ss, 'Réglages', ['Clé', 'Valeur']); // réglages modifiables depuis l'app (#22)
+  // Réorg IA (#21) : demandes de l'app + actions proposées/validées/appliquées — machine à états,
+  // aucune ligne jamais supprimée (cf. Reorg.gs).
+  creerOnglet_(ss, 'Réorg', ['Clé', 'Type', 'ID', 'Chemin actuel', 'Chemin proposé', 'Statut', 'Détail', 'Horodaté']);
+  // Seed du réglage #22 (position FIXE : A2/B2 — contrat avec l'app) — seulement si absent.
+  var fReg = ss.getSheetByName('Réglages');
+  if (fReg && String(fReg.getRange('A2').getValue()) === '') {
+    fReg.getRange('A2:B2').setValues([['TICK_MINUTES', CONFIG.TICK_MINUTES]]);
+  }
+  // C26-07 (ADR-0015) : avant/après du dry-run v2 sur échantillon réel — RAPPORT seul (jamais lu
+  // pour l'idempotence, qui vit dans Index via la clé `dryrunv2|<tag>|fileId` comme Migration.gs).
+  creerOnglet_(ss, 'DryRunV2', ['Horodaté', 'ID fichier', 'Nom actuel', 'Domaine actuel', 'Chemin actuel',
+    'Type v2', 'Domaine proposé', 'Sous-dossier proposé', 'Nom proposé', 'Fail-safe déclenché',
+    'Confiance', 'Coût $ mesuré']);
+  // ADR-0034 §5 : comparaison 1↔2 passes — PREUVE avant d'allumer la 2ᵉ passe conditionnelle.
+  // RAPPORT seul (idempotence dans Index via `dryruncmp|<tag>|fileId`). Pour chaque doc : le gate
+  // (sauterait la passe 2 ?), le placement 1 passe vs 2 passes, et les FAUX NÉGATIFS `sensible`.
+  creerOnglet_(ss, 'DryRunV2Compare', ['Horodaté', 'ID fichier', 'Nom actuel', 'Domaine actuel',
+    'Chemin actuel', 'Gate : sauterait passe 2', 'Placement 1 passe', 'Placement 2 passes',
+    'Placement identique', 'Champs corrigés par passe 2', 'Sensible 1p', 'Sensible 2p',
+    'Faux négatif sensible', 'Verdict du saut', 'Confiance 1p', 'Coût passe 1 $', 'Coût passe 2 $']);
+  // Chantier #47 (ADR-0036) : plan de FUSION des dossiers d'entité en double — dry-run pur, curé par
+  // Marc (colonne Action : Fusionner/Ignorer) avant toute exécution (PR2). Aucune mutation ici.
+  creerOnglet_(ss, 'PlanFusion', COLONNES_PLAN_FUSION);
+  creerOnglet_(ss, 'Progression', COLONNES_PROGRESSION); // suivi LIVE des opérations (C28-18, cf. majProgressions_)
+  creerOnglet_(ss, 'Télémétrie', COLONNES_TELEMETRIE); // coûts & quotas pour l'app (C28-24, cf. majTelemetrie_)
+  creerOnglet_(ss, 'Coûts', COLONNES_COUTS);          // ventilation du coût LLM par usage (C28-58)
+  // C28-49 PR2 : rapport des mois de PAIE manquants par employeur (mission `paies`, self-serve,
+  // cf. ecrireRapportPaies_). Onglet OUBLIÉ ici à la livraison → `feuille_('RapportPaies')` rendait
+  // null et la mission plantait à CHAQUE tick (`getRange of null`, révélé par le MCP le 19/08).
+  creerOnglet_(ss, 'RapportPaies', COLONNES_RAPPORT_PAIES); // constante partagée (Missions.gs)
+  creerOnglet_(ss, 'RapportDoublons', COLONNES_RAPPORT_DOUBLONS); // constante partagée (Doublons.gs)
+  // C28-26 (ADR-0023) : plan de CONSOLIDATION de l'arborescence — dry-run pur, validé par Marc
+  // avant toute exécution. La colonne Empreinte est la mémoire de dédup de la campagne
+  // (jamais en Script Properties : ~2 900 empreintes dépasseraient la limite ~9 Ko).
+  creerOnglet_(ss, 'PlanConsolidation', COLONNES_PLAN_CONSOLIDATION);
+  // C28-33 (ADR-0030) : rapport du RESET — quasi-doublons probables (même nom, taille différente,
+  // hors de portée du hash exact) et fichiers NON ROUTÉS restés dans `_TRI 2026` — jamais une
+  // mutation, uniquement pour affiner STRUCTURE_CIBLE_RESET ou trancher au cas par cas (Marc).
+  creerOnglet_(ss, 'Reset', ['Clé', 'Type', 'Nom', 'Domaine', 'Cible', 'Statut', 'Détail', 'Horodaté']);
+  creerOnglet_(ss, 'Santé', ['Santé DriveAI']);                             // vue lisible (heartbeat + métriques, ADR-0006)
+  // Journal QUOTIDIEN du vrac par domaine (HistoriqueVrac.gs, demande Marc 2026-08-12) : APPEND-ONLY
+  // (jamais réécrit, contrairement à Progression/Santé) — construit une série temporelle jour après
+  // jour, jusqu'à la fin du drainage.
+  creerOnglet_(ss, 'HistoriqueVrac', COLONNES_HISTORIQUE_VRAC);
+  var defaut = ss.getSheetByName('Feuille 1') || ss.getSheetByName('Sheet1');
+  if (defaut && ss.getSheets().length > 1) ss.deleteSheet(defaut);
+}
+
+function creerOnglet_(ss, nom, entetes) {
+  var f = ss.getSheetByName(nom);
+  if (!f) {
+    f = ss.insertSheet(nom);
+    f.appendRow(entetes);
+    f.setFrozenRows(1);
+  }
+}
+
+function feuille_(nom) {
+  var ss = getSheetEtat_();
+  return ss.getSheetByName(nom) || (initialiserSheet_(ss), ss.getSheetByName(nom));
+}
+
+/* ---------- Journal ---------- */
+
+function journalInfo_(source, message) {
+  feuille_('Journal').appendRow([new Date(), 'INFO', source, message]);
+}
+
+function journalErreur_(source, message) {
+  feuille_('Journal').appendRow([new Date(), 'ERREUR', source, message]);
+}
+
+/* ---------- Journal borné + onglet Santé (ADR-0006) ---------- */
+
+/**
+ * Nombre de lignes de données les plus VIEILLES à supprimer du Journal pour le borner.
+ * Logique PURE (testée) : ne déclenche la rotation qu'au-delà de `max + marge` (purge en lot,
+ * pas ligne-à-ligne à chaque tick), puis ramène à exactement `max`. En-tête (ligne 1) hors compte.
+ * @param {number} dernLigne  résultat de getLastRow() (en-tête inclus)
+ * @param {number} max        nb de lignes de données à conserver
+ * @param {number} marge      hystérésis : on ne purge que si données > max + marge
+ * @return {number} nb de lignes à supprimer à partir de la ligne 2 (0 = rien à faire)
+ */
+function lignesJournalASupprimer_(dernLigne, max, marge) {
+  var donnees = Math.max(0, (dernLigne || 0) - 1); // hors en-tête
+  if (donnees <= max + marge) return 0;            // sous le seuil de déclenchement
+  return donnees - max;                            // ramène à `max`
+}
+
+/**
+ * Borne le Journal : supprime en LOT les lignes de log les plus anciennes au-delà du plafond
+ * (rotation d'historique — jamais de documents, §2 intact). Enveloppé par l'appelant (secondaire :
+ * ne doit jamais bloquer l'intake). Cheap : la plupart des ticks ne font qu'un getLastRow().
+ *
+ * `reporterSiCharge` (revue #229) : le `deleteRows` de rotation coûte 10-30 s et tombe TOUT À LA FIN
+ * du tick — exactement là où il peut franchir le mur des 6 min (le kill perdrait le `finally`, donc
+ * `DriveAI_LAST_TICK`, et pourrait laisser un fichier à deux parents entre `addFile` et `removeFile`).
+ * La rotation n'a AUCUNE urgence : la reporter d'un tick est sans conséquence.
+ * @param {function():boolean} [reporterSiCharge]  vrai ⇒ on ne rotationne pas ce tick-ci
+ */
+function bornerJournal_(reporterSiCharge) {
+  var f = feuille_('Journal');
+  var aSupprimer = lignesJournalASupprimer_(f.getLastRow(), CONFIG.JOURNAL_MAX_LIGNES, CONFIG.JOURNAL_MARGE);
+  if (aSupprimer <= 0) return; // cas dominant : rien à faire, le garde n'est même pas consulté
+  var props = null;
+  try { props = PropertiesService.getScriptProperties(); } catch (e) { props = null; }
+  if (reporterSiCharge && reporterSiCharge()) {
+    // FILET anti-report indéfini (revue sécurité #229) : si une étape prenait l'habitude de courir
+    // jusqu'au mur à chaque tick, le report ne journalise rien et le Journal cesserait de tourner EN
+    // SILENCE (« un garde-fou qui met des items hors circuit exige un chemin de RETOUR », §7).
+    var reports = props ? (Number(props.getProperty('DriveAI_JOURNAL_REPORTS')) || 0) + 1 : 0;
+    if (props && reports < CONFIG.JOURNAL_REPORTS_MAX) {
+      props.setProperty('DriveAI_JOURNAL_REPORTS', String(reports));
+      return; // repris au tick suivant
+    }
+    journalInfo_('Santé', 'Rotation du Journal FORCÉE après ' + reports + ' report(s) — le tick court au mur à chaque passage.');
+  }
+  f.deleteRows(2, aSupprimer); // supprime les plus vieilles, juste après l'en-tête
+  if (props) { try { props.deleteProperty('DriveAI_JOURNAL_REPORTS'); } catch (e) { /* best-effort */ } }
+  journalInfo_('Santé', 'Journal borné : ' + aSupprimer + ' vieille(s) ligne(s) purgée(s) (max ' + CONFIG.JOURNAL_MAX_LIGNES + ').');
+}
+
+/**
+ * Statut de la campagne historique Gmail — UNE règle, DEUX consommateurs : la ligne de Progression
+ * et la ligne de Santé. PURE (testée).
+ *
+ * Pourquoi elle est extraite (revue C28-99) : la ligne de Santé ne savait dire que « terminé » ou
+ * « en cours », donc elle affichait « en cours · 0 des 20 min/j » AUSSI quand la campagne était
+ * SUSPENDUE (quota Gmail) ou EN PAUSE (frein budget). Or c'est sur ce « 0 min » qu'on décidera de
+ * lui reprendre ses 20 minutes : confondre « elle ne s'en sert pas » avec « on l'empêche de s'en
+ * servir », c'est exactement l'erreur que §1.6 interdit — et elle deviendrait certaine le jour où
+ * Marc redescend `LLM_BUDGET_CAMPAGNES` à 10, ce que §1.6 lui demande justement de faire.
+ * @param {boolean} arretee  campagne ARRETEE par CONFIG (`GMAIL_HISTO_ACTIF: false`, C49-20) —
+ *   passee EN PREMIER pour que tout appelant doive trancher : ajoutee en dernier, un oubli
+ *   vaudrait `undefined`, donc « pas arretee », c'est-a-dire le cote dangereux par defaut.
+ * @param {boolean} termine
+ * @param {boolean} quotaGmail  quota Gmail épuisé (la campagne sort avant de consommer sa première ms)
+ * @param {boolean} freinBudget frein des campagnes atteint (idem)
+ * @param {boolean} resetEnCours le reset suspend la campagne (gate `gResetEnCours`) — TROISIÈME
+ *   cause, oubliée de la première écriture : latente seulement parce que `RESET_ACTIF` est false,
+ *   et elle produirait exactement le faux « en cours · 0 min » que cette fonction existe pour
+ *   fermer (relevé en revue C28-99).
+ * @return {string}
+ */
+function statutHistoGmail_(arretee, termine, quotaGmail, freinBudget, resetEnCours) {
+  if (termine) return 'terminé';
+  // C49-20 — ARRÊTÉE par CONFIG. La chaîne EXACTE `désactivée` est la seule que `familleStatut`
+  // (app/src/etat.ts) reconnaisse : tout autre mot retombe dans « en cours », soit exactement le
+  // mensonge que ce garde existe pour fermer. APRÈS `termine` : une campagne qui a FINI puis
+  // qu'on éteint est terminée, pas désactivée — et c'est le cas de la production aujourd'hui.
+  if (arretee) return 'désactivée';
+  if (quotaGmail) return 'suspendu (quota Gmail)';
+  if (freinBudget) return 'en pause (frein budget)';
+  if (resetEnCours) return 'suspendu (reset en cours)';
+  return 'en cours';
+}
+
+/**
+ * Ligne « Rangement ancien Drive » de l'onglet Santé. PURE dans son résultat, mais protégée : un
+ * blip de lecture de Properties dans `rangementTermine_` ne doit pas geler `majSante_` EN ENTIER
+ * (C28-104, pré-existant) — même précaution que les autres lignes de l'onglet, qui portent chacune
+ * son propre try/catch. Sans elle, tout l'onglet Santé se figeait, ligne de battement de cœur
+ * comprise, sur un incident qui ne concernait que ce seul indicateur.
+ * @return {string}
+ */
+function texteSanteRangement_() {
+  try {
+    return (typeof rangementTermine_ === 'function' && rangementTermine_()) ? 'terminé ✅' : 'en cours';
+  } catch (e) {
+    return '⚠️ illisible (' + e.message + ')';
+  }
+}
+
+/**
+ * Met à jour l'onglet `Santé` — vue lisible de référence (heartbeat + métriques). Métadonnées
+ * seulement (ADR-0007) : horodatage, compteurs, coût, statut — jamais de contenu de document.
+ * Écrit après `flushUsage_` (le coût du mois inclut alors le run courant). Enveloppé par l'appelant.
+ */
+function majSante_() {
+  var f = feuille_('Santé');
+  var tz = Session.getScriptTimeZone();
+  var cout = syntheseCoutMois_();
+  var mois = Utilities.formatDate(new Date(), tz, 'yyyy-MM');
+  var nbCatalogue = _indexCache ? Object.keys(_indexCache).length : '—';
+  var rangement = texteSanteRangement_();
+  var lignes = [
+    ['Dernier passage OK : ' + Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm')],
+    ['Documents au catalogue (Index) : ' + nbCatalogue],
+    ['Coût LLM ' + mois + ' : ' + cout.dollars.toFixed(2) + ' $  (' + cout.appels + ' appels)  ·  cible < 10 $/mois' + (cout.dollars >= 10 ? '  ⚠️ DÉPASSÉE' : '  ✅')],
+    ['Rangement ancien Drive : ' + rangement],
+    // Le tri doit DIRE s'il est à l'arrêt (panne de compte LLM) : sans cette ligne, « le tri marche »
+    // masquerait une boîte non triée. (Le mode dégradé de l'ADR-0043 est parti avec `Intentions.gs`, ADR-0075 6b.)
+    ['Tri Gmail : ' + texteSanteTriDegrade_()],
+    // DriveAI#805 — la panne de COMPTE LLM avait sa phrase DANS la ligne ci-dessus et son statut « suspendu »
+    // ailleurs, jamais une ligne à elle. Zéro octet de Property en plus : on relit `DriveAI_LLM_PANNE`.
+    ['Compte LLM : ' + texteSanteCompteLlm_(lirePanneCompteLlm_(), Date.now(), tz)],
+    // Validation de `_Doublons` (ADR-0047) : le registre de suivi C28-44 est SATURÉ (8 377 des
+    // 8 500 octets du plafond dérivé, ~199 par entrée) — une 43ᵉ clé le ferait déborder. La
+    // campagne se rend donc visible ICI, comme « Rangement ancien Drive », sans coûter un octet
+    // de Property (ADR-0047 §6, backlog C28-71).
+    ['Doublons (validation par empreinte) : ' + texteSanteDoublons_()],
+    // Même raison que la ligne ci-dessus (registre de suivi C28-44 saturé) : la campagne historique
+    // Gmail réserve le plus gros budget quotidien de toutes les campagnes (20 min/j), et le chiffre
+    // qui dit si elles servent — les MINUTES consommées — n'existait nulle part. Son avancement,
+    // lui, est déjà dans l'onglet Progression. Sans ce chiffre, réallouer serait une supposition.
+    ['Historique Gmail : ' + texteSanteHistoGmail_()],
+    // Re-datation de `06` (C28-92, ADR-0056). Même raison que les deux lignes ci-dessus — le
+    // registre de suivi C28-44 est SATURÉ, on ne peut pas lui ajouter une clé — et une raison
+    // propre à cette campagne : elle rallume de la dépense LLM et `DriveAI_REANALYSE_JOUR`
+    // n'était exposé NULLE PART (ni Santé, ni Télémétrie, ni Diagnostic). Rallumer ~8,6 $ sans
+    // aucun point d'observation, c'est le mode de panne du §1.6 mot pour mot (deux revues l'ont
+    // relevé indépendamment). Une ligne, une écriture par tick, zéro octet de Property.
+    ['Re-datation de 06 : ' + texteSanteReanalyse_()],
+    // La RÉSOLUTION des identifiants (C49-16) : « combien de papiers classés sont-ils seulement
+    // DÉSIGNABLES ? ». Tant qu'une ligne d'Index ne porte pas de fileId, rien de ce qui désigne un
+    // papier par son identifiant (réconciliation, doublons, fusions) ne le voit — un écart que le
+    // silence rend invisible.
+    ['Résolution des identifiants (C49-16) : ' + texteSanteResolutionFileId_()],
+    ['Mis à jour : ' + new Date()]
+  ];
+  f.getRange(2, 1, lignes.length, 1).setValues(lignes); // une seule écriture Sheet (I/O borné/tick)
+}
+
+/**
+ * La ligne « Compte LLM » de l'onglet Santé (DriveAI#805). PURE : `t` = horodatage de la panne posée
+ * (0 = aucune, `null` = lecture impossible), `maintenant` en ms, `tz` le fuseau d'affichage.
+ * Trois états, jamais confondus : « illisible » n'est pas « actif ».
+ */
+function texteSanteCompteLlm_(t, maintenant, tz) {
+  if (t === null || t === undefined) return 'indéterminé (lecture impossible)';
+  if (!t) return 'actif';
+  var depuis = Utilities.formatDate(new Date(t), tz, 'HH:mm');
+  var resonde = t + CONFIG.LLM_PANNE_RESONDE_MS;
+  return '⛔ panne depuis ' + depuis + (maintenant >= resonde
+    ? ' (re-sonde due : le prochain appel tranche)'
+    : ' (re-sonde ≤ ' + Utilities.formatDate(new Date(resonde), tz, 'HH:mm') + ')');
+}
+
+/**
+ * Ligne Santé du tri Gmail. Lecture seule, aucune décision.
+ *
+ * TROIS états (revue flotte C28-54, les DEUX agents) : une panne de compte LLM ARRÊTE le tri —
+ * `Main.gs` saute l'étape `tri-gmail` entière sous `estPannePlateforme_()`. Annoncer « libellés
+ * posés » dans ce cas serait un mensonge sur le seul canal que Marc lit (no-fake-data, §7).
+ * Un état ILLISIBLE (Properties en panne) n'affiche jamais « ✅ normal » : le try/catch est là
+ * pour ça (revue code C28-54). (Le mode DÉGRADÉ de l'ADR-0043 — libellés sans archivage en
+ * attendant l'analyse d'importance — est parti avec `Intentions.gs` le 2026-11-06, ADR-0075 6b.)
+ * @return {string}
+ */
+function texteSanteTriDegrade_() {
+  var arret;
+  try {
+    arret = !!estPannePlateforme_();
+  } catch (e) {
+    return 'état indéterminé (lecture de l\'état impossible)';
+  }
+  if (arret) {
+    return '⛔ À L\'ARRÊT (panne de compte LLM) — aucun tri ce tick ; reprise automatique ' +
+      'dès que la re-sonde voit le compte rétabli';
+  }
+  return '✅ normal (libellés + archivage)';
+}
+
+/* ---------- Progression LIVE des opérations (C28-18) ---------- */
+
+// Contrat avec l'app (interpreterProgression côté React) : 7 colonnes, une ligne par opération.
+// C28-44 (ADR-0038) : 7 → 10 colonnes. `Horodaté` RESTE en G (position historique) et les
+// nouvelles colonnes s'AJOUTENT après — l'app v6 (qui lit `A2:G30` jusqu'à la PR4) continue ainsi
+// de lire EXACTEMENT les 7 mêmes colonnes pendant la transition, et tous les consommateurs
+// indexés 0-6 restent valides (déviation assumée de l'ordre esquissé dans l'ADR §2d, pour ça).
+// PR6 (retour Marc) : + `Type` (K, APPEND en queue — leçon §7) : le type du registre (flux/
+// campagne/maintenance/demande/observabilite) permet à l'app de COMPACTER les routines et de ne
+// mettre en avant que les vraies campagnes.
+// C28-47 (demande Marc) : + `Dernière passe` (L) et `Fin estimée` (M) — toujours en APPEND.
+var COLONNES_PROGRESSION = ['Clé', 'Opération', 'Traités', 'Base', 'Unité', 'Statut', 'Horodaté',
+  'Détail', 'Dernière activité', 'Dernière erreur', 'Type', 'Dernière passe', 'Fin estimée'];
+
+/**
+ * L'onglet Progression v1 était une barre TEXTE mono-opération (rangement, cellules A2:A4).
+ * Migration d'en-tête (une fois) : c'était un AFFICHAGE, pas un état — l'état (Properties,
+ * Index) est intact ; on repart d'un tableau vierge que `majProgressions_` re-remplit ce tick.
+ * @param {Sheet} f
+ */
+function assurerEnteteProgression_(f) {
+  // Migration v2 (7 col) → v3 (10) → v4 (11, + Type — PR6) : le test porte sur la DERNIÈRE
+  // colonne attendue — jamais `A1 === 'Clé'`, VRAI avant ET après l'extension (la réparation
+  // serait du code mort, leçon 2026-08-13 « point d'attache »). Chemin ATTEIGNABLE garanti :
+  // appelée par `majProgressions_` à CHAQUE tick, pas par `initialiserSheet_` (qui ne retouche
+  // jamais un onglet existant).
+  if (String(f.getRange('M1').getValue()) === COLONNES_PROGRESSION[12]) return;
+  // v1 (barre TEXTE mono-opération, A1 ≠ 'Clé') : table incompatible → on repart de zéro (c'était
+  // un AFFICHAGE, pas un état). v2/v3 → v4 : préfixe de colonnes IDENTIQUE — les lignes
+  // existantes restent lisibles telles quelles (`lireLignesProgression_` lit les indices 0-6,
+  // inchangés) et sont réécrites au format courant par ce même tick ; seul l'en-tête est réécrit.
+  if (String(f.getRange('A1').getValue()) !== 'Clé') f.clearContents();
+  f.getRange(1, 1, 1, COLONNES_PROGRESSION.length).setValues([COLONNES_PROGRESSION]);
+  f.setFrozenRows(1);
+}
+
+/**
+ * Construit les lignes de l'onglet Progression. PURE (testée) : tout l'état arrive en paramètres.
+ *
+ * C28-44 (ADR-0038) : la fonction ITÈRE LE REGISTRE (Suivi.gs) — une ligne PAR opération du tick,
+ * dans l'ordre d'exécution, plus jamais une liste codée en dur. Les campagnes à lecteurs dédiés
+ * (migration, réanalyse, histo, rangement, conso gen/exec) gardent leurs Traités/Base/statuts
+ * RICHES (recensement, en attente, terminé + purge) ; toutes les autres opérations dérivent leur
+ * statut du SUIVI réel (`statutDepuisSuivi_` : erreur / suspendu+raison / en pause / en cours).
+ * Les 3 colonnes nouvelles (Détail, Dernière activité, Dernière erreur) viennent du suivi pour
+ * TOUTES les lignes, campagnes comprises.
+ *
+ * Règles conservées (leçons « barre de masse ») : le statut d'une campagne dérive des pannes/frein
+ * AVANT « en cours » ; une opération « terminé » garde l'horodatage de sa FIN (sinon jamais
+ * purgée) et disparaît après `purgeMs` ; une campagne finie AVANT d'avoir eu une ligne n'apparaît
+ * jamais. (Les « demandes de Marc » tri/intentions ont disparu — ADR-0031.)
+ *
+ * @param {Object} etat  instantané des opérations (cf. majProgressions_)
+ * @param {Object} existantes  clé → {traites:number, statut:string, horodateMs:number}
+ * @param {number} maintenantMs
+ * @param {number} purgeMs  CONFIG.PROGRESSION_PURGE_MS
+ * @param {Object} suivi  vue fusionnée `suiviOpsFusionne_` — clé → {t, ok, d, et, e, st, s}
+ * @param {Array<Object>} registre  REGISTRE_OPERATIONS (Suivi.gs)
+ * @return {Array[]} lignes [Clé, Opération, Traités, Base, Unité, Statut, Horodaté, Détail, Dernière activité, Dernière erreur]
+ */
+function lignesProgression_(etat, existantes, maintenantMs, purgeMs, suivi, registre, debits) {
+  var lignes = [];
+  var tz = Session.getScriptTimeZone();
+  var typePar = {}, libellePar = {};
+  (registre || []).forEach(function (op) { typePar[op.cle] = op.type; libellePar[op.cle] = op.libelle; });
+
+  /** « il y a X » (min/h/j) — même vocabulaire que l'app, calculé UNE fois ici. */
+  function depuis(ms) {
+    var min = Math.max(0, Math.round(ms / 60000));
+    if (min < 60) return 'il y a ' + min + ' min';
+    var h = Math.round(min / 60);
+    return h < 48 ? 'il y a ' + h + ' h' : 'il y a ' + Math.round(h / 24) + ' j';
+  }
+
+  /** Durée lisible d'un horizon (« ~3 h », « ~2 j ») — au plus 2 chiffres significatifs. */
+  function horizon(ms) {
+    var h = ms / 3600000;
+    if (h < 1) return '~' + Math.max(1, Math.round(ms / 60000)) + ' min';
+    if (h < 48) return '~' + Math.round(h) + ' h';
+    return '~' + Math.round(h / 24) + ' j';
+  }
+
+  /**
+   * Les 2 colonnes d'AVANCEMENT (C28-47) : volume de la dernière passe productive, et estimation
+   * de fin DÉTAILLÉE. L'estimation dit la vérité sur les PAUSES : une campagne bloquée par le
+   * frein mensuel annonce sa reprise au 1er du mois prochain (jamais une date « dans 3 h » qui
+   * ignorerait le blocage), une pause quotidienne annonce « reprise demain ».
+   */
+  function colonnesAvancement(cle, unite, traites, base, statut) {
+    var d = (debits || {})[cle];
+    var passe = d && d.dn > 0 && d.dts
+      ? '+' + d.dn + (unite ? ' ' + unite : '') + ' · ' + depuis(maintenantMs - d.dts) : '';
+    var est = estimationFin_(d, traites, base, maintenantMs);
+    // EN PAUSE (« suspendu … » OU « en pause … ») : on annonce le RESTE mais JAMAIS un horizon ni
+    // une date de fin — le débit amortit les pauses PASSÉES, il ne peut pas connaître un gel FUTUR
+    // (revue C28-47 : sans ce garde, la ré-analyse bloquée par le frein MENSUEL affichait « vers le
+    // 18/08 » à côté de « reprise le 01/09 » — une fin AVANT la reprise, exactement le mensonge que
+    // cette colonne doit empêcher).
+    // ⚠️ « À JOUR » compte AUSSI (retour Marc du 2026-08-20 : « bizarre je vois encore des
+    // missions … Fin estimée : ~92 j · vers le 20/11 »). Une mission CONVERGÉE à reliquat a fini
+    // son passage : ses non-appariés sont des REFUS versionnés qui attendent un affinage de
+    // RÈGLES, pas du débit (c'est déjà ce que dit la doc de `pousserMission`). Extrapoler un débit
+    // MORT annonçait une date que rien ne produira — même famille de mensonge que la pause, qui
+    // avait motivé ce garde. Les 3 familles de statut sans débit attendu sont donc traitées
+    // ensemble, et testées une par une.
+    // ⚠️ « DÉSACTIVÉE » compte AUSSI (C49-20) : une campagne arrêtée n'a aucun débit futur, et
+    // extrapoler son dernier lui ferait annoncer une date de fin que plus rien ne produira —
+    // même famille de mensonge que la pause, qui a motivé ce garde.
+    var sansDebit = !!statut && /^(suspendu|en pause|à jour|désactivée)/.test(statut);
+    var bouts = [];
+    if (est) {
+      bouts.push('reste ' + est.restant + (unite ? ' ' + unite : ''));
+      if (!sansDebit) {
+        bouts.push(horizon(est.msRestants));
+        bouts.push('vers le ' + Utilities.formatDate(new Date(maintenantMs + est.msRestants), tz, 'dd/MM'));
+      }
+    }
+    // Reprise : ce que la PAUSE implique réellement, en clair.
+    if (statut && statut.indexOf('frein budget') !== -1) {
+      var moisProchain = new Date(maintenantMs);
+      moisProchain.setMonth(moisProchain.getMonth() + 1, 1);
+      bouts.push('reprise le ' + Utilities.formatDate(moisProchain, tz, 'dd/MM') + ' (frein mensuel)');
+    } else if (statut && statut.indexOf('budget du jour') !== -1) {
+      bouts.push('reprise demain');
+    } else if (statut && statut.indexOf('non apparié') !== -1) {
+      // Dire ce qui débloque RÉELLEMENT, au lieu d'une date : ces fichiers attendent une décision
+      // de Marc, pas du temps machine.
+      bouts.push('attend un affinage des règles');
+    }
+    return [passe, bouts.join(' · ')];
+  }
+
+  /** Les 3 colonnes de SUIVI d'une opération (communes à toutes les lignes). */
+  function colonnesSuivi(cle) {
+    var rec = (suivi || {})[cle];
+    if (!rec) return ['', '', ''];
+    var dernierEvt = Math.max(rec.ok || 0, rec.et || 0, rec.st || 0);
+    var detail = rec.st && rec.st >= dernierEvt ? (rec.s || '') : '';
+    var activite = Math.max(rec.t || 0, rec.ok || 0);
+    var erreur = rec.et
+      ? Utilities.formatDate(new Date(rec.et), tz, 'dd/MM HH:mm') + (rec.e ? ' — ' + rec.e : '')
+      : '';
+    // Activité en TEXTE au format CONTRÔLÉ `dd/MM HH:mm` (retour Marc PR6 : une cellule Date
+    // ressortait « 8/13/2026 » sans l'heure via l'API en FORMATTED_VALUE — inutilisable ; le
+    // format contrôlé rend aussi le « il y a X min » de l'app fiable, jamais un parsing de locale).
+    return [detail, activite ? Utilities.formatDate(new Date(activite), tz, 'dd/MM HH:mm') : '', erreur];
+  }
+
+  /** Statut d'une CAMPAGNE Drive+LLM (migration, re-analyse, rangement). */
+  function statutCampagne(op) {
+    if (op.termine) return 'terminé';
+    // C49-20 — campagne ARRÊTÉE par CONFIG. Le drapeau est porté par l'OP et jamais lu de CONFIG
+    // ici : cette fonction sert AUSSI la migration et le rangement, que rien n'arrête.
+    if (op.arretee) return 'désactivée';
+    if (op.enAttente) return 'en attente (après m1)';
+    if (op.base === null) return 'recensement';
+    if (etat.panneApi) return 'suspendu (panne API)';
+    if (etat.freinBudget) return 'en pause (frein budget)';
+    return 'en cours';
+  }
+
+  /**
+   * Statut de la consolidation (génération/exécution, C28-26/0024) : gardes DÉDIÉES, distinctes de
+   * `statutCampagne` — suspendue par `resetEnCours_()` (ADR-0030, une seule main déplace à la fois),
+   * jamais par le frein LLM `$` (elle ne coûte rien, pure I/O `moveTo`/hash) ; son propre budget
+   * QUOTIDIEN en ms (pas le frein `budgetCampagnesAtteint_`) la met « en pause » jusqu'à demain.
+   */
+  function statutConsolidation_(op) {
+    if (op.termine) return 'terminé';
+    // C49-20 — AVANT le budget, et c'est tout l'intérêt : à budget 0, `op.budgetEpuise` est vrai
+    // (`0 >= 0`) et la ligne annonçait « en pause (budget du jour épuisé) » PUIS « reprise
+    // demain » — une reprise que plus rien ne produira. Un arrêt n'est pas une pause.
+    if (op.arretee) return 'désactivée';
+    if (etat.resetEnCours) return 'suspendu (reset en cours)';
+    if (op.budgetEpuise) return 'en pause (budget du jour épuisé)';
+    return 'en cours';
+  }
+
+  /** Pousse une ligne en appliquant les règles « terminé » (horodatage figé, purge, jamais-né). */
+  function pousser(cle, operation, traites, base, unite, statut) {
+    var ex = existantes[cle];
+    var horodateMs = maintenantMs;
+    if (statut === 'terminé') {
+      if (!ex) return; // finie avant d'avoir eu une ligne → rien à montrer
+      if (ex.statut === 'terminé') {
+        if (maintenantMs - ex.horodateMs > purgeMs) return; // purge des vieux « terminé »
+        horodateMs = ex.horodateMs; // l'horodatage de FIN ne bouge plus
+      }
+      if (traites === null || traites < ex.traites) traites = ex.traites; // numérateur figé à la fin
+    }
+    var cs = colonnesSuivi(cle);
+    var av = colonnesAvancement(cle, unite, traites, base, statut);
+    lignes.push([cle, operation, traites === null ? '' : traites, base === null ? '' : base,
+      unite, statut, new Date(horodateMs), cs[0], cs[1], cs[2], typePar[cle] || '', av[0], av[1]]);
+  }
+
+  /**
+   * Ligne d'une MISSION de curation (C28-49). Statut : terminé (passe vide) / à jour (N non
+   * appariés) — les refus versionnés attendent un affinage de règles, pas du débit — / sinon le
+   * SUIVI réel (en cours, en pause budget du jour + « reprise demain », skip reset…).
+   */
+  function pousserMission(cle, tag) {
+    var m = (etat.missions || {})[tag] || { traites: 0, base: 0, nonApparies: 0, termine: false };
+    var statut;
+    if (m.termine) {
+      statut = m.nonApparies > 0 ? 'à jour (' + m.nonApparies + ' non apparié(s))' : 'terminé';
+    } else {
+      statut = statutDepuisSuivi_((suivi || {})[cle]);
+    }
+    pousser(cle, libellePar[cle] || cle, m.traites, m.base > 0 ? m.base : null, 'fichiers', statut);
+  }
+
+  // Constructeurs DÉDIÉS des campagnes à lecteurs riches — clés du registre, libellés dynamiques
+  // (tags de campagne) et statuts historiques conservés à l'identique.
+  var campagnes = {
+    'migration': function () {
+      pousser('migration', 'Migration taxonomie (' + etat.migration.tag + ')',
+        etat.migration.traites, etat.migration.base, 'documents', statutCampagne(etat.migration));
+    },
+    'reanalyse': function () {
+      pousser('reanalyse', 'Re-analyse v2 (' + etat.reanalyse.tag + ')',
+        etat.reanalyse.traites, etat.reanalyse.base, 'documents', statutCampagne(etat.reanalyse));
+    },
+    'histo-gmail': function () {
+      var statutHisto = statutHistoGmail_(!CONFIG.GMAIL_HISTO_ACTIF, etat.histo.termine,
+        etat.quotaGmail, etat.freinBudget, etat.resetEnCours);
+      // L'offset histo REPART À 0 aux passes de vérification (position de scan, pas un cumul) :
+      // affichage MONOTONE via le max avec la ligne existante — le compteur ne recule jamais.
+      var exHisto = existantes['histo-gmail'];
+      var traitesHisto = exHisto && !etat.histo.termine
+        ? Math.max(etat.histo.traites, exHisto.traites) : etat.histo.traites;
+      pousser('histo-gmail', 'Historique Gmail (PJ)', traitesHisto, null, 'fils', statutHisto);
+    },
+    'rangement': function () {
+      pousser('rangement', 'Rangement initial du Drive',
+        etat.rangement.traites, etat.rangement.base, 'fichiers', statutCampagne(etat.rangement));
+    },
+    'consolidation-gen': function () {
+      pousser('consolidation-gen', 'Consolidation — génération du plan (' + etat.consolidationGen.tag + ')',
+        etat.consolidationGen.traites, etat.consolidationGen.base, 'domaines', statutConsolidation_(etat.consolidationGen));
+    },
+    'mission-vehicule': function () { pousserMission('mission-vehicule', 'vehicule'); },
+    'mission-logement': function () { pousserMission('mission-logement', 'logement'); },
+    'mission-dispatch-03': function () { pousserMission('mission-dispatch-03', 'dispatch03'); },
+    'mission-ecoles-archives-06': function () { pousserMission('mission-ecoles-archives-06', 'ecoles-archives06c'); },
+    'mission-paies': function () { pousserMission('mission-paies', 'paies'); },
+    'mission-carriere': function () { pousserMission('mission-carriere', 'carriere'); },
+    'mission-annees-02': function () { pousserMission('mission-annees-02', 'annees02'); },
+    'mission-impots': function () { pousserMission('mission-impots', 'impots'); },
+    'consolidation-exec': function () {
+      var ce = etat.consolidationExec;
+      var statut = statutConsolidation_(ce);
+      // Plan courant ENTIÈREMENT drainé mais campagne pas finie (la génération n'a pas couvert
+      // tous les domaines) : « en cours · 100 % » était trompeur (retour Marc 2026-08-13) — la
+      // vérité est « à jour, en ATTENTE de l'amont ». L'app affiche la dépendance depuis ce statut.
+      if (statut === 'en cours' && ce.base > 0 && ce.traites >= ce.base) {
+        statut = 'à jour (plan drainé — attend la génération)';
+      }
+      pousser('consolidation-exec', 'Consolidation — exécution du plan (' + ce.tag + ')',
+        ce.traites, ce.base, 'lignes', statut);
+    }
+  };
+
+  // UNE ligne par opération du registre, DANS L'ORDRE D'EXÉCUTION du tick. Les campagnes riches
+  // passent par leur constructeur dédié ; toutes les autres dérivent leur statut du suivi réel —
+  // sans Traités/Base (le suivi enregistre l'exécution, pas un compte ; PR5 branchera les
+  // compteurs du jour du flux vivant via les accumulateurs Télémétrie).
+  (registre || []).forEach(function (op) {
+    if (campagnes[op.cle]) { campagnes[op.cle](); return; }
+    pousser(op.cle, op.libelle, null, null, op.unite,
+      statutDepuisSuivi_((suivi || {})[op.cle]));
+  });
+
+  return lignes;
+}
+
+/**
+ * Écrit l'onglet Progression — appelée dans le `finally` du tick (juste après `majSante_`),
+ * enveloppée par l'appelant : un échec ne bloque JAMAIS l'intake. Centralise la LECTURE de
+ * l'état (Properties + pannes) et rend TOUT en une écriture `setValues` (+ un `clearContent`
+ * du reliquat) — zéro écriture par item, l'app la lit en poll léger (C28-18).
+ */
+function majProgressions_() {
+  var props = PropertiesService.getScriptProperties();
+  var f = feuille_('Progression');
+  assurerEnteteProgression_(f);
+  var maintenant = Date.now();
+
+  // Consolidation (C28-26/0024) — MÊME périmètre de domaines que `genererPlanConsolidation_`
+  // (Consolidation.gs) et le diagnostic un-clic (Diagnostic.gs) : fixes + auto DÉJÀ NÉS (jamais
+  // `domainesAutorises_()`, plus large, qui listerait aussi des auto pas encore créés). Ainsi
+  // « domaines épuisés / total » affiché ici correspond EXACTEMENT à ce que la génération itère.
+  var tagConso = CONFIG.CONSOLIDATION_TAG;
+  var domainesConso = Object.keys(CONFIG.DOMAINES);
+  (CONFIG.DOMAINES_AUTO || []).forEach(function (nom) {
+    if (props.getProperty('DriveAI_DOM_' + nom)) domainesConso.push(nom);
+  });
+  // Court-circuit (revue flotte apps-script-quota) : génération TERMINÉE ⇒ tous les domaines sont
+  // épuisés PAR CONSTRUCTION (Consolidation.gs, posé au moment où le tag est marqué fini) — jamais
+  // besoin de ré-interroger l'Index. Sans ce court-circuit, `majProgressions_` deviendrait en régime
+  // stationnaire le SEUL déclencheur restant de `chargerIndexCache_` à CHAQUE tick, juste pour
+  // recalculer une valeur qui ne change plus jamais (même piège anti-gel que celui déjà corrigé sur
+  // ce chemin — cf. commentaire de `chargerIndexCache_`).
+  var termineConso = props.getProperty('DriveAI_CONSOLIDATION') === tagConso;
+  var domainesEpuises = termineConso ? domainesConso.length : domainesConso.reduce(function (n, nom) {
+    return n + (indexContient_('conso|' + tagConso + '|dom|' + nom) ? 1 : 0);
+  }, 0);
+  var dernPlanConso = feuille_('PlanConsolidation').getLastRow();
+  var aujourdhuiConso = dateGmail_(new Date());
+
+  var etat = {
+    quotaGmail: estPanneGmail_(),
+    panneApi: estPannePlateforme_(),
+    freinBudget: budgetCampagnesAtteint_(),
+    resetEnCours: resetEnCours_(),
+    rangement: {
+      termine: props.getProperty('DriveAI_RANGEMENT') === CONFIG.RANGEMENT_TAG,
+      base: proprieteNombre_(props, 'DriveAI_RANGEMENT_BASE'),
+      traites: proprieteNombre_(props, 'DriveAI_RANGEMENT_TRAITES') || 0,
+      tag: CONFIG.RANGEMENT_TAG
+    },
+    migration: {
+      termine: props.getProperty('DriveAI_MIGRATION') === CONFIG.MIGRATION_TAG,
+      base: proprieteNombre_(props, 'DriveAI_MIGRATION_BASE'),
+      traites: proprieteNombre_(props, 'DriveAI_MIGRATION_TRAITES') || 0,
+      tag: CONFIG.MIGRATION_TAG
+    },
+    reanalyse: {
+      termine: props.getProperty('DriveAI_REANALYSE') === CONFIG.REANALYSE_TAG,
+      enAttente: props.getProperty('DriveAI_MIGRATION') !== CONFIG.MIGRATION_TAG,
+      arretee: !CONFIG.REANALYSE_ACTIF,   // C49-20 — sinon la ligne dirait « en cours » à vie
+      base: proprieteNombre_(props, 'DriveAI_REANALYSE_BASE'),
+      traites: proprieteNombre_(props, 'DriveAI_REANALYSE_TRAITES') || 0,
+      tag: CONFIG.REANALYSE_TAG
+    },
+    histo: {
+      termine: props.getProperty('DriveAI_GMAIL_HISTO') === 'terminé',
+      traites: proprieteNombre_(props, 'DriveAI_GMAIL_HISTO_OFFSET') || 0
+    },
+    consolidationGen: {
+      termine: termineConso,
+      arretee: !CONFIG.CONSOLIDATION_ACTIF,       // C49-20
+      base: domainesConso.length,
+      traites: domainesEpuises,
+      budgetEpuise: budgetJourConsolidation_(props, aujourdhuiConso) >= CONFIG.CONSOLIDATION_BUDGET_JOUR_MS,
+      tag: tagConso
+    },
+    // Missions de curation (C28-49) : compteurs compacts + drapeau de convergence par tag.
+    missions: (function () {
+      var brut = chargerEtatMissions_(props);
+      var m = {};
+      ['vehicule', 'logement', 'dispatch03', 'ecoles-archives06c', 'paies', 'carriere', 'annees02', 'impots'].forEach(function (tag) {
+        var e = brut[tag] || { t: 0, b: 0, na: 0 };
+        m[tag] = {
+          traites: e.t || 0, base: e.b || 0, nonApparies: e.na || 0,
+          termine: props.getProperty('DriveAI_MISSION_FINI_' + tag) === CONFIG.MISSIONS_REGLES_VERSION,
+        };
+      });
+      return m;
+    })(),
+    consolidationExec: {
+      termine: props.getProperty('DriveAI_CONSO_EXEC_FINI') === tagConso,
+      arretee: !CONFIG.CONSOLIDATION_EXEC_ACTIF,  // C49-20
+      base: dernPlanConso > 1 ? dernPlanConso - 1 : 0,
+      // UNITÉS ALIGNÉES sur Diagnostic.gs (revue flotte code-reviewer) : `DriveAI_CONSO_EXEC_LIGNE`
+      // est un n° de ligne PHYSIQUE (en-tête = 1) ; lignes de DONNÉES consommées = curseur − 1 —
+      // sinon le numérateur dépasserait `base` d'une unité (« 7/6 » aurait l'air d'un bug), et les
+      // deux surfaces de diagnostic (celle-ci et le un-clic) afficheraient des chiffres DIFFÉRENTS
+      // pour la même réalité.
+      traites: Math.max(0, (Number(props.getProperty('DriveAI_CONSO_EXEC_LIGNE')) || 1) - 1),
+      budgetEpuise: budgetJourConsoExec_(props, aujourdhuiConso) >= CONFIG.CONSOLIDATION_EXEC_BUDGET_JOUR_MS,
+      tag: tagConso
+    }
+  };
+
+  // C28-47 : débits des campagnes à COMPTEUR (une entrée par clé — borné par construction), pour
+  // « dernière passe » et l'estimation de fin. Mis à jour et persisté ICI, une fois par tick.
+  // `histo-gmail` EXCLU volontairement (revue C28-47) : son « compteur » est une POSITION de scan
+  // qui repart à 0 aux passes de vérification — un delta calculé dessus n'est pas un volume traité
+  // (il n'a d'ailleurs pas de base, donc aucune estimation possible). Mieux vaut rien qu'un faux
+  // « +N fils » (l'affichage du compteur, lui, reste monotone via le max avec la ligne existante).
+  var debits = majDebits_(props, {
+    'migration': etat.migration.traites,
+    'reanalyse': etat.reanalyse.traites,
+    'rangement': etat.rangement.traites,
+    'consolidation-gen': etat.consolidationGen.traites,
+    'consolidation-exec': etat.consolidationExec.traites,
+    // Missions C28-49 : vrais volumes cumulés (jamais une position de scan) → débits/estimation OK.
+    'mission-vehicule': etat.missions.vehicule.traites,
+    'mission-logement': etat.missions.logement.traites,
+    'mission-dispatch-03': etat.missions.dispatch03.traites,
+    'mission-ecoles-archives-06': etat.missions['ecoles-archives06c'].traites,
+    'mission-paies': etat.missions.paies.traites,
+    'mission-carriere': etat.missions.carriere.traites,
+    'mission-annees-02': etat.missions.annees02.traites,
+    'mission-impots': etat.missions.impots.traites
+  }, maintenant);
+
+  // C28-44 : la vue de SUIVI fusionnée (persisté + run courant) alimente statuts/Détail/activité/
+  // erreurs de TOUTES les lignes ; le registre donne la liste et l'ordre des opérations.
+  var lignes = lignesProgression_(etat, lireLignesProgression_(f), maintenant, CONFIG.PROGRESSION_PURGE_MS,
+    suiviOpsFusionne_(props), REGISTRE_OPERATIONS, debits);
+  if (lignes.length) f.getRange(2, 1, lignes.length, COLONNES_PROGRESSION.length).setValues(lignes);
+  var dern = f.getLastRow();
+  if (dern > lignes.length + 1) {
+    f.getRange(lignes.length + 2, 1, dern - lignes.length - 1, COLONNES_PROGRESSION.length).clearContent();
+  }
+}
+
+/**
+ * Rafraîchit EN FIN DE TICK les lignes des étapes qui s'exécutent APRÈS `progression` (C28-60).
+ *
+ * Pourquoi : l'onglet est écrit PAR l'étape `progression`, au milieu du `finally`. Les étapes
+ * suivantes (`telemetrie`, `hub-resume`, `historique-vrac`, `journal-borne`) n'avaient pas encore
+ * enregistré leur passage : leur ligne montrait l'heure du tick PRÉCÉDENT, soit une fraîcheur
+ * systématiquement sous-estimée d'un tick (constaté le 19/08 : 17:14 pour `sante`/`progression`,
+ * 17:08 pour les quatre autres — de quoi diagnostiquer une gate qui n'existait pas).
+ *
+ * Pourquoi PAS déplacer `progression` en fin de tick : `majResumeHub_` lit l'onglet « fraîchement
+ * réécrit » pour publier l'avancement des missions au hub (C28-59), et l'ordre du registre (que
+ * l'app affiche tel quel, et dont les INDEX sont la clé de la Property de suivi) devrait bouger.
+ *
+ * Ici : UNE lecture de la colonne A et UNE écriture des seules lignes tardives — aucun Drive,
+ * aucun LLM, ~1 s —, recalculées par la MÊME `lignesProgression_` que le rendu principal (une
+ * seule règle d'affichage). Appelée après la rotation du Journal, juste avant le flush du suivi,
+ * enveloppée par l'appelant. Silencieuse si la forme de l'onglet n'est pas celle attendue
+ * (lignes tardives absentes ou non contiguës) : on ne devine pas où écrire.
+ */
+function majProgressionsFinTick_() {
+  var tardives = registreApresProgression_();
+  if (!tardives.length) return;
+  var f = feuille_('Progression');
+  var dern = f.getLastRow();
+  if (dern < 2) return;
+  var cles = f.getRange(2, 1, dern - 1, 1).getValues().map(function (r) { return String(r[0]); });
+  var debut = cles.indexOf(tardives[0].cle);
+  if (debut === -1) return;
+  for (var i = 0; i < tardives.length; i++) {
+    if (cles[debut + i] !== tardives[i].cle) return;
+  }
+  // `etat` vide : aucune ligne tardive n'est une campagne à constructeur dédié (le registre
+  // tardif ne contient que des étapes d'observabilité) ; leur statut dérive du suivi seul.
+  var lignes = lignesProgression_({}, {}, Date.now(), CONFIG.PROGRESSION_PURGE_MS,
+    suiviOpsFusionne_(PropertiesService.getScriptProperties()), tardives, {});
+  if (lignes.length !== tardives.length) return; // une ligne « terminé » omise : décalage, on n'écrit pas
+  f.getRange(debut + 2, 1, lignes.length, COLONNES_PROGRESSION.length).setValues(lignes);
+}
+
+/** Lit une Script Property numérique : null si ABSENTE (≠ 0 — « pas encore recensé »). */
+function proprieteNombre_(props, cle) {
+  var v = props.getProperty(cle);
+  return v === null ? null : (Number(v) || 0);
+}
+
+/** Lit les lignes actuelles de Progression : clé → {traites, statut, horodateMs}. */
+function lireLignesProgression_(f) {
+  var existantes = {};
+  var dern = f.getLastRow();
+  if (dern < 2) return existantes;
+  var v = f.getRange(2, 1, dern - 1, COLONNES_PROGRESSION.length).getValues();
+  for (var i = 0; i < v.length; i++) {
+    if (!v[i][0]) continue;
+    var h = v[i][6];
+    existantes[v[i][0]] = {
+      traites: Number(v[i][2]) || 0,
+      statut: String(v[i][5]),
+      horodateMs: h instanceof Date ? h.getTime() : (Date.parse(String(h)) || 0)
+    };
+  }
+  return existantes;
+}
+
+/* ---------- Télémétrie coûts & quotas (C28-24) ---------- */
+
+// Contrat avec l'app (interpreterTelemetrie côté React, PR3 C28-24) : 4 colonnes, une ligne par
+// métrique — les CLÉS sont stables (l'app s'y accroche), la Valeur est brute, le Détail est humain.
+var COLONNES_TELEMETRIE = ['Clé', 'Valeur', 'Unité', 'Détail'];
+
+// Plan de consolidation C28-26 (ADR-0023, cf. Consolidation.gs). L'Empreinte (MD5) est une
+// MÉTADONNÉE (ADR-0007) : jamais de contenu de document dans l'état.
+var COLONNES_PLAN_CONSOLIDATION = ['Horodaté', 'Fichier', 'ID', 'Action', 'Cible', 'Raison', 'Empreinte'];
+
+// Plan de FUSION des dossiers d'entité en double (Chantier #47, ADR-0036, cf. Fusion.gs). Marc édite
+// la colonne `Action` (Fusionner/Ignorer) ; `Rôle` = CIBLE (dossier gardé) ou source (fondu dedans).
+var COLONNES_PLAN_FUSION = ['Horodaté', 'Domaine', 'Groupe', 'Rôle', 'Dossier', 'Nb fichiers', 'ID dossier', 'Action', 'Statut'];
+
+// Journal QUOTIDIEN du vrac par domaine (demande Marc 2026-08-12, cf. HistoriqueVrac.gs). APPEND-ONLY
+// (jamais réécrit ni purgé) — une ligne par domaine, une fois par jour, jusqu'à la fin du drainage.
+// `Tronqué` = 'oui' si le comptage a atteint le plafond de sûreté (compterVracRacineDomaine_,
+// Diagnostic.gs) — jamais un chiffre exact au-delà, jamais un plantage. `Erreur` = 'oui' si le
+// domaine était illisible ce jour-là : `Vrac` reste alors VIDE (jamais un faux 0 permanent —
+// confirmé en prod 2026-08-12, `06 · Études` avait affiché 0 avec ≥400 fichiers réels).
+var COLONNES_HISTORIQUE_VRAC = ['Date', 'Domaine', 'Vrac', 'Tronqué', 'Erreur'];
+
+
+/**
+ * Borne une valeur de compteur de télémétrie à un nombre fini >= 0 (0 si négatif, NaN, infini ou vide).
+ * @param {*} brut
+ * @return {number}
+ */
+function nombreTelemetrieOuZero_(brut) {
+  if (brut === null || brut === undefined || brut === '' || typeof brut === 'boolean') return 0;
+  var n = Number(brut);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Construit les lignes de l'onglet Télémétrie. PURE (testée) : tout l'état arrive en paramètres,
+ * seuls les plafonds sont lus dans CONFIG (constantes). Ne jamais renommer une clé sans migrer
+ * `interpreterTelemetrie` côté app.
+ * @param {{quotaSuspendu:boolean, reprise:string, histoFilsJour:number, cycliqueFilsJour:number,
+ *          boiteFilsJour:number, histoTriFilsJour:number, anciensFilsJour?:number,
+ *          fondFilsJour?:number, archivesJour?:number, coutDollars:number, coutAppels:number}} d
+ * @return {Array[]} lignes [Clé, Valeur, Unité, Détail]
+ */
+function lignesTelemetrie_(d) {
+  d = d || {};
+  var histo = nombreTelemetrieOuZero_(d.histoFilsJour);
+  var cyclique = nombreTelemetrieOuZero_(d.cycliqueFilsJour);
+  var boite = nombreTelemetrieOuZero_(d.boiteFilsJour);
+  var histoTri = nombreTelemetrieOuZero_(d.histoTriFilsJour);
+  var anciens = nombreTelemetrieOuZero_(d.anciensFilsJour);
+  var fond = d.fondFilsJour !== undefined && d.fondFilsJour !== null
+    ? nombreTelemetrieOuZero_(d.fondFilsJour)
+    : cyclique + boite + histoTri + anciens;
+  var archives = nombreTelemetrieOuZero_(d.archivesJour);
+  var coutDollars = nombreTelemetrieOuZero_(d.coutDollars);
+  var coutAppels = nombreTelemetrieOuZero_(d.coutAppels);
+  return [
+    ['quota_gmail_etat', d.quotaSuspendu ? 'suspendu' : 'actif', '',
+      d.quotaSuspendu ? (d.reprise || '') : ''],
+    ['gmail_histo_fils_jour', histo, 'fils', 'Plafond ' + CONFIG.GMAIL_HISTO_MAX_FILS_JOUR + '/j'],
+    // ADR-0076 : les trois campagnes de fond du tri partagent UN plafond (le Détail dit « commun »).
+    ['tri_cyclique_fils_jour', cyclique, 'fils', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
+    ['tri_boite_fils_jour', boite, 'fils', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
+    ['tri_histo_fils_jour', histoTri, 'fils', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
+    ['tri_anciens_fils_jour', anciens, 'fils/jour', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
+    ['tri_fond_fils_jour', fond, 'fils/jour', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
+    ['tri_archives_jour', archives, 'fils/jour', 'Fils archivés par le moteur aujourd\'hui'],
+    ['llm_cout_mois', coutDollars, '$', 'Frein campagnes à ' + CONFIG.LLM_BUDGET_CAMPAGNES + ' $'],
+    ['llm_appels_mois', coutAppels, 'appels', '']
+  ];
+}
+
+/**
+ * Lit un compteur quotidien `<prefixe>_JOUR` / `<prefixe>_FILS_JOUR` (patron C28-21) : la valeur
+ * ne vaut que si la date persistée est CELLE D'AUJOURD'HUI — sinon 0 (le compteur de la veille
+ * n'a pas encore été purgé par son écrivain, il ne doit jamais s'afficher comme celui du jour).
+ */
+function compteurFilsJour_(props, prefixe, aujourdhui) {
+  if (!props) return 0;
+  return props.getProperty(prefixe + '_JOUR') === aujourdhui
+    ? nombreTelemetrieOuZero_(props.getProperty(prefixe + '_FILS_JOUR'))
+    : 0;
+}
+
+var COLONNES_COUTS = ['Poste', 'Appels', 'Coût $', 'Part'];
+
+/**
+ * Lignes de l'onglet `Coûts` (C28-58, demande Marc « je veux le détail de coût pour tout »).
+ * PURE (testée) — aucune I/O, aucune décision.
+ *
+ * HONNÊTETÉ (no-fake-data, §7) : la ventilation ne peut pas décrire ce qui a été dépensé AVANT
+ * son déploiement. La ligne « non ventilé » l'expose au lieu de laisser croire que les postes
+ * affichés couvrent tout le mois — c'est le même principe que « status:building » du hub.
+ * @param {string} mois  AAAA-MM
+ * @param {{appels:number, dollars:number}} total  cf. `syntheseCoutMois_`
+ * @param {{lignes:Array, ventile:number, restant:number}} v  cf. `ventilationCoutMois_`
+ * @return {Array<Array>}
+ */
+function lignesCouts_(mois, total, v) {
+  var pct = function (d) { return total.dollars > 0 ? Math.round(d / total.dollars * 1000) / 10 + ' %' : '—'; };
+  var lignes = [[
+    'TOTAL LLM ' + mois, total.appels, Math.round(total.dollars * 100) / 100, '100 %'
+  ]];
+  for (var i = 0; i < v.lignes.length; i++) {
+    var l = v.lignes[i];
+    lignes.push([l.op, l.appels, Math.round(l.dollars * 10000) / 10000, l.part + ' %']);
+  }
+  // Seuil à 0,5 ¢ : sous cela, « non ventilé » n'est que du bruit d'arrondi et afficher une ligne
+  // ferait douter d'un compte juste.
+  if (v.restant > 0.005) {
+    // Libellé NEUTRE (revue flotte C28-58) : ce reliquat vient normalement de ce qui a été dépensé
+    // avant la mise en place du détail — mais pas seulement (un changement de `CONFIG.LLM_PRIX` en
+    // cours de mois re-tarife le total sans re-tarifer les postes déjà figés). Affirmer une cause
+    // unique serait faux précisément le jour où Marc regarde.
+    lignes.push(['(non ventilé — antérieur au détail, ou non attribué)', '—',
+      Math.round(v.restant * 100) / 100, pct(v.restant)]);
+  }
+  return lignes;
+}
+
+/**
+ * Écrit l'onglet `Coûts` (C28-58) : où part l'argent, par usage. Une seule écriture par tick,
+ * comme Télémétrie. Enveloppée par l'appelant — un échec ne bloque JAMAIS l'intake.
+ */
+function majCouts_() {
+  var tz = Session.getScriptTimeZone();
+  var mois = Utilities.formatDate(new Date(), tz, 'yyyy-MM');
+  var total = syntheseCoutMois_();
+  var t = lireCoutMois_(PropertiesService.getScriptProperties(), cleCoutMois_());
+  var lignes = lignesCouts_(mois, total, ventilationCoutMois_(t, total.dollars));
+  var f = feuille_('Coûts');
+  f.getRange(2, 1, lignes.length, COLONNES_COUTS.length).setValues(lignes);
+  // Reliquat du mois précédent (moins de postes qu'avant) : effacé, sinon d'anciennes lignes
+  // survivraient sous les nouvelles et l'onglet mentirait (même patron que Télémétrie).
+  var dern = f.getLastRow();
+  if (dern > lignes.length + 1) {
+    f.getRange(lignes.length + 2, 1, dern - lignes.length - 1, COLONNES_COUTS.length).clearContent();
+  }
+}
+
+/**
+ * Écrit l'onglet Télémétrie (C28-24) — l'état des quotas Gmail et du coût LLM que l'app affiche
+ * dans « Coûts & quotas » (PR3). Appelée dans le `finally` du tick (après `majProgressions_`),
+ * enveloppée par l'appelant : un échec ne bloque JAMAIS l'intake. Métadonnées seulement
+ * (ADR-0007) : compteurs, plafonds, états — jamais de contenu. Tout est rendu en UNE écriture
+ * `setValues` (+ un `clearContent` du reliquat) — l'app la lit en poll léger, comme Progression.
+ */
+function majTelemetrie_() {
+  var props = PropertiesService.getScriptProperties();
+  var aujourdhui = dateGmail_(new Date());
+  var quotaDepuis = props ? (Number(props.getProperty('DriveAI_GMAIL_QUOTA')) || 0) : 0;
+  var suspendu = !!quotaDepuis && Date.now() - quotaDepuis < CONFIG.GMAIL_QUOTA_RESONDE_MS;
+  var reprise = '';
+  if (suspendu) {
+    reprise = 'Reprise vers ' + Utilities.formatDate(
+      new Date(quotaDepuis + CONFIG.GMAIL_QUOTA_RESONDE_MS), Session.getScriptTimeZone(), 'HH:mm');
+  }
+  var cycliqueFilsJour = compteurFilsJour_(props, 'DriveAI_TRI_CYCLIQUE', aujourdhui);
+  var boiteFilsJour = compteurFilsJour_(props, 'DriveAI_TRI_BOITE', aujourdhui);
+  var histoTriFilsJour = compteurFilsJour_(props, 'DriveAI_TRI_HISTO', aujourdhui);
+  var anciensFilsJour = compteurFilsJour_(props, 'DriveAI_TRI_ANCIENS', aujourdhui);
+  var fondFilsJour = props && typeof filsFondLusJour_ === 'function'
+    ? filsFondLusJour_(props, aujourdhui)
+    : cycliqueFilsJour + boiteFilsJour + histoTriFilsJour + anciensFilsJour;
+  var archivesJour = compteurFilsJour_(props, 'DriveAI_TRI_ARCHIVES', aujourdhui);
+  var cout = syntheseCoutMois_();
+  var lignes = lignesTelemetrie_({
+    quotaSuspendu: suspendu,
+    reprise: reprise,
+    histoFilsJour: compteurFilsJour_(props, 'DriveAI_GMAIL_HISTO', aujourdhui),
+    cycliqueFilsJour: cycliqueFilsJour,
+    boiteFilsJour: boiteFilsJour,
+    histoTriFilsJour: histoTriFilsJour,
+    anciensFilsJour: anciensFilsJour,
+    fondFilsJour: fondFilsJour,
+    archivesJour: archivesJour,
+    coutDollars: cout.dollars,
+    coutAppels: cout.appels
+  });
+  var f = feuille_('Télémétrie');
+  f.getRange(2, 1, lignes.length, COLONNES_TELEMETRIE.length).setValues(lignes);
+  var dern = f.getLastRow();
+  if (dern > lignes.length + 1) {
+    f.getRange(lignes.length + 2, 1, dern - lignes.length - 1, COLONNES_TELEMETRIE.length).clearContent();
+  }
+}
+
+/**
+ * Échec : ligne d'erreur + notif mail immédiate à soi-même.
+ * @param {string} source
+ * @param {string} message
+ */
+function notifierEchec_(source, message) {
+  // Décision Marc 2026-07-06 (calibrage) : AUCUN mail d'alerte immédiat — tout se découvre au
+  // résumé hebdo (compteur d'erreurs + quarantaines ; la liste vit dans l'app avec « Relancer »).
+  // L'auto-réparation du chien de garde reste entièrement active ; seul le MAIL disparaît.
+  // (Revenir en arrière = restaurer l'envoi via emailAlerte_ ici et dans alerterChienDeGarde_.)
+  journalErreur_(source, message);
+}
+
+/**
+ * Destinataire des alertes et mails du moteur — check-up 2026-07-03 : `Session.getEffectiveUser()`
+ * exige un scope (userinfo.email) ABSENT du manifeste → l'appel LÈVE et toutes les alertes
+ * échouaient en silence depuis le début (597 tentatives mortes constatées, résumé hebdo compris).
+ * On n'ajoute PAS le scope (leçon durable : tout nouveau scope FIGE les déclencheurs jusqu'à
+ * ré-autorisation manuelle de Marc) : l'adresse vit dans la Script Property `DriveAI_EMAIL`
+ * (posée une fois, comme la clé API), avec repli best-effort sur Session au cas où le scope
+ * existerait un jour. Ne lève JAMAIS.
+ * @return {string} adresse mail, ou '' si indisponible (l'appelant journalise sans envoyer).
+ */
+function emailAlerte_() {
+  var e = '';
+  try { e = PropertiesService.getScriptProperties().getProperty('DriveAI_EMAIL') || ''; } catch (err) { }
+  if (e) return e;
+  try { return Session.getEffectiveUser().getEmail(); } catch (err) { return ''; }
+}
+
+/* ---------- Index (idempotence) ---------- */
+
+/**
+ * Clé stable d'une pièce jointe. Inclut l'index de PJ pour distinguer deux PJ
+ * jumelles (même nom + même taille) dans un même message.
+ * @param {GmailMessage} message
+ * @param {number} indexPj
+ * @param {GmailAttachment} pj
+ * @return {string}
+ */
+function cleAttachement_(message, indexPj, pj) {
+  return message.getId() + '|' + indexPj + '|' + pj.getName() + '|' + pj.getSize();
+}
+
+// Caches chargés une fois par run (évite une lecture Sheet par PJ) :
+//  _indexCache          : clés d'idempotence déjà traitées
+//  _empreintesCache     : empreintes de contenu déjà vues (détection de doublons)
+//  _empreintesParIdCache: fileId → empreinte DÉJÀ CALCULÉE (évite de re-télécharger les octets)
+//  _echecsCache         : clé → { tentatives, ligne } (compteur de quarantaine)
+var _indexCache = null;
+var _empreintesCache = null;
+var _empreintesParIdCache = null;
+var _echecsCache = null;
+//  _lignesEmpreinteCache: lignes d'Index qui portent une empreinte, lues PARESSEUSEMENT au premier doublon du
+//                         run (ADR-0070) ; _etatsPorteursRun / _nbVerifsPorteursRun / _idDoublonsRun : contrôles Drive du run
+var _lignesEmpreinteCache = null;
+var _etatsPorteursRun = {};
+var _nbVerifsPorteursRun = 0;
+var _idDoublonsRun;
+//  _indexLignesCache    : clé → n° de ligne de l'Index (dernière gagnante), posé avec la colonne A déjà lue (ADR-0071) ;
+//                         0 = ligne ajoutée dans ce run, numéro inconnu. _redepotMemoRun / _nbLecturesRedepotRun : résidents
+//                         de 00·À trier déjà jugés (Property, lue paresseusement) et lectures de ligne faites dans ce run
+var _indexLignesCache = null;
+var _redepotMemoRun = null;
+var _nbLecturesRedepotRun = 0;
+
+/** À appeler en tête de chaque run pour repartir de caches neufs. */
+function reinitialiserIndexCache_() {
+  _indexCache = null;
+  _empreintesCache = null;
+  _empreintesParIdCache = null;
+  _echecsCache = null;
+  _lignesEmpreinteCache = null;
+  _etatsPorteursRun = {};
+  _metaPorteursRun = {};
+  _nbVerifsPorteursRun = 0;
+  _idDoublonsRun = undefined;
+  _indexLignesCache = null;
+  _redepotMemoRun = null;
+  _nbLecturesRedepotRun = 0;
+}
+
+/**
+ * Préfixes de clé d'Index qui identifient UN FICHIER (leur dernier segment est un fileId Drive).
+ * Whitelist EXPLICITE — « périmètre défini par IDENTITÉ » (§7) : une clé Gmail
+ * (`messageId|i|nom|taille`, `tri|fil|ts|lu`) ne doit JAMAIS être lue comme un fileId, sinon une
+ * empreinte serait attribuée au MAUVAIS fichier et un original partirait dans `_Doublons`.
+ *
+ * `conso` en est VOLONTAIREMENT absent (revue sécurité #229) : une de ses formes est
+ * `conso|<tag>|dom|<domaine>`, qui ne finit PAS par un fileId. Elle n'échappe aujourd'hui que grâce
+ * aux espaces des noms de domaine — une propriété de `CONFIG.DOMAINES`, pas un invariant. Et conso
+ * n'inscrit JAMAIS d'empreinte à l'Index : l'y whitelister n'apportait rien.
+ * `shared|<fileId>` est exclu pour une autre raison : le fileId y est celui de l'ORIGINAL chez le
+ * tiers, jamais du fichier présent chez Marc (le partage dépose une COPIE).
+ */
+var PREFIXES_CLE_FICHIER_ = { drive: 1, tri33p: 1, migre: 1, reanalyse: 1 };
+
+/**
+ * fileId porté par une clé d'Index documentaire, ou '' si la clé n'en porte pas. PURE.
+ * Double garde : préfixe whitelisté ET dernier segment de la FORME d'un ID Drive.
+ */
+function fileIdDeCleIndex_(cle) {
+  var parts = String(cle == null ? '' : cle).split('|');
+  if (parts.length < 2) return '';
+  if (PREFIXES_CLE_FICHIER_[parts[0]] !== 1) return '';
+  var id = parts[parts.length - 1];
+  return estFileIdPlausible_(id) ? id : '';
+}
+
+/**
+ * PURE. Cette chaîne a-t-elle la FORME d'un identifiant Drive ?
+ *
+ * ⚠️ Extraite de `fileIdDeCleIndex_` parce qu'elle a désormais DEUX lecteurs : la clé et la
+ * colonne. Deux écritures de la même règle divergeraient au premier ajustement, et la seconde
+ * accepterait ce que la première refuse — sans que rien ne le dise.
+ */
+function estFileIdPlausible_(s) {
+  return /^[A-Za-z0-9_-]{20,}$/.test(String(s == null ? '' : s));
+}
+
+/**
+ * PURE. Le fileId d'une ligne d'Index : la COLONNE d'abord, la clé en repli.
+ *
+ * ⚠️ L'ORDRE n'est pas indifférent. La colonne est écrite par le code qui a VU le fichier
+ * (`src.placer` rend son id) ; la clé n'est qu'une déduction, et elle ne marche que pour quatre
+ * préfixes sur tous ceux que l'Index porte. Le repli existe pour les 26 000 lignes écrites avant
+ * C49-16, pas comme source préférée.
+ *
+ * ⚠️ Une colonne qui ne ressemble pas à un id Drive est IGNORÉE plutôt que rendue : une cellule
+ * abîmée à la main ne doit pas envoyer un document sous l'identité d'un autre.
+ *
+ * ⚠️ DEUX FORMES D'ENTRÉE, UNE SEULE RÈGLE. L'Index se lit tantôt en lignes brutes (tableaux,
+ * hier `PerimetrePiece`/`RattrapagePiece`/`AuditPiece`, retirés par l'ADR-0074), tantôt en fiches nommées (hier `Memoire`, et le
+ * flux vivant qui n'a jamais vu l'Index — il tient sa décision en main). Écrire la règle deux
+ * fois en ferait une règle et demie : la seconde accepterait un jour ce que la première refuse,
+ * et rien ne le dirait. Une fonction, deux accesseurs.
+ *
+ * @param {Array|{cle:string, fileId:(string|undefined)}} ligne  ligne d'Index ou fiche
+ * @return {string} l'id, ou '' si la ligne n'en porte aucun
+ */
+function fileIdDeLigneIndex_(ligne) {
+  if (!ligne) return '';
+  var tableau = Array.isArray(ligne);
+  var colonne = String((tableau ? ligne[8] : ligne.fileId) || '').trim();
+  if (estFileIdPlausible_(colonne)) return colonne;
+  return fileIdDeCleIndex_(String((tableau ? ligne[0] : ligne.cle) || ''));
+}
+
+/**
+ * Empreinte DÉJÀ connue pour ce fichier, ou '' — permet de ne PAS re-télécharger ses octets
+ * (`empreinteBlob_`, poste le plus cher du placement du reset). Rend notamment quasi gratuit un bump
+ * de `CONFIG.RESET_TABLE_VERSION` : le reliquat re-tenté a déjà son empreinte à l'Index (revue #229).
+ */
+function empreinteConnueParId_(fileId) {
+  if (_empreintesParIdCache === null) chargerIndexCache_();
+  return _empreintesParIdCache[fileId] || '';
+}
+
+function chargerIndexCache_() {
+  // ⚠️ #474 — trois caches REMPLIS EN LOCAL, publiés ensemble à la fin. Publiés vides avant la lecture,
+  // un échec de la Sheet à mi-parcours laissait des caches non-null mais vides ou partiels : un fichier
+  // déjà traité passait pour « jamais indexé » et pouvait être retraité (donc repayé). Maintenant
+  // l'exception sort et les trois restent `null` (« je ne sais pas »).
+  var indexCache = {};
+  var empreintesCache = {};
+  var empreintesParIdCache = {};
+  var lignesCache = {};
+  var f = feuille_('Index');
+  // Auto-réparation : assure la colonne « Empreinte » (G) sur un Index existant.
+  if (f.getRange(1, 7).getValue() !== 'Empreinte') f.getRange(1, 7).setValue('Empreinte');
+  // ⚠️ MÊME point d'attache, et pas `initialiserSheet_` : celle-ci ne tourne qu'à la création de
+  // la Sheet ou quand l'onglet est ABSENT, donc sur un Index déjà en production — le cas même où
+  // la réparation sert — elle est du code MORT (leçon §9, payée sur la colonne `Erreur` de
+  // `HistoriqueVrac`). `chargerIndexCache_` tourne, elle, à chaque run.
+  if (f.getRange(1, 9).getValue() !== 'FileId') f.getRange(1, 9).setValue('FileId');
+  // ADR-0077 : J « Taille » (octets du fichier, tous statuts) et K « Exemplaire » (fileId de l'exemplaire vivant qui a
+  // fait écarter un doublon) — la preuve écrite que Marc peut relire. Même point d'attache, même raison.
+  if (f.getRange(1, 10).getValue() !== 'Taille') f.getRange(1, 10).setValue('Taille');
+  if (f.getRange(1, 11).getValue() !== 'Exemplaire') f.getRange(1, 11).setValue('Exemplaire');
+
+  var dern = f.getLastRow();
+  if (dern < 2) {
+    _indexCache = indexCache; _empreintesCache = empreintesCache; _empreintesParIdCache = empreintesParIdCache;
+    _indexLignesCache = lignesCache;
+    return;
+  }
+  // PERF (Vague 2, anti-gel) : ce cache n'utilise QUE la colonne A (clé) et la colonne G (empreinte),
+  // jamais B..F (date/nom/domaine/chemin/statut). Lire les 7 colonnes chargeait 3,5× trop de cellules
+  // à CHAQUE tick sur un Index qui croît (>10 800 lignes) — l'un des postes du « socle » non budgété
+  // qui pousse vers le mur ~90 min/j (revue de fond 2026-07-31). Deux lectures d'UNE colonne (A puis G)
+  // transfèrent ÷3,5 de données ; le round-trip supplémentaire est négligeable devant le volume.
+  var cles = f.getRange(2, 1, dern - 1, 1).getValues();        // colonne A (clé)
+  var empreintes = f.getRange(2, 7, dern - 1, 1).getValues();  // colonne G (empreinte)
+  for (var i = 0; i < cles.length; i++) {
+    if (cles[i][0]) { indexCache[cles[i][0]] = true; lignesCache[cles[i][0]] = i + 2; } // dernière gagnante (ADR-0071)
+    if (!empreintes[i][0]) continue;
+    empreintesCache[empreintes[i][0]] = true;
+    // DERNIÈRE ligne gagnante (revue sécurité #229) : l'Index est append-only, donc l'ordre des
+    // lignes est chronologique. Garder la PREMIÈRE ferait gagner l'empreinte la plus ANCIENNE — un
+    // fichier ré-analysé (`reanalyse|…`) après un `drive|…` aurait vu la périmée l'emporter. C'est
+    // aussi la sémantique de `indexAjouter_`, qui écrase avec la valeur la plus récente.
+    // ⚠️ C49-16 — CELUI-CI reste sur la CLÉ, et c'est une DÉCISION, pas un oubli. Ce cache ne
+    // lit que deux colonnes (A et G) pour une raison MESURÉE : lire les autres chargeait 3,5×
+    // trop de cellules à chaque tick sur un Index qui croît, et c'est l'un des postes du socle
+    // non budgété qui pousse vers le mur des ~90 min/j. Ajouter la colonne I pour couvrir les
+    // pièces jointes Gmail est possible et ne coûterait qu'un aller-retour — mais ce cache n'est
+    // qu'un RACCOURCI de performance (`empreinteConnueParId_` ; `Reset.gs` recalcule le hash en
+    // repli), donc l'écart ne perd aucune donnée. Noté au BACKLOG plutôt que fait ici.
+    var fid = fileIdDeCleIndex_(cles[i][0]);
+    if (fid) empreintesParIdCache[fid] = String(empreintes[i][0]);
+  }
+  _indexCache = indexCache;
+  _empreintesCache = empreintesCache;
+  _empreintesParIdCache = empreintesParIdCache;
+  _indexLignesCache = lignesCache;
+}
+
+/**
+ * ADR-0071 — numéro de ligne (dernière occurrence) d'une clé de l'Index, 0 si inconnu : absente, ajoutée pendant ce
+ * run, ou cache non chargé. Ne lit pas la Sheet : le numéro vient de la colonne A que le cache lit déjà.
+ * @param {string} cle
+ * @return {number}
+ */
+function indexLigneDe_(cle) {
+  if (_indexLignesCache === null) chargerIndexCache_();
+  return _indexLignesCache[cle] || 0;
+}
+
+/**
+ * ADR-0071 — relit UNE ligne de l'Index (6 cellules A..F) et vérifie que sa clé est bien celle attendue : si l'onglet a
+ * bougé depuis la lecture de la colonne A (purge `tri|`), on ne décide pas. Peut lever (Sheet indisponible) : l'appelant
+ * journalise et laisse le fichier en place.
+ * @param {string} cle
+ * @return {?{cle:string, date:*, nom:string, domaine:string, chemin:string, statut:string}} null si introuvable ou changée
+ */
+function lireLigneIndex_(cle) {
+  var n = indexLigneDe_(cle);
+  if (!n) return null;
+  var v = feuille_('Index').getRange(n, 1, 1, 6).getValues()[0];
+  if (String(v[0]) !== cle) return null;
+  return { cle: String(v[0]), date: v[1], nom: String(v[2]), domaine: String(v[3]), chemin: String(v[4]), statut: String(v[5]) };
+}
+
+/**
+ * @return {boolean} vrai si la clé est déjà dans l'Index.
+ * NB. ÉPINGLÉ Marc (C28-30/ADR-0026) : un fichier rangé à la main via le chat porte la clé DÉDIÉE
+ * `epingle|<fileId>` (posée par Reorg.appliquerDeplacerFichier_). Les prédicats de re-rangement auto
+ * (consolidation, migration, réanalyse, grand rangement) testent cette PRÉSENCE via `indexContient_`
+ * pour l'IMMUNISER (convergence). Clé dédiée car `drive|<fileId>` est déjà le namespace des dépôts
+ * classés (le réutiliser sur-filtrerait) et aucun helper ne lit le statut par clé.
+ */
+function indexContient_(cle) {
+  if (_indexCache === null) chargerIndexCache_();
+  return _indexCache[cle] === true;
+}
+
+/** @return {boolean} vrai si cette empreinte de contenu a déjà été vue (doublon). */
+function estDoublon_(empreinte) {
+  // ADR-0072 : le MD5 du contenu vide n'identifie rien, même si une ligne d'avant le correctif l'a inscrit.
+  if (empreinte === CONFIG.EMPREINTE_CONTENU_VIDE) return false;
+  if (_empreintesCache === null) chargerIndexCache_();
+  return _empreintesCache[empreinte] === true;
+}
+
+/**
+ * ADR-0070 — « cette empreinte a-t-elle ENCORE un exemplaire, et LEQUEL ? ». `estDoublon_` répond à « déjà vue »,
+ * jamais à « encore là » : un fichier classé puis corbeillé laissait son empreinte, et le même contenu redéposé partait
+ * en `_Doublons` sans aucune copie classée. `vivant` est faux seulement si TOUS les exemplaires connus sont PROUVÉS
+ * morts ; `fileId` est l'exemplaire PROUVÉ vivant, ou '' dans le doute (exemplaire inconnu, lecture qui échoue, budget
+ * épuisé). ADR-0077 : le pipeline n'écarte un doublon que sur un exemplaire prouvé, jamais « dans le doute ».
+ * `meta` (DriveAI#897) = les métadonnées Drive de l'exemplaire nommé (taille, md5, corbeille, parents), lues par la
+ * preuve de vie, présentes seulement quand un exemplaire est nommé.
+ * Ne lève jamais : un contrôle qui casse ne doit pas bloquer le pipeline.
+ * @param {string} empreinte  déjà vue (`estDoublon_` vrai)
+ * @return {{vivant:boolean, fileId:string, meta:(Object|null|undefined)}}
+ */
+function porteurVivantDe_(empreinte) {
+  try {
+    if (_lignesEmpreinteCache === null) _lignesEmpreinteCache = lireLignesEmpreinte_();
+    var candidats = candidatsPorteurs_(_lignesEmpreinteCache, empreinte);
+    var porteur = decisionPorteurVivant_(candidats, etatPorteurBorne_, CONFIG.PORTEUR_CANDIDATS_MAX);
+    // DriveAI#897 : les métadonnées de l'exemplaire prouvé vivant voyagent avec lui (même `files.get` que la preuve).
+    if (porteur.fileId) porteur.meta = metaPorteurRun_(porteur.fileId);
+    return porteur;
+  } catch (e) {
+    if (_lignesEmpreinteCache === null) _lignesEmpreinteCache = []; // une panne de lecture ne se rejoue pas à chaque doublon
+    journalErreur_('Pipeline', 'Contrôle de l\'exemplaire d\'un doublon impossible (' + e + ') — aucun exemplaire prouvé.');
+    return { vivant: true, fileId: '' };
+  }
+}
+
+/** Lignes d'Index qui portent une empreinte : { cle, statut, empreinte, fileId } (A, F, G, I — une lecture par colonne). */
+function lireLignesEmpreinte_() {
+  var f = feuille_('Index');
+  var dern = f.getLastRow();
+  if (dern < 2) return [];
+  var n = dern - 1;
+  var cles = f.getRange(2, 1, n, 1).getValues();
+  var statuts = f.getRange(2, 6, n, 1).getValues();
+  var empreintes = f.getRange(2, 7, n, 1).getValues();
+  var ids = f.getRange(2, 9, n, 1).getValues();
+  var lignes = [];
+  for (var i = 0; i < n; i++) {
+    if (!empreintes[i][0]) continue;
+    lignes.push({
+      cle: String(cles[i][0]), statut: String(statuts[i][0]), empreinte: String(empreintes[i][0]),
+      fileId: fileIdDeLigneIndex_({ cle: cles[i][0], fileId: ids[i][0] })
+    });
+  }
+  return lignes;
+}
+
+/**
+ * PURE. Les exemplaires qui peuvent porter cette empreinte : les fileId distincts des lignes qui la portent, les plus
+ * récentes d'abord, SANS les lignes au statut `doublon` (leur fichier est dans `_Doublons` par construction). Une ligne
+ * sans fileId déductible (ancienne pièce jointe Gmail) rend le porteur INCONNU : on ne peut pas dire qu'il a disparu.
+ * @param {Array<{cle:string, statut:string, empreinte:string, fileId:string}>} lignes  dans l'ordre de l'Index (chronologique)
+ * @param {string} empreinte
+ * @return {{fileIds:string[], inconnu:boolean}}
+ */
+function candidatsPorteurs_(lignes, empreinte) {
+  var vus = {};
+  var fileIds = [];
+  var inconnu = false;
+  for (var i = lignes.length - 1; i >= 0; i--) {
+    var l = lignes[i];
+    if (l.empreinte !== empreinte || l.statut === 'doublon') continue;
+    if (!l.fileId) { inconnu = true; continue; }
+    if (vus[l.fileId]) continue;
+    vus[l.fileId] = true;
+    fileIds.push(l.fileId);
+  }
+  return { fileIds: fileIds, inconnu: inconnu };
+}
+
+/**
+ * PURE. `vivant` faux seulement si TOUS les exemplaires connus sont prouvés morts (et aucun inconnu) ; `fileId` = le
+ * premier exemplaire PROUVÉ vivant (plus récent d'abord), '' dans le doute : aucun exemplaire identifiable, trop
+ * d'exemplaires pour les prouver tous, état `inconnu`, ou seulement des lignes sans fileId. S'arrête au premier vivant
+ * (aucun contrôle Drive de plus) ; un exemplaire inconnu n'empêche pas de chercher un vivant parmi les connus.
+ * @param {{fileIds:string[], inconnu:boolean}} candidats
+ * @param {function(string):string} etatDe  'vivant' | 'mort' | 'inconnu' (seul 'mort' est une preuve de mort)
+ * @param {number} max  nombre maximal d'exemplaires vérifiés pour une empreinte
+ * @return {{vivant:boolean, fileId:string}}
+ */
+function decisionPorteurVivant_(candidats, etatDe, max) {
+  // ADR-0077 : on cherche UN vivant parmi les `max` exemplaires les plus récents (un inconnu ne masque pas un vivant
+  // plus ancien) ; « tous morts » n'est prouvé que si chacun l'est et qu'aucun candidat n'a été laissé de côté.
+  var incertain = candidats.inconnu || candidats.fileIds.length > max;
+  var n = Math.min(candidats.fileIds.length, max);
+  for (var i = 0; i < n; i++) {
+    var etat = etatDe(candidats.fileIds[i]);
+    if (etat === 'vivant') return { vivant: true, fileId: candidats.fileIds[i] };
+    if (etat !== 'mort') incertain = true;
+  }
+  return incertain || n === 0 ? { vivant: true, fileId: '' } : { vivant: false, fileId: '' };
+}
+
+/**
+ * PURE — état d'un exemplaire d'après ses métadonnées Drive (`metaFichierRest_`, DriveAI#897 : `trashed` et `parents`
+ * du MÊME `files.get` que la taille et le md5). 'mort' = PROUVÉ : corbeille, ou tous ses parents sont `_Doublons`.
+ * Métadonnées illisibles (`null`) = 'inconnu' (jamais 'mort' : un fichier supprimé pour de bon répond 404 comme une
+ * panne). Sans parent connu (fichier orphelin, « partagé avec moi »), on ne peut pas le dire mort : 'vivant'.
+ * @param {{corbeille:boolean, parents:string[]}|null} meta
+ * @param {string} idDoublons  id de `_Doublons` ('' s'il n'existe pas)
+ * @return {string} 'vivant' | 'mort' | 'inconnu'
+ */
+function etatPorteurDoublon_(meta, idDoublons) {
+  if (!meta) return 'inconnu';
+  if (meta.corbeille === true) return 'mort';
+  if (!idDoublons) return 'vivant';
+  var parents = Array.isArray(meta.parents) ? meta.parents : [];
+  var ailleurs = 0;
+  for (var i = 0; i < parents.length; i++) if (parents[i] !== idDoublons) ailleurs++;
+  return parents.length > 0 && ailleurs === 0 ? 'mort' : 'vivant';
+}
+
+/** Métadonnées Drive des exemplaires relus pendant ce run, par fileId (`null` = illisibles) : UN `files.get` par exemplaire. */
+var _metaPorteursRun = {};
+
+/**
+ * `etatPorteurDoublon_` sur les métadonnées REST de l'exemplaire, mémorisé par fileId et borné à
+ * `CONFIG.PORTEUR_VERIF_MAX_RUN` lectures Drive par run. Les métadonnées restent en mémoire (`metaPorteurRun_`) pour
+ * que le verdict de doublon (`verdictDoublon_`, Pipeline) compare le md5 sans second appel.
+ */
+function etatPorteurBorne_(fileId) {
+  if (_etatsPorteursRun[fileId]) return _etatsPorteursRun[fileId];
+  if (_nbVerifsPorteursRun >= CONFIG.PORTEUR_VERIF_MAX_RUN) return 'inconnu';
+  _nbVerifsPorteursRun++;
+  if (_idDoublonsRun === undefined) {
+    try { _idDoublonsRun = idDoublonsSansCreer_() || ''; } catch (e) { _idDoublonsRun = ''; }
+  }
+  _metaPorteursRun[fileId] = metaFichierRest_(fileId);
+  _etatsPorteursRun[fileId] = etatPorteurDoublon_(_metaPorteursRun[fileId], _idDoublonsRun);
+  return _etatsPorteursRun[fileId];
+}
+
+/**
+ * Métadonnées Drive d'un exemplaire déjà relu ce run (preuve de vie), sinon lues maintenant (une fois par fileId).
+ * @param {string} fileId
+ * @return {{taille:(number|null), md5:string, corbeille:boolean, parents:string[]}|null}
+ */
+function metaPorteurRun_(fileId) {
+  if (!Object.prototype.hasOwnProperty.call(_metaPorteursRun, fileId)) _metaPorteursRun[fileId] = metaFichierRest_(fileId);
+  return _metaPorteursRun[fileId];
+}
+
+/**
+ * Enregistre un fichier traité. L'inscription Index (« c'est fini ») est écrite en DERNIER :
+ * si une coupure survient avant, la PJ reste non-indexée donc re-traitée (jamais perdue).
+ * (Le statut 'revue' n'est plus produit par le pipeline depuis 2026-07-01 — la branche Revue
+ * ci-dessous ne sert que d'éventuelle compat de lignes historiques.)
+ * @param {string} cle
+ * @param {{statut:string, domaine:string, chemin:string, nom:string}} resultat
+ * @param {string} [empreinte]  empreinte MD5 du contenu (détection de doublons)
+ * @param {{taille:(number|null), exemplaire:string}} [trace]  ADR-0077 : taille en octets (J) et, pour un doublon,
+ *   fileId de l'exemplaire vivant qui l'a fait écarter (K) — la preuve écrite
+ */
+function indexAjouter_(cle, resultat, empreinte, trace) {
+  feuille_('Index').appendRow([
+    cle, new Date(), resultat.nom, resultat.domaine || '', resultat.chemin || '',
+    resultat.statut, empreinte || '',
+    // #17 (App v3 « Documents ») : confiance du classement — vide pour tout ce qui n'est pas
+    // une classification LLM (mails, doublons, quarantaine…).
+    resultat.confiance != null && resultat.confiance !== '' ? resultat.confiance : '',
+    // ⚠️ C49-16 — LE `fileId` NE SE DÉDUIT PLUS DE LA CLÉ. La clé d'une pièce jointe Gmail est
+    // `<messageId>|<rang>|<nom>|<taille>` : elle n'en porte aucun, alors que le fichier EST dans
+    // le Drive. Mesuré le 17/09 : 734 lignes CLASSÉES invisibles au périmètre des pièces, à la
+    // lecture et au canal Mémoire — c'est-à-dire l'intake PRINCIPAL du moteur, hors de tout.
+    // Le fileId est en main trois lignes avant cet appel (`src.placer` le rend) : on l'écrit.
+    resultat.fileId || '',
+    trace && typeof trace.taille === 'number' ? trace.taille : '',   // J (ADR-0077)
+    trace && trace.exemplaire ? trace.exemplaire : ''                // K (ADR-0077)
+  ]);
+  if (_indexCache !== null) _indexCache[cle] = true;
+  if (_indexLignesCache !== null) _indexLignesCache[cle] = 0; // ADR-0071 : ligne ajoutée dans ce run, numéro non suivi
+  if (_empreintesCache !== null && empreinte) _empreintesCache[empreinte] = true;
+  if (_empreintesParIdCache !== null && empreinte) {
+    // ⚠️ C49-16 — MIGRÉ : le fileId est en main trois lignes plus haut (`resultat.fileId`), donc
+    // la déduction par la clé n'a plus lieu d'être. Effet de bord VOULU : le cache couvre
+    // désormais les pièces jointes Gmail, qui en étaient exclues — autant de hachages qu'on ne
+    // repaiera pas.
+    var fid = fileIdDeLigneIndex_({ cle: cle, fileId: resultat.fileId });
+    if (fid) _empreintesParIdCache[fid] = empreinte;
+  }
+}
+
+/**
+ * PURGE les lignes d'ÉTAT DU TRI d'un fil (clés `tri|<threadId>|…`) pour forcer son re-tri —
+ * « pas suspect » 1-clic (C28-19, ADR-0020). Ne touche QUE des lignes d'état du tri Gmail,
+ * jamais une ligne documentaire ; appelée SOUS le verrou du tick (appliquerPasSuspect_), jamais
+ * depuis doPost. Ordre décroissant (pas de décalage d'indices) ; cache du run invalidé.
+ * @param {string} threadId
+ * @return {number} lignes purgées
+ */
+function purgerClesTriIndex_(threadId) {
+  var f = feuille_('Index');
+  var dern = f.getLastRow();
+  if (dern < 2) return 0;
+  var prefixe = 'tri|' + threadId + '|';
+  var v = f.getRange(2, 1, dern - 1, 1).getValues();
+  var lignes = [];
+  for (var i = 0; i < v.length; i++) {
+    if (String(v[i][0]).indexOf(prefixe) === 0) lignes.push(i + 2);
+  }
+  for (var j = lignes.length - 1; j >= 0; j--) f.deleteRow(lignes[j]);
+  if (lignes.length > 0) _indexLignesCache = null;
+  if (_indexCache !== null) {
+    for (var k in _indexCache) { if (k.indexOf(prefixe) === 0) delete _indexCache[k]; }
+  }
+  return lignes.length;
+}
+
+/* ---------- Quarantaine (compteur d'échecs) ---------- */
+
+/** Charge l'onglet « Échecs » en cache (clé → {tentatives, ligne}) — 1× par run. */
+function chargerEchecsCache_() {
+  _echecsCache = {};
+  var f = feuille_('Échecs');
+  var dern = f.getLastRow();
+  if (dern < 2) return;
+  var v = f.getRange(2, 1, dern - 1, 2).getValues(); // A=Clé, B=Tentatives
+  for (var i = 0; i < v.length; i++) {
+    if (v[i][0]) _echecsCache[v[i][0]] = { tentatives: Number(v[i][1]) || 0, ligne: i + 2 };
+  }
+}
+
+/**
+ * Incrémente le compteur d'échecs d'une clé et renvoie le nouveau total. Crée la ligne si absente.
+ * @param {string} cle
+ * @return {number} nombre de tentatives échouées (incluant celle-ci).
+ */
+function incrementerEchec_(cle) {
+  if (_echecsCache === null) chargerEchecsCache_();
+  var f = feuille_('Échecs');
+  var e = _echecsCache[cle];
+  if (e) {
+    e.tentatives += 1;
+    f.getRange(e.ligne, 2, 1, 2).setValues([[e.tentatives, new Date()]]);
+    return e.tentatives;
+  }
+  f.appendRow([cle, 1, new Date()]);
+  _echecsCache[cle] = { tentatives: 1, ligne: f.getLastRow() };
+  return 1;
+}
+// (Pas d'effacement sur succès : un doc qui réussit est inscrit à l'Index avec un statut
+//  terminal → jamais re-traité, donc son compteur d'échecs devient mort. On évite ainsi de
+//  charger l'onglet « Échecs » sur le chemin nominal — il n'est touché que lors d'un échec.)

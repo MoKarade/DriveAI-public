@@ -1,0 +1,219 @@
+name: Deploy
+
+# Déploie automatiquement le moteur (src/) dans le projet Apps Script de Marc à
+# chaque arrivée sur `main` (donc après la fusion d'une PR verte par Mergify). Plus aucun
+# `clasp push` manuel.
+#
+# Configuration UNIQUE côté Marc (3 min, une seule fois) — voir docs/DEPLOIEMENT.md :
+#   Settings → Secrets and variables → Actions → New repository secret :
+#     - CLASPRC_JSON         : le contenu de ~/.clasprc.json (généré par `clasp login`)
+#     - SCRIPT_ID            : l'ID du projet Apps Script (depuis .clasp.json local)
+#     - WEBAPP_DEPLOYMENT_ID : (OPTIONNEL) l'ID `AKfycb…` de l'URL /exec de la web app →
+#         redéploie AUTOMATIQUEMENT la web app (Nouvelle version) à chaque merge touchant
+#         WebApp.gs. Absent = redéploiement manuel requis (repli, aucun échec rouge).
+# Tant que CLASPRC_JSON/SCRIPT_ID sont absents, le job se contente d'un message et réussit.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-appsscript
+  cancel-in-progress: false # ne jamais interrompre un clasp push en cours (état partiel)
+
+jobs:
+  deploy:
+    # Plafond : sans lui, un job fige tourne SIX HEURES avant d'echouer (vecu sur
+    # DriveAI le 19/08/2026). Calibre sur la duree reelle — non observe - pousse vers Apps Script.
+    timeout-minutes: 20
+    # « Déploiement » dans le NOM : le garde-fou de preuve (scripts/preuve.mjs de MoKarade/.github) n'accepte
+    # qu'un job réussi dont le nom contient « déploi » ou « deploy ». Sans ce mot, chaque tâche fermée était
+    # rouverte `preuve-manquante` alors que ce job était vert (six tâches le 05/11/2026). Verrou : test/pilote-ci.test.js.
+    name: Déploiement — clasp push (Apps Script)
+    runs-on: ${{ (github.event.repository.visibility == 'private' && vars.RUNNER_CI == 'pc') && fromJSON('["self-hosted","pc-marc"]') || 'ubuntu-latest' }} # machines GitHub ; le robot du PC seulement si la variable de dépôt RUNNER_CI vaut « pc » (dépôt privé)
+    steps:
+      - name: Vérifier la configuration de déploiement
+        id: guard
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ] || [ -z "$SCRIPT_ID" ]; then
+            echo "::notice::Déploiement auto non configuré (secrets CLASPRC_JSON / SCRIPT_ID absents). Voir docs/DEPLOIEMENT.md. On saute."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.guard.outputs.ready == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # [CI-PERSIST-CREDS] `actions/checkout` v2+ écrit le GITHUB_TOKEN dans la config git du
+          # runner POUR TOUT LE RESTE DU RUN : n'importe quelle étape suivante, y compris une
+          # action tierce, peut le lire. Vérifié un par un : aucun workflow de ce dépôt ne fait
+          # de `git push` ni d'appel `gh`, donc aucun n'a besoin du jeton persisté.
+          persist-credentials: false
+          # Historique complet : l'étape « Le moteur a-t-il changé ? » compare ce push à l'état
+          # précédent de `main`. Sans lui, le commit `before` n'existe pas dans le clone.
+          fetch-depth: 0
+
+      - name: Node
+        if: steps.guard.outputs.ready == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '20' # clasp v3 échoue « Premature close » en Node 22 ; 20 fonctionne
+
+      - name: Installer clasp
+        if: steps.guard.outputs.ready == 'true'
+        # [CI-VERSION-FIGEE] Version EXACTE, et non `@latest` implicite : sans elle, une
+        # publication majeure de clasp change le comportement du déploiement sans qu'une
+        # ligne du dépôt n'ait bougé. 3.4.1 relevée sur le registre le 18/09 (`npm view`),
+        # jamais devinée. À monter volontairement, en lisant le changelog.
+        #
+        # [CI-IGNORE-SCRIPTS] Et `--ignore-scripts`, qui manquait : une installation GLOBALE
+        # exécute les scripts du paquet avec les droits du runner, celui-là même qui porte
+        # `CLASPRC_JSON` et `SCRIPT_ID` deux étapes plus bas. Mesuré avant d'être posé (18/09) :
+        # clasp 3.4.1 ne déclare qu'un `prepare` (jamais exécuté à l'installation d'un paquet
+        # publié — il tourne à l'empaquetage), aucun `install` ni `postinstall` ; installé avec
+        # le drapeau, `clasp --version` rend bien « 3.4.1 ».
+        run: npm install -g @google/clasp@3.4.1 --ignore-scripts
+
+      - name: Authentifier clasp + cibler le projet
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID }}
+        run: |
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          printf '{ "scriptId": "%s", "rootDir": "src" }\n' "$SCRIPT_ID" > .clasp.json
+
+      # [CI-SIGNAL-VERSION] Date le code poussé : `Version.gs` reçoit le SHA court de CE commit, donc
+      # `versionPilote_()` change à chaque déploiement et la dernière étape peut vérifier que `/exec`
+      # sert le code du jour (BACKLOG C49-24). Le fichier modifié n'est jamais committé (clone du runner).
+      - name: Dater le code poussé
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          sed -i "s/^var COMMIT_DEPLOYE = .*/var COMMIT_DEPLOYE = '${GITHUB_SHA:0:7}';/" src/Version.gs
+          grep -qx "var COMMIT_DEPLOYE = '${GITHUB_SHA:0:7}';" src/Version.gs
+
+      - name: Pousser le code
+        id: push
+        if: steps.guard.outputs.ready == 'true'
+        run: clasp push --force || (sleep 5 && clasp push --force) # retry léger (erreurs réseau transitoires)
+
+      # [CI-VERSIONS-200] Chaque `clasp deploy` crée une version, et Apps Script en plafonne le nombre
+      # à 200. Or ce workflow tourne à CHAQUE arrivée sur `main`, y compris pour une PR qui ne touche
+      # ni `src/` ni `appsscript.json` (app/, docs/, test/…) : le plafond se remplissait pour rien et
+      # `deploy.yml` est tombé rouge le 21/09/2026. On ne redéploie donc la web app que si `src/` a
+      # bougé. ÉCHEC OUVERT vers le déploiement : push sans commit précédent, lancement manuel ou
+      # comparaison impossible → on déploie (une version de trop coûte moins qu'un /exec périmé).
+      # `appsscript.json` vit dans `src/` (rootDir de clasp) : le chemin `src` le couvre.
+      - name: Le moteur a-t-il changé ?
+        id: moteur
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          change=true
+          if [ "$EVENT" != "push" ] || [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "::notice::Pas de commit précédent exploitable (événement : $EVENT) — on redéploie."
+          elif ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "::notice::Commit précédent introuvable dans le clone — on redéploie."
+          elif git diff --quiet "$BEFORE" "$GITHUB_SHA" -- src; then
+            change=false
+            echo "::notice::Rien n'a changé sous src/ depuis ${BEFORE:0:7} — web app NON redéployée (économise une des 200 versions Apps Script)."
+          else
+            echo "src/ a changé depuis ${BEFORE:0:7} — la web app sera redéployée."
+          fi
+          echo "change=$change" >> "$GITHUB_OUTPUT"
+
+      # Redéploie la WEB APP `/exec` en NOUVELLE VERSION (décision Marc 2026-07-24 « fais le », après
+      # 2 redéploiements manuels vécus). Sans ça, `clasp push` met à jour le HEAD mais `/exec` sert
+      # l'ANCIENNE version → toute nouvelle action `doPost` (ex. `chat-assistant`) tombe en silence
+      # (leçon 2026-07-24). `clasp deploy` = alias de `create-deployment` (clasp v3) ; `-i` redéploie
+      # le MÊME deploymentId → l'URL /exec NE CHANGE PAS (rien à retoucher dans l'app/Vercel).
+      # Secret OPTIONNEL : tant que WEBAPP_DEPLOYMENT_ID est absent, on saute (le redéploiement manuel
+      # reste le repli — aucun échec rouge). L'ID = la partie `AKfycb…` de l'URL /exec (voir DEPLOIEMENT.md).
+      - name: Redéployer la web app (/exec inchangé)
+        id: redeploiement
+        if: steps.guard.outputs.ready == 'true' && steps.moteur.outputs.change == 'true'
+        env:
+          WEBAPP_DEPLOYMENT_ID: ${{ secrets.WEBAPP_DEPLOYMENT_ID }}
+        run: |
+          if [ -z "$WEBAPP_DEPLOYMENT_ID" ]; then
+            echo "::notice::WEBAPP_DEPLOYMENT_ID absent — web app /exec NON redéployée auto (redéploiement manuel requis après un changement de WebApp.gs). Voir docs/DEPLOIEMENT.md."
+            exit 0
+          fi
+          clasp deploy -i "$WEBAPP_DEPLOYMENT_ID" -d "auto ${GITHUB_SHA}" \
+            || (sleep 5 && clasp deploy -i "$WEBAPP_DEPLOYMENT_ID" -d "auto ${GITHUB_SHA}")
+          echo "deploye=true" >> "$GITHUB_OUTPUT"
+
+      # Ré-installe le DÉCLENCHEUR (ADR-0032) — c'était le DERNIER geste manuel de Marc : ouvrir
+      # l'éditeur → `Main.gs` → `installerTrigger`. Sans lui, `clasp push` peut être vert pendant que
+      # le déclencheur continue d'exécuter la version PRÉCÉDEMMENT chargée (piège de déploiement (3) :
+      # ~4 jours de prod figée vécus, CI verte, zéro erreur). Supprimer/recréer le déclencheur force
+      # le rechargement. Placé APRÈS le redéploiement de la web app : c'est la NOUVELLE version qui
+      # doit servir l'action. Jamais bloquant (le code est poussé de toute façon).
+      #
+      # ⚠️ [CI-TRIGGER-APRES-PUSH] La condition suit le PUSH, jamais le DEPLOY — et c'est `always()`
+      # qui le permet. Sans lui, GitHub Actions SAUTE cette étape dès qu'une étape amont échoue :
+      # le 21/09/2026, `clasp deploy` a buté sur les 200 versions d'Apps Script, le déclencheur n'a
+      # donc pas été réinstallé, et le tick a continué d'exécuter l'ANCIEN code — mesuré sur les
+      # ticks de 20:38 et 20:44 UTC, postérieurs au push de 20:39:36 : la ligne de Santé attendue
+      # était absente. Autrement dit, N'IMPORTE QUEL échec du redéploiement de la web app (quota,
+      # réseau, secret) figeait le moteur en silence. `steps.push.outcome == 'success'` est la
+      # bonne condition : ce qui décide du code exécuté par le TICK, c'est le push.
+      - name: Assurer le déclencheur (fin du geste manuel)
+        id: declencheur
+        if: always() && steps.push.outcome == 'success'
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.DRIVEAI_WEBAPP_URL }}
+          SECRET: ${{ secrets.DRIVEAI_SYNC_SECRET }}
+        run: |
+          set -uo pipefail
+          if [ -z "${URL:-}" ] || [ -z "${SECRET:-}" ]; then
+            echo "::notice::DRIVEAI_WEBAPP_URL / DRIVEAI_SYNC_SECRET absents — déclencheur non réinstallé automatiquement."
+            exit 0
+          fi
+          rm -f /tmp/trigger.json # un fichier d'un run précédent (runner persistant) ne doit pas passer pour la réponse
+          SECRET_ENC="$(jq -rn --arg s "$SECRET" '$s|@uri')"
+          # PAS de `-X POST` avec `-L` (405 sur la redirection /macros/echo — leçon vécue).
+          CODE="$(curl -sS -L --max-time 120 -o /tmp/trigger.json -w '%{http_code}' \
+            "${URL}?action=assurer-trigger&secret=${SECRET_ENC}" \
+            -H 'Content-Type: text/plain;charset=utf-8' --data-binary '{}' || echo "000")"
+          # SIGNAL INDÉPENDANT (leçon « un déploiement vert ne prouve rien ») : le champ `version`
+          # n'existe que dans la version qui connaît l'action. Absent ⇒ /exec sert encore l'ancienne
+          # (piège (4) : l'appel tombe dans le `else` du doPost et « réussit » en silence).
+          if [ "$CODE" = "200" ] && jq -e '.ok == true and (.version | type == "string")' /tmp/trigger.json >/dev/null 2>&1; then
+            echo "Déclencheur réinstallé — version servie : $(jq -r '.version' /tmp/trigger.json)"
+            echo "servi=$(jq -r '.version' /tmp/trigger.json)" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Déclencheur NON confirmé (HTTP $CODE). Si ça persiste, la web app /exec n'est pas redéployée. Extrait : $(head -c 200 /tmp/trigger.json)"
+          fi
+
+      # [CI-SIGNAL-VERSION] Un redéploiement vert ne prouve pas que `/exec` sert le code du jour
+      # (BACKLOG C49-24). Quand CE run vient de créer une version, la réponse de `assurer-trigger`
+      # doit se terminer par le SHA court de CE commit ; sinon `/exec` sert encore l'ancienne et
+      # l'étape ÉCHOUE — le run devient rouge au lieu de laisser croire que c'est en ligne.
+      # Ne s'applique pas quand la web app n'a pas été redéployée (src/ inchangé, secret absent).
+      - name: Vérifier que /exec sert le commit déployé
+        if: always() && steps.redeploiement.outputs.deploye == 'true'
+        env:
+          SERVI: ${{ steps.declencheur.outputs.servi }}
+        run: |
+          attendu="${GITHUB_SHA:0:7}"
+          if [ -z "${SERVI:-}" ]; then
+            echo "::error::Version servie par /exec inconnue (déclencheur non confirmé) — impossible de prouver que $attendu est en ligne."
+            exit 1
+          fi
+          case "$SERVI" in
+            *"|$attendu") echo "/exec sert bien $attendu ($SERVI)." ;;
+            *) echo "::error::/exec sert « $SERVI » alors que le commit déployé est $attendu — la web app n'a pas pris la nouvelle version."; exit 1 ;;
+          esac

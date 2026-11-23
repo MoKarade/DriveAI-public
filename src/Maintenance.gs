@@ -1,0 +1,1200 @@
+/**
+ * Maintenance.gs — Utilitaires à exécuter À LA MAIN (pas dans le pipeline auto).
+ *
+ * Outils ponctuels (ex. `dequarantaine`, `rangerToutLeDrive`) + la mécanique du GRAND RANGEMENT
+ * (collecte/progression) que le tick pilote via `appliquerRangementInitial_` (Main.gs).
+ */
+
+/**
+ * Sort de quarantaine TOUS les documents (statut Index « quarantaine ») : retire leur ligne
+ * d'Index ET leur ligne « Échecs », puis relance le pipeline pour les re-traiter. Utile après une
+ * panne transitoire (Gmail/Drive momentanément indisponible) ayant quarantiné à tort un doc sain.
+ *
+ * À lancer À LA MAIN (un clic). Le tick, lui, appelle `dequarantainerLignes_` (le noyau) — JAMAIS
+ * cette fonction : le `tickDriveAI()` final serait RÉENTRANT depuis le tick (verrou relâché par le
+ * `finally` du tick imbriqué → anti-chevauchement neutralisé — bloquant revue R3).
+ */
+function dequarantaine() {
+  if (dequarantainerLignes_() > 0) tickDriveAI();
+}
+
+/**
+ * Noyau de la dé-quarantaine : purge les LIGNES d'état (jamais un fichier). Aucune suppression de
+ * fichier : un dépôt quarantiné est resté dans `00·À trier` (re-collecté au prochain tick) ; une PJ
+ * Gmail est re-cherchée dans la fenêtre 30 j.
+ *
+ * `prefixe` (tick, R3) : ne libère que les clés re-PRÉSENTABLES par une source (`drive|` — le
+ * fichier est physiquement dans 00·À trier). Sans préfixe (manuel), tout est libéré — mais une clé
+ * Gmail/partage hors fenêtre ou de campagne figée est libérée « dans le vide » (plus visible dans
+ * la liste Relancer de l'app, source qui ne la re-présentera pas) : c'est le geste ASSUMÉ du clic
+ * manuel, jamais celui du tick.
+ *
+ * Ordre des écritures : les compteurs « Échecs » d'abord, la ligne Index (l'état « quarantainé »)
+ * en DERNIER — une coupure au milieu laisse le doc encore quarantainé et un re-run répare ;
+ * l'inverse laisserait un compteur orphelin à 3 → re-quarantaine au 1ᵉʳ échec transitoire.
+ * Lignes supprimées en ordre DÉCROISSANT (pas de décalage), puis caches Index/Échecs invalidés
+ * (le tick peut nous appeler APRÈS leur chargement — sans invalidation, `incrementerEchec_`
+ * écrirait sur des numéros de ligne périmés).
+ * @param {string} [prefixe]  ne libérer que les clés commençant par ce préfixe (ex. 'drive|')
+ * @return {number} nombre de documents libérés
+ */
+function dequarantainerLignes_(prefixe) {
+  var f = feuille_('Index');
+  var dern = f.getLastRow();
+  var cles = {}, lignes = [];
+  if (dern >= 2) {
+    var v = f.getRange(2, 1, dern - 1, 6).getValues(); // A=Clé … F=Statut
+    for (var i = 0; i < v.length; i++) {
+      if (v[i][5] !== 'quarantaine') continue;
+      if (prefixe && String(v[i][0]).indexOf(prefixe) !== 0) continue;
+      cles[v[i][0]] = true;
+      lignes.push(i + 2);
+    }
+  }
+  if (!lignes.length) { journalInfo_('Maintenance', 'Aucun document en quarantaine' + (prefixe ? ' (' + prefixe + ')' : '') + '.'); return 0; }
+
+  // 1) Compteurs « Échecs » (sinon le doc repartirait avec un compteur déjà à 3 → re-quarantaine
+  //    au 1ᵉʳ nouvel échec, même transitoire).
+  var fe = feuille_('Échecs');
+  var derE = fe.getLastRow();
+  if (derE >= 2) {
+    var ve = fe.getRange(2, 1, derE - 1, 1).getValues(); // A=Clé
+    var lignesE = [];
+    for (var j = 0; j < ve.length; j++) { if (cles[ve[j][0]]) lignesE.push(j + 2); }
+    lignesE.sort(function (a, b) { return b - a; });
+    for (var m = 0; m < lignesE.length; m++) fe.deleteRow(lignesE[m]);
+  }
+
+  // 2) Lignes Index (l'état « quarantainé » tombe en dernier).
+  lignes.sort(function (a, b) { return b - a; });
+  for (var k = 0; k < lignes.length; k++) f.deleteRow(lignes[k]);
+
+  reinitialiserIndexCache_(); // caches Index + Échecs invalidés (lignes supprimées)
+  journalInfo_('Maintenance', lignes.length + ' document(s) sortis de quarantaine — re-traités au prochain run.');
+  return lignes.length;
+}
+
+/* ============================================================================
+ * GRAND RANGEMENT — réorganiser tout le contenu existant des domaines.
+ * ==========================================================================*/
+
+/**
+ * Passe tout le contenu DÉJÀ présent dans les 7 domaines à travers le pipeline.
+ *
+ * Pour chaque fichier « en vrac » (nom NON encore au format `AAAA-MM-JJ_…`), on le
+ * DÉPLACE vers `00·À trier` (réversible) ; l'intake le reprend ensuite (OCR → analyse
+ * approfondie → renommage → classement au bon endroit + sous-dossiers créés au besoin).
+ *
+ * Garde-fous (réutilise tout le pipeline, donc tous ses garde-fous) :
+ *   - DÉPLACEMENT seul, JAMAIS de suppression (le fichier reste dans le Drive) ;
+ *   - `04 · Immigration` (zone protégée) n'est JAMAIS parcourue ; et — garde-fou §1 —
+ *     tout fichier ayant ne serait-ce qu'UN parent dans (ou sous) un domaine protégé est
+ *     ÉCARTÉ : on ne le déplace pas, pour ne jamais le détacher de la zone protégée (cas
+ *     d'un fichier multi-parents). Plus de file de revue (décision Marc 2026-07-01) : tout doc
+ *     re-traité est CLASSÉ au mieux par le pipeline (sensible inclus) ; les médias sans texte
+ *     partent dans `_Médias` (ADR-0009 §2, cf. Pipeline.traiterDocument_) ;
+ *   - fichiers déjà normalisés (`AAAA-MM-JJ_…`) et fichiers Google natifs : SAUTÉS
+ *     (idempotent → relancer ne re-coûte rien, pas de churn) ;
+ *   - borné par le garde-temps partagé (coupure 6 min) ET par run (`RANGEMENT_MAX_PAR_RUN`) :
+ *     si la collecte est interrompue ou le plafond atteint, le Journal le dit → relancer
+ *     `rangerToutLeDrive()`. Couvre les 7 domaines + les racines `RANGEMENT_RACINES_SUP`
+ *     (ancien Drive « Ancienne structure »).
+ *
+ * Déclenché AUTOMATIQUEMENT (zéro clic) au déploiement via `CONFIG.RANGEMENT_TAG`
+ * (cf. Main.appliquerRangementInitial_), et reste lançable À LA MAIN pour un re-run ponctuel.
+ * Coût : OCR + LLM sur chaque fichier en vrac (one-shot, réparti sur plusieurs ticks).
+ */
+function rangerToutLeDrive() {
+  try {
+    var debut = Date.now();
+    var estBudgetDepasse = function () { return Date.now() - debut > CONFIG.BUDGET_MS; };
+    var r = rangerUnePage_(estBudgetDepasse, ensembleDomainesProteges_());
+    journalInfo_('Rangement', r.deplaces + ' fichier(s) en vrac renvoyé(s) dans 00·À trier pour reclassement' +
+      (r.reste ? ' (interrompu/plafond — relance rangerToutLeDrive()).' : '.'));
+
+    // Avance la barre (best-effort) si une campagne auto a déjà posé la base ; sinon sans effet.
+    if (r.deplaces) { try { majProgression_(r.deplaces); } catch (e) {} }
+    if (!r.reste && r.collectes === 0) { try { finaliserProgression_(); } catch (e) {} }
+
+    // Amorce le re-traitement SEULEMENT s'il reste du budget : tickDriveAI() repart sur son
+    // propre budget de 4.5 min ; l'enchaîner après un rangement déjà long dépasserait la limite
+    // dure de 6 min d'Apps Script. Sinon, les fichiers sont déjà dans 00·À trier → le trigger reprend.
+    if (r.deplaces && !estBudgetDepasse()) tickDriveAI();
+  } catch (e) {
+    notifierEchec_('Rangement', 'Grand rangement interrompu : ' + e);
+  }
+}
+
+/**
+ * UNE passe bornée du grand rangement : collecte (lecture seule) jusqu'à `RANGEMENT_MAX_PAR_RUN`
+ * fichiers en vrac dans les domaines NON protégés, puis les DÉPLACE vers `00·À trier`. Tout est
+ * borné par le garde-temps + le plafond/run, et reprenable (déplacement seul, idempotent au format).
+ * Partagé entre le lancement manuel (`rangerToutLeDrive`) et l'auto (`appliquerRangementInitial_`).
+ * @param {function():boolean} estBudgetDepasse
+ * @param {Object} proteges  ensemble {idDossierProtégé: true}
+ * @return {{deplaces:number, collectes:number, reste:boolean}}
+ */
+function rangerUnePage_(estBudgetDepasse, proteges) {
+  var ids = [];
+  // Une collecte qui ÉCHOUE (exception attrapée) ne doit JAMAIS ressembler à « 0 fichier = terminé » :
+  // sinon le rangement se fige « terminé » sans avoir rien rangé (incident r2, cf. P1-17). On trace donc
+  // l'erreur et on force `reste = true` (on réessaiera au prochain tick).
+  var erreurCollecte = false;
+
+  // 1) Racines supplémentaires (ancien Drive « Ancienne structure ») EN PREMIER : c'est le gros du
+  // travail restant. On les attaque avant les 7 domaines (déjà rangés, quasi tous normalisés) pour
+  // que la collecte atteigne bien les dossiers profonds au lieu de s'épuiser à re-parcourir le neuf.
+  var racinesSup = CONFIG.RANGEMENT_RACINES_SUP || [];
+  for (var r = 0; r < racinesSup.length && ids.length < CONFIG.RANGEMENT_MAX_PAR_RUN; r++) {
+    if (estBudgetDepasse()) break;
+    try {
+      collecterAReclasser_(
+        DriveApp.getFolderById(racinesSup[r]), ids, CONFIG.RANGEMENT_MAX_PAR_RUN, estBudgetDepasse, proteges);
+    } catch (e) {
+      erreurCollecte = true;
+      journalErreur_('Rangement', 'Racine supplémentaire inaccessible (' + racinesSup[r] + ') : ' + e);
+    }
+  }
+
+  // 2) Les domaines FIXES (contenu « en vrac » résiduel). On itère `Object.keys(CONFIG.DOMAINES)` et NON
+  // `domainesAutorises_()` : les domaines AUTO-créés (07 · Santé) n'ont pas d'ID fixe (→ `getFolderById(undefined)`
+  // lèverait, `erreurCollecte=true` à chaque passe → faux « non-terminé », le rangement ne convergerait
+  // jamais, cf. leçon P1-17) et n'ont de toute façon pas de vrac à re-collecter (ils sont peuplés par le
+  // pipeline). Mêmes garde-fous (zone protégée multi-parents, format normalisé sauté, garde-temps).
+  var domaines = Object.keys(CONFIG.DOMAINES);
+  for (var d = 0; d < domaines.length && ids.length < CONFIG.RANGEMENT_MAX_PAR_RUN; d++) {
+    if (estBudgetDepasse()) break;
+    var dom = domaines[d];
+    if (CONFIG.DOMAINES_PROTEGES.indexOf(dom) !== -1) continue; // zone protégée : intouchée
+    try {
+      collecterAReclasser_(
+        DriveApp.getFolderById(CONFIG.DOMAINES[dom]), ids, CONFIG.RANGEMENT_MAX_PAR_RUN, estBudgetDepasse, proteges);
+    } catch (e) {
+      erreurCollecte = true;
+      journalErreur_('Rangement', 'Domaine inaccessible (' + dom + ') : ' + e);
+    }
+  }
+
+  var collecteInterrompue = estBudgetDepasse();
+
+  var n = 0;
+  for (var i = 0; i < ids.length; i++) {
+    if (estBudgetDepasse()) { collecteInterrompue = true; break; }
+    if (deplacerVersATrier_(ids[i], proteges)) n++;
+  }
+
+  // NB : la barre de progression est orchestrée par l'appelant `appliquerRangementInitial_` (recensement
+  // dans un tick dédié + `majProgression_` après cette page), PAS ici — pour ne pas re-parcourir tout le
+  // Drive à chaque page (le recensement est one-shot). Le lancement MANUEL (`rangerToutLeDrive`) met la
+  // barre à jour lui-même, best-effort.
+  return {
+    deplaces: n,
+    collectes: ids.length,
+    // `erreurCollecte` ⇒ reste=true : une collecte incomplète (exception) n'est jamais un « terminé ».
+    reste: collecteInterrompue || erreurCollecte || ids.length >= CONFIG.RANGEMENT_MAX_PAR_RUN
+  };
+}
+
+/**
+ * Cumule l'avancement du rangement après une page : `TRAITES` += fichiers sortis, re-base au besoin.
+ * La base (total « en vrac » recensé une fois) est posée par l'appelant `appliquerRangementInitial_`.
+ * Depuis C28-18 les compteurs vivent dans les Properties SEULEMENT — le rendu Sheet est centralisé
+ * dans `majProgressions_` (finally du tick), plus aucune écriture d'affichage ici.
+ *
+ * Re-base : si on sort PLUS que le total recensé (fichiers ajoutés / redevenus en vrac après le
+ * recensement), la base suit `traites` — la barre ne dépasse jamais 100 % ni n'affiche « terminé » à
+ * tort. Le vrai « terminé » (100 %) est posé par `finaliserProgression_` sur le signal de fin réel.
+ * @param {number} deplacesCeRun
+ */
+function majProgression_(deplacesCeRun) {
+  majCompteurCampagne_('DriveAI_RANGEMENT', deplacesCeRun);
+}
+
+/**
+ * Fige les compteurs à 100 % (« terminé ») sur le VRAI signal de fin du rangement (une passe ne
+ * collecte plus rien) — plutôt que sur `traites >= base`, qui ne converge pas exactement.
+ */
+function finaliserProgression_() {
+  finaliserCompteurCampagne_('DriveAI_RANGEMENT');
+}
+
+/**
+ * Compteurs PARTAGÉS des barres de campagne (C28-18) : rangement, migration m1, re-analyse C26-08 —
+ * chacune sous son préfixe de Properties (`<prefixe>_BASE` / `<prefixe>_TRAITES`). Numérateur
+ * MONOTONE, base re-basable (jamais > 100 %). No-op tant que la base n'est pas recensée.
+ * @param {string} prefixe   ex. 'DriveAI_MIGRATION'
+ * @param {number} traitesCeRun
+ */
+function majCompteurCampagne_(prefixe, traitesCeRun) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty(prefixe + '_BASE') === null) return; // pas encore recensé → pas de barre
+  var base = Number(props.getProperty(prefixe + '_BASE')) || 0;
+  var traites = (Number(props.getProperty(prefixe + '_TRAITES')) || 0) + traitesCeRun;
+  if (traites > base) base = traites;               // re-base : le total suit (jamais > 100 %)
+  props.setProperty(prefixe + '_BASE', String(base));
+  props.setProperty(prefixe + '_TRAITES', String(traites));
+}
+
+/** Fige une barre de campagne à 100 % sur le VRAI signal de fin (passe qui ne collecte plus rien). */
+function finaliserCompteurCampagne_(prefixe) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty(prefixe + '_BASE') === null) return;
+  var base = Number(props.getProperty(prefixe + '_BASE')) || 0;
+  var traites = Number(props.getProperty(prefixe + '_TRAITES')) || 0;
+  if (traites > base) base = traites;
+  props.setProperty(prefixe + '_BASE', String(base));
+  props.setProperty(prefixe + '_TRAITES', String(base));
+}
+
+/**
+ * Recense (compte, sans rien déplacer) les fichiers « en vrac » restant dans les racines
+ * supplémentaires. Borné par le garde-temps et un plafond dur (anti-emballement mémoire/temps).
+ * @return {{n:number, complet:boolean}}
+ */
+function compterVracRacines_(estBudgetDepasse) {
+  var racinesSup = CONFIG.RANGEMENT_RACINES_SUP || [];
+  var etat = { n: 0, complet: true };
+  for (var r = 0; r < racinesSup.length; r++) {
+    if (estBudgetDepasse()) { etat.complet = false; break; }
+    try {
+      compterVracDossier_(DriveApp.getFolderById(racinesSup[r]), etat, estBudgetDepasse);
+    } catch (e) {
+      etat.complet = false; // racine illisible → recensement non fiable, on réessaiera
+    }
+  }
+  return etat;
+}
+
+/**
+ * Compte récursif des fichiers « à reclasser » d'un dossier (lecture seule, borné). Utilise le
+ * prédicat LÉGER `estAReclasserLeger_` (name + mime, SANS getParents par fichier) — sinon, sur un
+ * gros Drive, le recensement ne finirait jamais dans le budget d'un run.
+ */
+function compterVracDossier_(dossier, etat, estBudgetDepasse) {
+  if (etat.n > 20000) { etat.complet = false; return; } // plafond dur de sécurité
+  var fi = dossier.getFiles();
+  while (fi.hasNext()) {
+    if (estBudgetDepasse()) { etat.complet = false; return; }
+    if (estAReclasserLeger_(fi.next())) etat.n++;
+  }
+  var fo = dossier.getFolders();
+  while (fo.hasNext()) {
+    if (estBudgetDepasse()) { etat.complet = false; return; }
+    var sub = fo.next();
+    if (typeof estExcluDuReset_ === 'function' && estExcluDuReset_(sub.getName())) continue;
+    compterVracDossier_(sub, etat, estBudgetDepasse);
+    if (!etat.complet) return;
+  }
+}
+
+/**
+ * Prédicat LÉGER pour le RECENSEMENT de la barre : nom + mime seulement, SANS le contrôle de parent
+ * protégé (`getParents` par fichier = coûteux → recensement qui ne finit jamais sur un gros Drive).
+ * Sur « Ancienne structure » aucun fichier n'a pour ancêtre le dossier-domaine `04·Immigration`
+ * (dossier distinct), donc ce prédicat est LE prédicat de collecte (la garde §1 vit à la MUTATION, `aParentProtege_` strict) ; l'écart éventuel n'affecte qu'une
+ * ESTIMATION (dénominateur), corrigée par la re-base et la finalisation sur le vrai signal de fin.
+ * La COLLECTE et le DÉPLACEMENT réels gardent, eux, le prédicat complet (garde zone protégée §1).
+ * @param {File} f
+ * @return {boolean}
+ */
+function estAReclasserLeger_(f) {
+  if (indexContient_('epingle|' + f.getId())) return false; // épinglé par Marc (chat) → immunisé (convergence, ADR-0026)
+  if (/^\d{4}(-\d{2}){0,2}_/.test(f.getName())) return false; // déjà rangé/renommé (AAAA_, AAAA-MM_ ou AAAA-MM-JJ_ — le nommage PAR TYPE produit les 3 granularités, cf. Router.nomParType_)
+  // P3 (#11) : un fichier DÉJÀ TRAITÉ (clé drive| à l'Index — ex. un média sorti de _Médias à la main,
+  // nom d'origine sans préfixe date) n'est JAMAIS re-collecté : l'intake le sauterait (idempotence) et
+  // il resterait coincé dans 00·À trier à vie. Lookup O(1) sur le cache Index (chargé 1×/run).
+  if (indexContient_('drive|' + f.getId())) return false;
+  var mime = f.getMimeType() || '';
+  if (mime.indexOf('application/vnd.google-apps') === 0) return false; // natif ou raccourci
+  return true;
+}
+
+// (ecrireRecensement_ / ecrireProgression_ / repeter_ — la barre TEXTE mono-opération — retirés
+//  au C28-18 : le rendu de l'onglet Progression est centralisé dans Journal.majProgressions_.)
+
+/**
+ * Nombre de fichiers EN ATTENTE dans `00·À trier`, compté jusqu'à `plafond` (au-delà on renvoie
+ * `plafond`). Les résidents déjà indexés (quarantaine, natifs sans export — R3) ne comptent PAS :
+ * ils ne se drainent jamais, et 40 quarantainés fermaient la porte du grand rangement À VIE
+ * (le seuil « drainer avant d'alimenter » doit mesurer le drainable, pas l'immobile).
+ * Parcours borné (INTAKE_SCAN_MAX) : un mur de résidents ne fait pas un scan sans fin.
+ */
+function nbFichiersATrier_(plafond) {
+  var it = DriveApp.getFolderById(CONFIG.DOSSIERS.A_TRIER).getFiles();
+  var n = 0, parcourus = 0;
+  while (it.hasNext() && n < plafond && parcourus < CONFIG.INTAKE_SCAN_MAX) {
+    parcourus++;
+    var f = it.next();
+    if (indexContient_('drive|' + f.getId())) continue;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Parcourt récursivement un dossier et collecte les IDs des fichiers à reclasser.
+ * Lecture seule (aucun déplacement ici → pas d'invalidation d'itérateur). Borné par le garde-temps.
+ *
+ * PERF (P1-19) : la collecte utilise le prédicat LÉGER (`estAReclasserLeger_`, nom + mime, SANS
+ * `getParents` par fichier) — le contrôle de zone protégée §1 par `getParents` coûtait un walk d'ancêtres
+ * PAR FICHIER, si lent sur un gros Drive qu'un tick entier ne collectait qu'une poignée de fichiers en
+ * affamant l'intake. Le garde §1 est intégralement assuré À LA MUTATION : `deplacerVersATrier_` fait la
+ * re-vérif STRICTE `aParentProtege_` juste avant de déplacer (abstention si sous 04) — donc un fichier
+ * protégé collecté ici n'est JAMAIS déplacé. (Le security-auditor a validé « collecte ouverte, mutation
+ * fermée » comme le bon endroit pour le garde-fou.)
+ * @param {Folder} dossier
+ * @param {string[]} ids  accumulateur
+ * @param {number} max
+ * @param {function():boolean} estBudgetDepasse
+ * @param {Object} proteges  ensemble {idDossierProtégé: true} (utilisé à la mutation, pas ici)
+ */
+function collecterAReclasser_(dossier, ids, max, estBudgetDepasse, proteges) {
+  var fi = dossier.getFiles();
+  while (fi.hasNext() && ids.length < max) {
+    if (estBudgetDepasse()) return;
+    var f = fi.next();
+    // Un fichier « bizarre » (métadonnée illisible) ne doit JAMAIS avorter toute la collecte :
+    // on le saute, les autres continuent d'être collectés (cf. incident r2 : un seul échec figeait tout).
+    try {
+      if (estAReclasserLeger_(f)) ids.push(f.getId());
+    } catch (e) {
+      journalErreur_('Rangement', 'Fichier ignoré à la collecte (' + e + ')');
+    }
+  }
+  var fo = dossier.getFolders();
+  while (fo.hasNext() && ids.length < max) {
+    if (estBudgetDepasse()) return;
+    var sub = fo.next();
+    if (typeof estExcluDuReset_ === 'function' && estExcluDuReset_(sub.getName())) continue;
+    collecterAReclasser_(sub, ids, max, estBudgetDepasse, proteges);
+  }
+}
+
+/**
+ * Déplace un fichier (par ID) vers `00·À trier` : ajoute le dossier cible puis retire les
+ * parents actuels. JAMAIS de suppression — le fichier reste dans le Drive, à un seul endroit.
+ *
+ * Sécurité (défense en profondeur, garde-fou §1) : on REVÉRIFIE qu'aucun parent n'est en zone
+ * protégée juste avant de muter ; si c'est le cas on s'abstient (ne rien ajouter/retirer) pour
+ * ne jamais détacher un fichier de `04 · Immigration`.
+ * @param {string} fileId
+ * @param {Object} proteges  ensemble {idDossierProtégé: true}
+ * @return {boolean} vrai si déplacé.
+ */
+function deplacerVersATrier_(fileId, proteges) {
+  var f = null;
+  try {
+    f = DriveApp.getFileById(fileId);
+    if (aParentProtege_(f, proteges, true)) { // STRICT : abstention si indéterminable (jamais détacher, §1)
+      journalInfo_('Rangement', 'Fichier en zone protégée ignoré (non déplacé) : ' + fileId);
+      // Convergence (plan anomalies 2026-07-08) : la ligne d'Index stoppe la re-collecte à vie
+      // (`estAReclasserLeger_` saute toute clé drive| connue) — fini le re-contrôle à chaque tick.
+      indexAjouter_('drive|' + fileId, { statut: 'zone protégée', nom: f.getName(), domaine: '', chemin: '' }, '');
+      return false;
+    }
+    var cibleId = CONFIG.DOSSIERS.A_TRIER;
+    var cible = DriveApp.getFolderById(cibleId);
+    cible.addFile(f); // ajoute la cible AVANT de retirer (jamais orphelin)
+    var parents = f.getParents();
+    while (parents.hasNext()) {
+      var p = parents.next();
+      if (p.getId() !== cibleId) p.removeFile(f); // retire l'ancien parent (pas une suppression)
+    }
+    return true;
+  } catch (e) {
+    // Échec de déplacement (ex. « Access denied » sur un fichier partagé sans droit) : compté par le
+    // gestionnaire d'échecs — après QUARANTAINE_MAX, la ligne quarantaine (clé drive|) stoppe la
+    // re-collecte, et la Relance de l'app reste le chemin de RETOUR manuel (leçon : un garde-fou
+    // qui met hors circuit exige un retour). Une panne plateforme n'est jamais comptée (gererEchec_).
+    var nom = '';
+    try { nom = f ? f.getName() : ''; } catch (e2) { /* nom illisible — l'ID suffira */ }
+    gererEchec_({ cle: 'drive|' + fileId, nom: nom || fileId }, 'Déplacement vers À trier impossible : ' + e);
+    return false;
+  }
+}
+
+/**
+ * Ensemble des IDs de dossiers racines des domaines protégés (garde-fou §1).
+ * @return {Object} { idDossier: true }
+ */
+function ensembleDomainesProteges_() {
+  var set = {};
+  CONFIG.DOMAINES_PROTEGES.forEach(function (dom) {
+    var id = CONFIG.DOMAINES[dom];
+    if (id) set[id] = true;
+  });
+  return set;
+}
+
+/**
+ * Vrai si le fichier a au moins un parent qui EST, ou DESCEND de, un domaine protégé.
+ * Remonte toute la chaîne d'ancêtres (multi-parents inclus), bornée en profondeur.
+ * @param {File} f
+ * @param {Object} proteges  ensemble {idDossierProtégé: true}
+ * @return {boolean}
+ */
+function aParentProtege_(f, proteges, strict) {
+  try {
+    var parents = f.getParents();
+    while (parents.hasNext()) {
+      if (chaineMonteVersProtege_(parents.next(), proteges, 0, strict)) return true;
+    }
+  } catch (e) {
+    // `getParents()` indisponible (ex. traversée de racine/Drive partagé). Deux régimes :
+    //  - STRICT (re-vérif juste AVANT de muter, `deplacerVersATrier_`) → échoue-FERMÉ : on renvoie true
+    //    (traité comme protégé → abstention), pour ne JAMAIS détacher un fichier de 04·Immigration (§1).
+    //  - non strict (COLLECTE) → false : le fichier est collecté pour que la passe PROGRESSE (il sera de
+    //    toute façon re-vérifié en mode strict avant tout déplacement). Détection POSITIVE seulement.
+    journalErreur_('Rangement', 'Contrôle « parent protégé » impossible (' + e + ')' +
+      (strict ? ' — abstention (prudence §1).' : ' — traité comme non protégé à la collecte.'));
+    return strict ? true : false;
+  }
+  return false;
+}
+
+/**
+ * Remonte récursivement les parents d'un dossier jusqu'à trouver une racine protégée
+ * (ou épuisement). Bornée à 50 niveaux (sécurité anti-cycle/profondeur). Détection POSITIVE seulement :
+ * une branche illisible (`getParents` en erreur) renvoie `strict` (true en re-vérif de mutation = prudence ;
+ * false en collecte = laisse progresser), sans propager l'exception — un fichier n'est protégé que si on
+ * TROUVE réellement une racine 04 (ou, en strict, si une branche est illisible).
+ * @param {Folder} dossier
+ * @param {Object} proteges
+ * @param {number} profondeur
+ * @param {boolean} [strict]  échoue-fermé sur erreur de lecture (pour la re-vérif avant mutation)
+ * @return {boolean}
+ */
+function chaineMonteVersProtege_(dossier, proteges, profondeur, strict) {
+  if (!dossier || profondeur > 50) return false;
+  if (proteges[dossier.getId()]) return true;
+  try {
+    var ps = dossier.getParents();
+    while (ps.hasNext()) {
+      if (chaineMonteVersProtege_(ps.next(), proteges, profondeur + 1, strict)) return true;
+    }
+  } catch (e) {
+    return strict ? true : false; // strict → branche illisible = prudence (protégé) ; sinon pas de preuve
+  }
+  return false;
+}
+
+/* ---------- Chantier #15 (ADR-0011) : relances de quarantaine pilotées par la Sheet ---------- */
+
+/**
+ * Consomme les demandes de RELANCE déposées par l'app web (onglet `Relances`, une clé par ligne) :
+ * pour chaque clé demandée, retire sa ligne Index « quarantaine » ET son compteur « Échecs »
+ * (sinon il re-quarantinerait au 1ᵉʳ échec), puis retire la demande. Le document est re-traité
+ * au prochain passage de sa source. L'app n'exécute JAMAIS de fonction moteur : elle ne fait
+ * qu'append une ligne ici — c'est le tick qui agit (frontière d'exécution). Borné + enveloppé
+ * par l'appelant ; idempotent (une clé sans ligne quarantaine est simplement purgée).
+ * @param {function():boolean} estBudgetDepasse
+ */
+function appliquerRelancesQuarantaine_(estBudgetDepasse) {
+  var fr = feuille_('Relances');
+  var dern = fr.getLastRow();
+  if (dern < 2) return; // aucune demande
+  var demandes = fr.getRange(2, 1, dern - 1, 1).getValues(); // A=Clé
+  var cles = {};
+  for (var i = 0; i < demandes.length; i++) {
+    if (demandes[i][0]) cles[String(demandes[i][0])] = true;
+  }
+  if (estBudgetDepasse()) return; // repris au tick suivant (les demandes restent en place)
+
+  // Index : retire les lignes « quarantaine » des clés demandées (jamais une ligne d'un autre statut —
+  // on ne touche pas au ledger d'idempotence des documents traités).
+  var fi = feuille_('Index');
+  var derI = fi.getLastRow();
+  var retirees = 0;
+  if (derI >= 2) {
+    var v = fi.getRange(2, 1, derI - 1, 6).getValues(); // A=Clé … F=Statut
+    var lignes = [];
+    for (var k = 0; k < v.length; k++) {
+      if (cles[String(v[k][0])] && v[k][5] === 'quarantaine') lignes.push(k + 2);
+    }
+    lignes.sort(function (a, b) { return b - a; });
+    for (var l = 0; l < lignes.length; l++) {
+      if (estBudgetDepasse()) return; // demandes non purgées → rejouées idempotemment au tick suivant
+      fi.deleteRow(lignes[l]);
+    }
+    retirees = lignes.length;
+  }
+
+  // RE-INJECTION réelle par TYPE de clé (revue flotte : « la source re-passera » est faux pour
+  // certaines clés — jamais un no-op silencieux présenté comme un succès) :
+  //  - `drive|…` : le dépôt est resté dans 00·À trier → l'intake le re-voit naturellement ;
+  //  - `migre|<tag>|<fileId>` : la campagne peut être FIGÉE → on DÉPLACE le fichier vers 00·À trier
+  //    (garde zone protégée stricte) pour qu'il re-passe comme dépôt (clé drive|fileId) ;
+  //  - `messageId|…` / `shared|…` : la copie n'a jamais été créée (l'échec est antérieur au placement) —
+  //    la source ne re-présente l'original que dans sa fenêtre (30 j) → on journalise la limite.
+  var proteges = ensembleDomainesProteges_();
+  for (var cle in cles) {
+    var mMigre = cle.match(/^migre\|[^|]+\|(.+)$/);
+    if (mMigre) {
+      // Ne pas déplacer si ce fichier a par ailleurs une ligne drive| NON-quarantaine (il serait déjà
+      // géré comme dépôt/classé sous cette clé — on ne crée pas de conflit de ledger).
+      if (!indexContient_('drive|' + mMigre[1])) deplacerVersATrier_(mMigre[1], proteges);
+    } else if (cle.indexOf('drive|') !== 0) {
+      journalInfo_('Maintenance', 'Relance « ' + cle + ' » : la source ne re-présentera ce document que ' +
+        'dans sa fenêtre de scan (30 j) — au-delà, re-transférer le mail ou re-partager le fichier.');
+    }
+  }
+
+  // Échecs : remet les compteurs des clés demandées à zéro (retrait de ligne).
+  var fe = feuille_('Échecs');
+  var derE = fe.getLastRow();
+  if (derE >= 2) {
+    var ve = fe.getRange(2, 1, derE - 1, 1).getValues();
+    var lignesE = [];
+    for (var e = 0; e < ve.length; e++) { if (cles[String(ve[e][0])]) lignesE.push(e + 2); }
+    lignesE.sort(function (a, b) { return b - a; });
+    for (var g = 0; g < lignesE.length; g++) {
+      if (estBudgetDepasse()) return; // idem : reprise idempotente
+      fe.deleteRow(lignesE[g]);
+    }
+  }
+
+  // Demandes consommées : on vide l'onglet (toutes les lignes de données, en une fois).
+  fr.deleteRows(2, dern - 1);
+  if (retirees) {
+    journalInfo_('Maintenance', retirees + ' document(s) relancé(s) depuis l\'app (sortie de quarantaine) — re-traités au prochain passage.');
+  }
+}
+
+/**
+ * RATTRAPAGE one-shot (incident « Boreale » 2026-07-06) : re-juge les IMAGES classées comme
+ * documents depuis `depuisISO` avec les gardes DURCIES (OCR < MEDIAS_OCR_MAX_CARS ⇒ média).
+ * À lancer À LA MAIN (un clic), borné par le garde-temps + plafond par run — relancer si le
+ * journal dit « reste à traiter ». Déplacement SEUL vers _Médias (jamais de suppression), le
+ * fichier garde son nom actuel (l'original n'est plus connu), la ligne d'Index passe à « média ».
+ * @param {string} [depuisISO]  défaut : 2026-07-02 (le lot Messenger dé-quarantainé)
+ */
+function rattraperMediasMalClasses(depuisISO) {
+  var depuis = new Date(depuisISO || '2026-07-02T00:00:00');
+  var debut = Date.now();
+  var PLAFOND = 25; // borne aussi le coût LLM du re-jugement
+  var f = feuille_('Index');
+  var dern = f.getLastRow();
+  if (dern < 2) { journalInfo_('Rattrapage', 'Index vide.'); return; }
+  var v = f.getRange(2, 1, dern - 1, 6).getValues(); // A=Clé, B=Traité le, C=Fichier, F=Statut
+  var vus = 0, demis = 0, restants = 0, proteges04 = 0;
+  var medias = dossierMedias_().getId();
+  // §1 : cet outil DÉPLACE (removeParents) — il doit porter la même garde que ses neuf voisins.
+  // Le seul contrôle présent (`toucheZoneProtegee_`) vit sous `texte.length >= MEDIAS_OCR_MAX_CARS`,
+  // or la fonction vise justement les photos SANS texte : le cas nominal le sautait (audit sécurité
+  // 2026-09-10). Une photo de permis/passeport rangée sous 04 pouvait donc en sortir vers _Médias.
+  var proteges = ensembleDomainesProteges_();
+  for (var i = 0; i < v.length; i++) {
+    if (v[i][5] !== 'classé') continue;
+    var cle = String(v[i][0]);
+    if (cle.indexOf('drive|') !== 0 && cle.indexOf('migre|') !== 0) continue;
+    var d = v[i][1];
+    if (!(d instanceof Date) || d.getTime() < depuis.getTime()) continue;
+    var nom = String(v[i][2]);
+    if (!estPhoto_(nom)) continue; // seules les images sont concernées
+    // §1 AVANT tout coût : le domaine inscrit à l'Index (colonne D) écarte la zone protégée sans
+    // même ouvrir le fichier — donc sans OCR ni appel LLM facturé (revue flotte 2026-09-12).
+    if (CONFIG.DOMAINES_PROTEGES.indexOf(String(v[i][3])) !== -1) { proteges04++; continue; }
+    if (Date.now() - debut > CONFIG.BUDGET_MS || vus >= PLAFOND) { restants++; continue; }
+    vus++;
+    try {
+      var fileId = fileIdDepuisCleMaintenance_(cle);
+      if (!fileId) continue;
+      var fichier = DriveApp.getFileById(fileId);
+      // Garde structurelle STRICTE (remontée d'ancêtres, abstention si indéterminable) : elle aussi
+      // avant l'OCR et le LLM.
+      if (aParentProtege_(fichier, proteges, true)) { proteges04++; continue; }
+      var blob = fichier.getBlob();
+      if (fichier.getSize() > CONFIG.OCR_TAILLE_MAX) continue; // trop gros pour re-juger : laissé
+      var texte = extraireTexte_(blob);
+      if (texte === null) { restants++; continue; } // OCR en panne : re-jugé à la relance
+      if (texte.length >= CONFIG.MEDIAS_OCR_MAX_CARS) {
+        // Texte présent → re-juger par la CONFIANCE, avec un nom NEUTRE (le nom actuel est celui
+        // que le LLM a halluciné — le lui remontrer biaiserait le verdict). Zone protégée/sensible
+        // → laissé classé, comme au pipeline.
+        if (toucheZoneProtegee_(texte)) continue;
+        var verdict = classifier_({ nomFichier: '(photo sans nom)', expediteur: '', sujet: '', extrait: texte });
+        if (!verdict) { restants++; continue; } // LLM indisponible : re-jugé à la relance
+        if (verdict.sensible === true) continue;
+        if (typeof verdict.confiance === 'number' && verdict.confiance >= CONFIG.MEDIAS_CONFIANCE_MIN) continue;
+      }
+      var parent = fichier.getParents().hasNext() ? fichier.getParents().next().getId() : '';
+      if (parent === medias) continue; // déjà au bon endroit
+      if (!deplacerEtRenommer_(fileId, medias, parent, nom)) { restants++; continue; }
+      f.getRange(i + 2, 4, 1, 3).setValues([['', '_Médias', 'média']]); // D domaine, E chemin, F statut
+      demis++;
+      journalInfo_('Rattrapage', 'photo re-jugée média → _Médias : ' + nom);
+    } catch (e) {
+      restants++;
+      journalErreur_('Rattrapage', 'Re-jugement impossible (' + nom + ') : ' + e);
+    }
+  }
+  journalInfo_('Rattrapage', 'Terminé : ' + vus + ' image(s) re-jugée(s), ' + demis + ' → _Médias' +
+    (proteges04 ? ', ' + proteges04 + ' laissée(s) en zone protégée (§1)' : '') +
+    (restants ? ', ' + restants + ' reste(nt) à traiter — RELANCE rattraperMediasMalClasses()' : '.'));
+}
+
+/** fileId d'une clé `drive|<id>` ou `migre|<tag>|<id>` (miroir app). */
+function fileIdDepuisCleMaintenance_(cle) {
+  var d = cle.match(/^drive\|(.+)$/);
+  if (d) return d[1];
+  var mg = cle.match(/^migre\|[^|]+\|(.+)$/);
+  if (mg) return mg[1];
+  return '';
+}
+
+/* ---------- Réconciliation Index ↔ Drive (C28-07, plan P3) ---------- */
+
+// Statuts dont la ligne « la plus récente » se compare à Drive. JAMAIS `quarantaine` (l'état
+// courant doit rester quarantaine pour la relance) ni `à vérifier` (géré par le rejeu de revue).
+// `corbeillé` RESTE visité : une restauration depuis la corbeille redevient « déplacé » (revue
+// quotas). Les clés non-fichier (tri|, intention|…) sont écartées par fileIdDepuisCleMaintenance_.
+var STATUTS_SYNC_INDEX = { 'classé': true, 'doublon': true, 'média': true, 'technique': true, 'déplacé': true, 'manuel': true, 'corbeillé': true };
+
+/**
+ * Réconciliation Index ↔ Drive — campagne de fond PERPÉTUELLE, Drive en LECTURE SEULE :
+ * quand Marc déplace/renomme/corbeille un fichier DIRECTEMENT dans Drive, l'Index (append-only)
+ * dérive. Cette passe re-visite le catalogue par tranches (curseur `DriveAI_SYNC_LIGNE`) et
+ * APPEND une ligne d'état à jour (statut `déplacé` ou `corbeillé`) — jamais de mutation Drive,
+ * jamais de ré-écriture de ligne (l'app lit l'état COURANT par clé, `etatCourantIndex`).
+ *
+ * Déviation assumée du plan (« lire 50 lignes depuis le curseur ») : une ligne n'est comparée
+ * que si elle est la plus RÉCENTE de sa clé (colonne A relue au début de chaque tranche) —
+ * sinon chaque tour de curseur re-détecterait le même déplacement depuis les VIEILLES lignes
+ * et re-appendrait la même ligne à vie (croissance non bornée : il faut un prédicat de
+ * convergence que la passe produit elle-même). Auto-stabilisant : la ligne appendée devient la
+ * plus récente de sa clé et porte le chemin RECALCULÉ — la re-visite suivante n'append rien.
+ *
+ * Bornes RÉELLES (leçon « une campagne de fond se budgète PAR JOUR ») : `SYNC_LIGNES_PAR_RUN`
+ * lignes par tick, `SYNC_BUDGET_JOUR_MS` en ms réelles persistées par jour, garde-temps partagé
+ * vérifié entre chaque fichier — plus la SUSPENSION pendant le reset (`!resetEnCours_()`, Main.gs).
+ * ⚠️ Cette docstring promettait un `SYNC_FICHIERS_PAR_JOUR` (plafond dans l'unité de coût réelle,
+ * la VÉRIFICATION Drive) qui n'a JAMAIS existé dans CONFIG — promesse retirée en revue #226 plutôt
+ * que laissée à croire (leçon §7 « promesse de verrou = verrou codé dans le même commit »). Si un
+ * jour le quota d'APPELS Drive devient le facteur limitant, c'est ce plafond-là qu'il faudra coder.
+ * @param {function():boolean} estBudgetDepasse
+ */
+function synchroniserIndex_(estBudgetDepasse) {
+  var props = PropertiesService.getScriptProperties();
+
+  // Budget QUOTIDIEN en MS RÉELLES persistées (leçon §7 : un plafond par RUN ne borne pas la
+  // JOURNÉE — ×288 ticks ; même patron que DriveAI_GMAIL_HISTO_MS_JOUR). Format `AAAA-MM-JJ|ms`.
+  var jour = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  var brut = String(props.getProperty('DriveAI_SYNC_JOUR') || '');
+  var msJour = brut.indexOf(jour + '|') === 0 ? Number(brut.split('|')[1]) || 0 : 0;
+  if (msJour >= CONFIG.SYNC_BUDGET_JOUR_MS) return;
+  var depart = Date.now();
+
+  var feuille = feuille_('Index');
+  var derniere = feuille.getLastRow();
+  if (derniere < 2) return;
+
+  var curseur = Number(props.getProperty('DriveAI_SYNC_LIGNE')) || 2;
+  if (curseur < 2 || curseur > derniere) curseur = 2;
+
+  // Ligne la plus récente PAR CLÉ (colonne A seule, une lecture) : le prédicat de convergence.
+  var cles = feuille.getRange(2, 1, derniere - 1, 1).getValues();
+  var derniereLignePourCle = {};
+  for (var i = 0; i < cles.length; i++) {
+    var k = String(cles[i][0] || '');
+    if (k) derniereLignePourCle[k] = i + 2;
+  }
+
+  var fin = Math.min(derniere, curseur + CONFIG.SYNC_LIGNES_PAR_RUN - 1);
+  var lignes = feuille.getRange(curseur, 1, fin - curseur + 1, 6).getValues(); // A..F : Clé..Statut
+  var reprise = null; // ligne de reprise si la tranche est interrompue (budget)
+  var passeComplete = false;
+  try {
+    for (var j = 0; j < lignes.length; j++) {
+      if (estBudgetDepasse() || msJour + (Date.now() - depart) >= CONFIG.SYNC_BUDGET_JOUR_MS) {
+        reprise = curseur + j; // reprise exacte au tick suivant — le déjà-fait ne se refait pas
+        break;
+      }
+      var cle = String(lignes[j][0] || '');
+      var fileId = fileIdDepuisCleMaintenance_(cle);
+      if (!fileId || derniereLignePourCle[cle] !== curseur + j) continue; // pas un fichier, ou ligne périmée
+      var statut = String(lignes[j][5] || '');
+      if (!STATUTS_SYNC_INDEX[statut]) continue;
+      // Fraîcheur : une ligne écrite il y a moins de SYNC_AGE_MIN_H n'a pas eu le temps de
+      // dériver — le budget Drive du jour se garde pour le stock (revue quotas).
+      var traiteLe = new Date(lignes[j][1]).getTime();
+      if (!isNaN(traiteLe) && Date.now() - traiteLe < CONFIG.SYNC_AGE_MIN_H * 3600 * 1000) continue;
+      // Corps PAR ITEM enveloppé : un append Sheet qui tousse saute la ligne (re-détectée à la
+      // passe suivante — convergent), jamais toute la tranche rejouée hors compteur.
+      try {
+        var constat = constaterEtatDrive_(fileId);
+        var decision = decisionSyncIndex_(
+          { nom: String(lignes[j][2] || ''), chemin: String(lignes[j][4] || ''), statut: statut }, constat);
+        if (decision) indexAjouter_(cle, decision);
+      } catch (e) {
+        journalErreur_('Maintenance', 'Réconciliation : ligne ' + (curseur + j) + ' sautée : ' + e);
+      }
+    }
+    if (reprise === null) passeComplete = fin >= derniere;
+  } finally {
+    // Curseur + budget du jour persistés QUOI QU'IL ARRIVE (jamais de tranche rejouée hors compteur).
+    try {
+      var suivant = reprise !== null ? reprise : (passeComplete ? 2 : fin + 1);
+      props.setProperty('DriveAI_SYNC_LIGNE', String(suivant));
+      props.setProperty('DriveAI_SYNC_JOUR', jour + '|' + (msJour + (Date.now() - depart)));
+    } catch (e) { /* Properties indisponibles : la tranche sera simplement rejouée (convergent) */ }
+  }
+  if (passeComplete) {
+    journalInfo_('Maintenance', 'Réconciliation Index↔Drive : passe complète (' + (derniere - 1) + ' lignes).');
+  }
+}
+
+/**
+ * Observe l'état RÉEL d'un fichier dans Drive (lecture seule) : existence, corbeille, nom,
+ * chemin lisible (noms des ancêtres jusqu'à la racine DriveAI, premier parent seulement —
+ * les multi-parents sont l'exception et la zone protégée a son propre walk strict).
+ * @param {string} fileId
+ * @return {{existe:boolean, corbeille:boolean, nom:string, chemin:string}}
+ */
+function constaterEtatDrive_(fileId) {
+  var f = null;
+  try {
+    f = DriveApp.getFileById(fileId);
+  } catch (e) {
+    return { existe: false, corbeille: false, nom: '', chemin: '' };
+  }
+  var corbeille = false;
+  try { corbeille = f.isTrashed() === true; } catch (e) { /* illisible → pas corbeillé */ }
+  var nom = '';
+  try { nom = f.getName(); } catch (e) { /* nom illisible : comparaison sur chemin seul */ }
+  var segments = [];
+  try {
+    var parents = f.getParents();
+    var courant = parents.hasNext() ? parents.next() : null;
+    for (var n = 0; courant && n < 8; n++) {
+      segments.unshift(courant.getName());
+      var ps = courant.getParents();
+      courant = ps.hasNext() ? ps.next() : null;
+    }
+  } catch (e) {
+    segments = []; // branche illisible → chemin inconnu (la décision n'append pas sur un inconnu)
+  }
+  return { existe: true, corbeille: corbeille, nom: nom, chemin: segments.join('/') };
+}
+
+/**
+ * Décide la ligne d'état à APPENDRE (ou null si rien à constater). PURE (testée).
+ * Comparaison de chemins par SUFFIXE normalisé : le chemin d'Index est un libellé logique
+ * (« 02 · Finances/Bellerives ») alors que le constat remonte jusqu'à la racine du Drive —
+ * l'un doit terminer l'autre. Chemin constaté INCONNU (branche illisible) ⇒ on ne constate
+ * rien (jamais un faux « déplacé » sur une lecture partielle).
+ * @param {{nom:string, chemin:string, statut:(string|undefined)}} ligne  dernière ligne d'Index de la clé
+ * @param {{existe:boolean, corbeille:boolean, nom:string, chemin:string}} constat
+ * @return {?{statut:string, domaine:string, chemin:string, nom:string}}
+ */
+function decisionSyncIndex_(ligne, constat) {
+  var disparu = !constat.existe || constat.corbeille;
+  if (ligne.statut === 'corbeillé') {
+    // Sens INVERSE (revue quotas) : un fichier RESTAURÉ de la corbeille redevient visible —
+    // sinon « corbeillé » à vie dans l'app alors qu'il est bien là.
+    if (disparu) return null;
+    return { statut: 'déplacé', domaine: '', chemin: constat.chemin || ligne.chemin, nom: constat.nom || ligne.nom };
+  }
+  if (disparu) {
+    // Constat de RÉALITÉ, pas une action : le fichier a été corbeillé/retiré PAR MARC dans
+    // Drive — l'Index cesse de le présenter comme classé (aucune écriture Drive ici, §2).
+    return { statut: 'corbeillé', domaine: '', chemin: ligne.chemin, nom: ligne.nom };
+  }
+  var nomPareil = !constat.nom || constat.nom === ligne.nom;
+  var cheminPareil = !constat.chemin || cheminsSyncCompatibles_(ligne.chemin, constat.chemin);
+  if (nomPareil && cheminPareil) return null;
+  return {
+    statut: 'déplacé', domaine: '',
+    chemin: constat.chemin || ligne.chemin,
+    nom: constat.nom || ligne.nom,
+  };
+}
+
+/**
+ * Vrai si le chemin d'Index (libellé logique) et le chemin constaté (depuis la racine Drive)
+ * désignent le même endroit : l'un TERMINE l'autre, comparaison normalisée (casse/accents).
+ * Un chemin d'Index VIDE (ligne `manuel`, quarantaine historique) est compatible avec tout —
+ * la première passe ne re-qualifie pas des lignes qui n'ont jamais porté de chemin. PURE.
+ * @param {string} cheminIndex
+ * @param {string} cheminConstate
+ * @return {boolean}
+ */
+function cheminsSyncCompatibles_(cheminIndex, cheminConstate) {
+  if (!cheminIndex) return true;
+  var a = normaliserCle_(cheminIndex);
+  var b = normaliserCle_(cheminConstate);
+  if (!a || !b) return true;
+  if (a === b) return true;
+  return a.length < b.length ? finitPar_(b, a) : finitPar_(a, b);
+}
+
+/** Vrai si `texte` finit par `suffixe` sur une FRONTIÈRE de segment (`/`). PURE. */
+function finitPar_(texte, suffixe) {
+  if (texte === suffixe) return true;
+  if (texte.length <= suffixe.length) return false;
+  return texte.slice(-(suffixe.length + 1)) === '/' + suffixe;
+}
+
+/* ---------- Réparation de l'incident Sheet d'état du 2026-07-08 (plan architecte validé) ---------- */
+
+/**
+ * Vrai si la clé d'Index désigne un DÉPÔT DE FICHIER (le rejeu a pu créer une copie dans Drive) :
+ * `drive|…`, `shared|…`, ou une clé PJ Gmail BRUTE `<messageId hex>|i|nom|taille` — les clés PJ
+ * n'ont PAS de préfixe nommé (déviation documentée du plan, qui supposait `messageId|`). Les clés
+ * d'état pur (tri|, important|, intention*|, tache|, event|, dryrunv2|, migre|…) sont exclues :
+ * leur rejeu n'a rien déposé de neuf. PURE (testée).
+ * @param {string} cle
+ * @return {boolean}
+ */
+function estCleFichierIncident_(cle) {
+  if (/^(drive|shared)\|/.test(cle)) return true;
+  return /^[0-9a-f]{10,}\|/.test(cle); // PJ Gmail : premier segment = messageId hexadécimal brut
+}
+
+/**
+ * RÉPARATION MANUELLE de l'incident du 2026-07-08 (fail-open de getSheetEtat_ : Sheet d'état
+ * recréée à VIDE à 02:34, état forké ~13 h). À exécuter UNE FOIS par Marc depuis l'éditeur
+ * Apps Script, après merge. Fait, sous le verrou du script (jamais en même temps qu'un tick) :
+ *   1. re-porte dans l'ANCIENNE Sheet (la vraie) les lignes d'Index INÉDITES de la nouvelle
+ *      (docs/états réellement nouveaux du matin, rapport dry-run inclus — leur idempotence suit) ;
+ *   2. pour chaque REJEU de dépôt (clé déjà connue de l'ancien Index) : la copie re-déposée
+ *      aujourd'hui (créée APRÈS l'incident) est ÉCARTÉE dans `_Doublons` — déplacement seul,
+ *      jamais de suppression (§2) ; zone protégée re-vérifiée par fichier, échec fermé (§1) ;
+ *   3. fusionne Journal et DryRunV2 (append en fin d'ancienne Sheet) ;
+ *   4. TriAppris/Entités : RIEN (décision architecte — l'historique de l'ancienne fait foi) ;
+ *   5. re-pointe `DriveAI_SHEET_ID` sur l'ancienne et invalide les caches.
+ * IDEMPOTENCE DURE : refuse de tourner si la bascule est déjà faite (un 2e passage prendrait les
+ * vrais nouveaux fichiers du matin pour des rejeux et les écarterait à tort).
+ * SANS underscore final (déviation du plan, documentée) : un nom en `_` est MASQUÉ de l'éditeur
+ * Apps Script — Marc ne pourrait pas l'exécuter (même convention que dequarantaine/rangerToutLeDrive).
+ */
+function reparerIncidentSheet() {
+  var ID_ANCIENNE = CONFIG.INCIDENT_SHEET.ancienne;
+  var ID_NOUVELLE = CONFIG.INCIDENT_SHEET.nouvelle;
+  var INCIDENT_MS = new Date('2026-07-08T02:00:00Z').getTime();
+
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_INCIDENT_0708_REPARE')) {
+    throw new Error('Réparation DÉJÀ exécutée (DriveAI_INCIDENT_0708_REPARE) — un 2e passage écarterait à tort les vrais nouveaux fichiers.');
+  }
+  if (props.getProperty('DriveAI_SHEET_ID') !== ID_NOUVELLE) {
+    throw new Error('DriveAI_SHEET_ID ne pointe pas la Sheet de l\'incident — état inattendu, abandon (rien modifié).');
+  }
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(30 * 1000)) {
+    throw new Error('Tick en cours — réessaie dans une minute (la réparation ne tourne jamais en même temps qu\'un tick).');
+  }
+  try {
+    var ancienne = SpreadsheetApp.openById(ID_ANCIENNE);
+    var nouvelle = SpreadsheetApp.openById(ID_NOUVELLE);
+    var bilan = { inedites: 0, rejeux: 0, ecartes: 0, proteges: 0, dejaDoublons: 0, introuvables: 0 };
+
+    // --- 1+2. Index : inédits re-portés, copies de rejeu écartées ---
+    var fAncien = ancienne.getSheetByName('Index');
+    var fNouveau = nouvelle.getSheetByName('Index');
+    var clesAnciennes = {};
+    if (fAncien.getLastRow() > 1) {
+      var colA = fAncien.getRange(2, 1, fAncien.getLastRow() - 1, 1).getValues();
+      for (var i = 0; i < colA.length; i++) clesAnciennes[String(colA[i][0] || '')] = true;
+    }
+    var lignesNouvelles = fNouveau.getLastRow() > 1
+      ? fNouveau.getRange(2, 1, fNouveau.getLastRow() - 1, 8).getValues() : [];
+    var proteges = ensembleDomainesProteges_();
+    var doublons = dossierDoublons_();
+    var aReporter = [];
+    for (var j = 0; j < lignesNouvelles.length; j++) {
+      var cle = String(lignesNouvelles[j][0] || '');
+      if (!cle) continue;
+      if (!clesAnciennes[cle]) {
+        aReporter.push(lignesNouvelles[j]); // inédit du matin → suit dans la vraie Sheet
+        clesAnciennes[cle] = true;          // (dédoublonne aussi les clés répétées de la nouvelle)
+        bilan.inedites++;
+        continue;
+      }
+      if (!estCleFichierIncident_(cle)) continue; // rejeu d'état pur : rien à écarter
+      bilan.rejeux++;
+      var nom = String(lignesNouvelles[j][2] || '');
+      if (!nom) continue;
+      // Copie re-déposée = même nom exact ET créée APRÈS l'incident. L'original (créé avant)
+      // ne matche jamais le filtre de date.
+      var sain = nom.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      var it;
+      try {
+        it = DriveApp.searchFiles("title = '" + sain + "' and trashed = false");
+      } catch (e) {
+        bilan.introuvables++;
+        continue;
+      }
+      var trouve = false;
+      while (it.hasNext()) {
+        var f = it.next();
+        try {
+          if (f.getDateCreated().getTime() <= INCIDENT_MS) continue; // l'original — intouchable
+          var parents = f.getParents();
+          if (parents.hasNext() && parents.next().getId() === doublons.getId()) { bilan.dejaDoublons++; trouve = true; continue; }
+          if (aParentProtege_(f, proteges, true)) {
+            bilan.proteges++;
+            trouve = true;
+            Logger.log('PROTÉGÉ, laissé en place (§1) : ' + f.getName() + ' (' + f.getId() + ')');
+            continue;
+          }
+          f.moveTo(doublons); // déplacement SEUL — jamais de suppression (§2)
+          bilan.ecartes++;
+          trouve = true;
+          Logger.log('Écarté dans _Doublons : ' + f.getName() + ' (' + f.getId() + ')');
+        } catch (e) {
+          Logger.log('Copie non déplaçable (' + nom + ') : ' + e);
+        }
+      }
+      if (!trouve) bilan.introuvables++;
+    }
+    if (aReporter.length) {
+      fAncien.getRange(fAncien.getLastRow() + 1, 1, aReporter.length, 8).setValues(aReporter);
+    }
+
+    // --- 3. Journal + DryRunV2 : fusion par append ---
+    var ongletsAFusionner = ['Journal', 'DryRunV2'];
+    for (var o = 0; o < ongletsAFusionner.length; o++) {
+      var nomOnglet = ongletsAFusionner[o];
+      var src = nouvelle.getSheetByName(nomOnglet);
+      if (!src || src.getLastRow() < 2) continue;
+      var dst = ancienne.getSheetByName(nomOnglet);
+      if (!dst) {
+        dst = ancienne.insertSheet(nomOnglet);
+        dst.getRange(1, 1, 1, src.getLastColumn())
+          .setValues(src.getRange(1, 1, 1, src.getLastColumn()).getValues());
+      }
+      var donnees = src.getRange(2, 1, src.getLastRow() - 1, src.getLastColumn()).getValues();
+      dst.getRange(dst.getLastRow() + 1, 1, donnees.length, donnees[0].length).setValues(donnees);
+    }
+
+    // --- 5. Bascule + caches + bilan (écrit DIRECTEMENT dans l'ancienne — jamais via feuille_,
+    // qui pointerait encore la nouvelle pendant la réparation) ---
+    props.setProperty('DriveAI_SHEET_ID', ID_ANCIENNE);
+    props.setProperty('DriveAI_INCIDENT_0708_REPARE', new Date().toISOString());
+    reinitialiserIndexCache_();
+    var resume = 'Réparation incident Sheet : ' + bilan.inedites + ' ligne(s) inédite(s) re-portée(s), ' +
+      bilan.rejeux + ' rejeu(x) de dépôt, ' + bilan.ecartes + ' copie(s) écartée(s) dans _Doublons, ' +
+      bilan.proteges + ' protégée(s) laissée(s) en place, ' + bilan.dejaDoublons + ' déjà en _Doublons, ' +
+      bilan.introuvables + ' sans copie retrouvée. Bascule DriveAI_SHEET_ID → ancienne Sheet faite.';
+    ancienne.getSheetByName('Journal').appendRow([new Date(), 'INFO', 'Réparation', resume]);
+    Logger.log(resume);
+    return resume;
+  } finally {
+    verrou.releaseLock();
+  }
+}
+
+/* ---------- Fusion du domaine erroné « 07 · Perso & projets » (plan anomalies 2026-07-08) ---------- */
+
+/**
+ * FUSION MANUELLE one-shot : « 07 · Perso & projets » (domaine AUTO-CRÉÉ par erreur — absent de
+ * DOMAINES_AUTO, donc sans voie de re-création une fois la Property effacée) → le canonique
+ * « 08 · Perso & projets » (CONFIG.DOMAINES). À exécuter par Marc depuis l'éditeur Apps Script,
+ * AVANT la campagne C26-08. SANS underscore final (un nom en `_` est masqué de l'éditeur).
+ *
+ * Ordre PENSÉ pour la reprise : les déplacements d'abord (idempotents — si la limite des 6 min
+ * coupe, RELANCER la fonction : elle reprend sur le restant), la Property et le ré-étiquetage
+ * Sheet à la fin seulement. Déplacement SEUL, jamais de suppression (§2) : le dossier VIDE
+ * restant relève d'ADR-0014 (corbeille par l'APP, au clic de Marc). Le CHEMIN des lignes d'Index
+ * n'est pas réécrit : la réconciliation (synchroniserIndex_) constatera les déplacements au fil
+ * de l'eau — seule l'étiquette Domaine (donnée erronée) est corrigée, dans Entités et Index.
+ */
+function fusionnerDomaine07PersoVers08() {
+  var NOM_ERRONE = '07 · Perso & projets';
+  var NOM_CIBLE = '08 · Perso & projets';
+  var props = PropertiesService.getScriptProperties();
+  var idSource = props.getProperty('DriveAI_DOM_' + NOM_ERRONE);
+  if (!idSource) {
+    Logger.log('Rien à fusionner : le domaine auto « ' + NOM_ERRONE + ' » est absent des Properties.');
+    return 'rien à faire';
+  }
+  var idCible = CONFIG.DOMAINES[NOM_CIBLE];
+  if (!idCible) throw new Error('Domaine cible introuvable dans CONFIG.DOMAINES : ' + NOM_CIBLE);
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(30 * 1000)) {
+    throw new Error('Tick en cours — réessaie dans une minute (la fusion ne tourne jamais en même temps qu\'un tick).');
+  }
+  try {
+    var source = DriveApp.getFolderById(idSource);
+    var cible = DriveApp.getFolderById(idCible);
+    var fichiers = 0, dossiers = 0, proteges = 0;
+    // §1 : `moveTo` retire TOUS les parents — un élément aussi rattaché à un domaine protégé en
+    // serait détaché. Garde stricte, comme partout ailleurs (audit sécurité 2026-09-10).
+    var zonesProtegees = ensembleDomainesProteges_();
+    var fi = source.getFiles();
+    while (fi.hasNext()) {
+      var fich = fi.next();
+      if (aParentProtege_(fich, zonesProtegees, true)) { proteges++; continue; }
+      fich.moveTo(cible); fichiers++;
+    }
+    var fo = source.getFolders();
+    while (fo.hasNext()) {
+      var doss = fo.next();
+      if (aParentProtege_(doss, zonesProtegees, true)) { proteges++; continue; }
+      doss.moveTo(cible); dossiers++;
+    }
+    props.deleteProperty('DriveAI_DOM_' + NOM_ERRONE);
+    var corrEntites = remplacerColonneOnglet_('Entités', 'Domaine', NOM_ERRONE, NOM_CIBLE);
+    var corrIndex = remplacerColonneOnglet_('Index', 'Domaine', NOM_ERRONE, NOM_CIBLE);
+    var resume = 'Fusion « ' + NOM_ERRONE + ' » → « ' + NOM_CIBLE + ' » : ' + fichiers + ' fichier(s) et ' +
+      dossiers + ' sous-dossier(s) déplacés' + (proteges ? ', ' + proteges + ' laissé(s) en zone protégée (§1)' : '') +
+      ', Property effacée, ' + corrEntites + ' ligne(s) Entités et ' +
+      corrIndex + ' ligne(s) Index ré-étiquetées. Dossier vide restant : ADR-0014 (app).';
+    journalInfo_('Maintenance', resume);
+    Logger.log(resume);
+    return resume;
+  } finally {
+    verrou.releaseLock();
+  }
+}
+
+/**
+ * Remplace `ancienne` par `nouvelle` dans la colonne nommée `entete` d'un onglet (en-têtes réels
+ * de la ligne 1 — jamais un index de colonne en dur). Réparation d'étiquettes, une seule écriture.
+ * @return {number} nombre de cellules corrigées.
+ */
+function remplacerColonneOnglet_(onglet, entete, ancienne, nouvelle) {
+  var f = feuille_(onglet);
+  var dern = f.getLastRow();
+  if (dern < 2) return 0;
+  var entetes = f.getRange(1, 1, 1, f.getLastColumn()).getValues()[0].map(String);
+  var col = entetes.indexOf(entete) + 1;
+  if (col < 1) return 0;
+  var plage = f.getRange(2, col, dern - 1, 1);
+  var valeurs = plage.getValues();
+  var n = 0;
+  for (var i = 0; i < valeurs.length; i++) {
+    if (String(valeurs[i][0]) === ancienne) { valeurs[i][0] = nouvelle; n++; }
+  }
+  if (n > 0) plage.setValues(valeurs);
+  return n;
+}
+
+/**
+ * FIN DE FUSION manuelle (correctif du 2026-07-08 au soir) : la 1ʳᵉ exécution de
+ * `fusionnerDomaine07PersoVers08` a déplacé TOUS les fichiers puis a été coupée (limite 6 min)
+ * ENTRE l'effacement de la Property et le ré-étiquetage — et sa garde de reprise (la Property)
+ * disait ensuite « rien à faire » (leçon : la garde de reprise se pose sur la DERNIÈRE étape,
+ * jamais une étape intermédiaire). Cette fonction termine le travail, idempotente par NATURE
+ * (elle ne remplace que les cellules portant ENCORE le libellé erroné — un 2e passage ne change
+ * rien) : colonnes Domaine d'Entités et d'Index, et Chemin d'Index (égalité STRICTE — les
+ * fichiers SONT réellement sous 08 maintenant, autant épargner 349 constats « déplacé » à la
+ * réconciliation). Verrou patient (3 min) : les ticks du dry-run laissent des fenêtres étroites.
+ */
+function terminerFusionDomaine07() {
+  var NOM_ERRONE = '07 · Perso & projets';
+  var NOM_CIBLE = '08 · Perso & projets';
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(3 * 60 * 1000)) {
+    throw new Error('Verrou du script indisponible après 3 min — réessaie (les ticks du dry-run sont longs).');
+  }
+  try {
+    var corrEntites = remplacerColonneOnglet_('Entités', 'Domaine', NOM_ERRONE, NOM_CIBLE);
+    var corrDomaine = remplacerColonneOnglet_('Index', 'Domaine', NOM_ERRONE, NOM_CIBLE);
+    var corrChemin = remplacerColonneOnglet_('Index', 'Chemin', NOM_ERRONE, NOM_CIBLE);
+    var resume = 'Fin de fusion « ' + NOM_ERRONE + ' » → « ' + NOM_CIBLE + ' » : ' + corrEntites +
+      ' ligne(s) Entités, ' + corrDomaine + ' Domaine et ' + corrChemin + ' Chemin d\'Index ré-étiquetés ' +
+      '(les fichiers avaient déjà tous été déplacés par la 1re exécution).';
+    journalInfo_('Maintenance', resume);
+    Logger.log(resume);
+    return resume;
+  } finally {
+    verrou.releaseLock();
+  }
+}
+
+/* ================= Corrections manuelles (C28-65) ================= */
+
+/**
+ * Applique `CONFIG.CORRECTIONS_MANUELLES` : des déplacements décidés PAR MARC, fichier par fichier,
+ * là où aucune règle ne peut trancher (cf. le commentaire de la CONFIG). ONE-SHOT par tag.
+ *
+ * Gardes, dans cet ordre : budget (reprenable), clé d'idempotence par fichier, zone protégée
+ * re-vérifiée à la SOURCE **et** à la CIBLE (échec fermé), `moveTo` seul. Un échec par item
+ * n'arrête pas la boucle et ne pose pas la clé : il sera re-tenté, et le tag n'est figé « fait »
+ * que lorsque TOUT est consommé (sinon un blip Drive clôturerait la campagne à moitié).
+ * @param {function():boolean} estBudgetDepasse
+ */
+function appliquerCorrectionsManuelles_(estBudgetDepasse) {
+  var liste = CONFIG.CORRECTIONS_MANUELLES || [];
+  if (!liste.length) return;
+  var tag = String(CONFIG.CORRECTIONS_MANUELLES_TAG || '');
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_CORR_FINI') === tag) return;
+
+  var proteges = ensembleDomainesProteges_();
+  var reste = 0, faits = 0;
+  for (var i = 0; i < liste.length; i++) {
+    if (estBudgetDepasse()) { reste++; continue; }
+    var c = liste[i];
+    var cle = 'corrmanuelle|' + tag + '|' + c.id;
+    try {
+      if (indexContient_(cle)) continue;
+      // 🔴 Marc l'a peut-être déjà rangé LUI-MÊME (épinglé via le chat) entre la décision et le
+      // déploiement. On ne défait JAMAIS son geste : sans ce test, la correction ré-aspirait le
+      // fichier qu'il venait de remettre en place, à clé de succès donc sans retour (audit §7).
+      if (indexContient_('epingle|' + c.id)) {
+        indexAjouter_(cle, { statut: 'corr-epingle', nom: c.quoi, domaine: '', chemin: '' }, '');
+        continue;
+      }
+      // ⚠️ La mutation est DÉLÉGUÉE à `appliquerDeplacerFichier_` (Reorg.gs), le déplacement par
+      // identité déjà en service pour le chat : il refuse une source DOSSIER (un ID de dossier se
+      // copie exactement comme un ID de fichier, et `moveTo` relogerait tout le sous-arbre), une
+      // source en zone protégée, une cible protégée / système / `_…` / `00 · À trier`, et il pose
+      // l'ÉPINGLE qui immunise le fichier contre les campagnes de re-rangement. Écrire un second
+      // chemin de mutation « presque pareil » était la faute que ce dépôt corrige partout ailleurs :
+      // une seule règle, deux consommateurs (audit sécurité C28-65).
+      // ⚠️ Un THROW de la fonction déléguée (« Access denied » permanent sur un partagé — panne
+      // RÉELLE documentée dans ce Drive) partait au catch externe, qui ne comptait rien : 288
+      // rejeux/jour à vie, `DriveAI_CORR_FINI` jamais posé — exactement ce que l'abandon borné
+      // ci-dessous prétend fermer (audit final). Converti en `échec` typé, il passe par la borne.
+      var r;
+      try { r = appliquerDeplacerFichier_({ source: c.id, cible: c.cible }, proteges); }
+      catch (eMove) { r = { statut: 'échec', detail: String(eMove) }; }
+      if (r.statut === 'appliqué') {
+        indexAjouter_(cle, { statut: 'corr', nom: c.quoi, domaine: '', chemin: '' }, '');
+        faits++;
+        continue;
+      }
+      if (String(r.statut).indexOf('refusé') === 0) {
+        // Refus MÉTIER (structure / zone protégée) : verdict sur le document, donc DÉFINITIF —
+        // inscrit sous la clé et tracé, pour ne pas re-tenter à l'infini.
+        journalErreur_('Corrections', 'REFUSÉ (' + r.detail + ') : ' + c.quoi);
+        indexAjouter_(cle, { statut: 'corr-refus', nom: c.quoi, domaine: '', chemin: '' }, '');
+        continue;
+      }
+      // `échec` = fichier ou cible introuvable/illisible : une PANNE de plateforme, jamais imputée
+      // au document (§9 « classer par ORIGINE avant de compter »). On RE-TENTE — mais borné, sinon
+      // un fichier supprimé par Marc ferait tourner la boucle 288×/jour à vie et chasserait
+      // l'historique du Journal en ~17 jours (audit §6).
+      var essais = 0;
+      try { essais = incrementerEchec_(cle); } catch (e2) { /* compteur indisponible : on re-tentera */ }
+      if (essais >= CONFIG.QUARANTAINE_MAX) {
+        journalErreur_('Corrections', 'ABANDON après ' + essais + ' essais (' + r.detail + ') : ' + c.quoi);
+        indexAjouter_(cle, { statut: 'corr-abandon', nom: c.quoi, domaine: '', chemin: '' }, '');
+        continue;
+      }
+      // Une ligne par essai (patron `Missions.gs`) : sans elle, une boucle qui ne converge pas
+      // serait à la fois infinie ET MUETTE — seul symptôme observable, l'absence de tag « fait ».
+      journalErreur_('Corrections', 'Correction différée (essai ' + essais + '/' +
+        CONFIG.QUARANTAINE_MAX + ', ' + r.detail + ') : ' + c.quoi);
+      reste++;
+    } catch (e) {
+      // Même borne ici : ce catch ne voit plus que les échecs d'ÉTAT (Index illisible…), mais un
+      // compteur nu suffirait à reproduire la boucle infinie que le correctif ci-dessus ferme.
+      var essaisE = 0;
+      try { essaisE = incrementerEchec_(cle); } catch (e3) { /* compteur indisponible */ }
+      if (essaisE >= CONFIG.QUARANTAINE_MAX) {
+        journalErreur_('Corrections', 'ABANDON après ' + essaisE + ' essais : ' + c.quoi + ' — ' + e);
+        try { indexAjouter_(cle, { statut: 'corr-abandon', nom: c.quoi, domaine: '', chemin: '' }, ''); }
+        catch (e4) { /* Index illisible : on re-tentera, la borne rejouera */ }
+        continue;
+      }
+      journalErreur_('Corrections', 'Correction différée (' + c.quoi + ') : ' + e);
+      reste++;
+    }
+  }
+  if (faits) journalInfo_('Corrections', faits + ' correction(s) manuelle(s) appliquée(s) (tag ' + tag + ').');
+  // « Fait » SEULEMENT quand tout est consommé — sinon un blip clôturerait la campagne à moitié.
+  if (!reste) props.setProperty('DriveAI_CORR_FINI', tag);
+}

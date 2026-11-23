@@ -1,0 +1,56 @@
+{
+ "_lisezmoi": "Fichiers FICTIFS déjà rangés dans un sous-dossier, de même forme que le relevé Drive du 13/09 d'où ils sont tirés (dossiers, types, dates ; émetteurs et dossiers remplacés par des valeurs fictives, tâche #513). Ils mesurent ce que le rangement ferait d'un stock DÉJÀ classé : un fichier rangé ne doit pas être sorti de son dossier par un signal faible. ⚠️ Les règles par ENTITÉ (bailleurs, écoles) ne reconnaissent plus rien ici : leur couverture revient avec le profil privé du moteur (#515).",
+ "03 · Logement & véhicule": {
+  "Logement/12 rue Exemple": [
+   "2024-01-28_Avis de reconduction de bail_Émetteur fictif 608_2.pdf",
+   "2024-01-28_Avis de reconduction de bail_Émetteur fictif 608.pdf",
+   "2024-12-10_Avis de changement de coordonnées de paiement_Émetteur fictif 608.pdf",
+   "2024-08-11_Échange de messages_Émetteur fictif 608.jpg",
+   "2026-07-06_Échange de courriels_Émetteur fictif 608.jpg",
+   "2026-07-06_Message - confirmation remise des clés_Émetteur fictif 608.jpg",
+   "2023-07-15_Courriel d'acceptation de candidature locative_Émetteur fictif 608.jpg",
+   "2023-05-27_Annexe au bail_Émetteur fictif 609.pdf",
+   "2023-05-25_Accord de débit préautorisé et dépôt de garantie de bail_Émetteur fictif 609.jpg",
+   "2025-06-30_Avis de reconduction de bail_Émetteur fictif 610_2.pdf",
+   "2023-05-25_Échange de courriels_Émetteur fictif 611.jpg",
+   "2026-07-06_Échange de messages_Émetteur fictif 612.jpg",
+   "2026-07-01_Échange de messagerie_Émetteur fictif 011.jpg",
+   "2024-01-28_Avis de reconduction de bail_Émetteur fictif 608_3.pdf",
+   "2024-01-28_Avis de reconduction de bail_Émetteur fictif 613.pdf"
+  ],
+  "Logement/12 rue Exemple/Correspondance": [
+   "2026-07-06_Correspondance_Émetteur fictif 614_2.jpg"
+  ],
+  "Logement/12 rue Exemple/Contrats": [
+   "2018-10-15_Formulaire de demande de location_Émetteur fictif 615_2.pdf",
+   "2018-10-15_Formulaire de demande de location_Émetteur fictif 615_3.pdf"
+  ],
+  "Logement/34 avenue Exemple, Ville-Exemple": [
+   "2023-03-22_Contrat de location_Émetteur fictif 616.pdf"
+  ],
+  "Assurance habitation/Assureur fictif A": [
+   "2026-02-26_Contrat d'assurance habitation_Émetteur fictif 617.pdf"
+  ],
+  "Assurance habitation/Assureur fictif B": [
+   "2023-04_Relevé_Émetteur fictif 618_2.pdf",
+   "2020-09-17_Attestation d'assurance responsabilité civile_Émetteur fictif 619_2.pdf",
+   "2020-09-28_Carte internationale d'assurance automobile (carte verte)_Émetteur fictif 618.jpg"
+  ],
+  "Énergie & services/Fournisseur fictif A": [
+   "2024-12-06_Facture d'électricité_Émetteur fictif 620.pdf",
+   "2023-07-15_Confirmation d'ajout d'adresse_Émetteur fictif 620.PNG"
+  ],
+  "Énergie & services/Fournisseur fictif B": [
+   "2020-12-04_Attestation de contrat d'énergie_Émetteur fictif 621_2.pdf"
+  ]
+ },
+ "06 · Études & diplômes": {
+  "Établissement fictif A": [
+   "2018-08-01_Guide d'installation logiciel_Émetteur fictif 622.jpg",
+   "2025-01-17_Feuille de présence_Émetteur fictif 623.xlsx",
+   "2020-10-13_Capture d'écran_Émetteur fictif 623.jpg",
+   "2020-03-13_Avis de fermeture COVID-19_Émetteur fictif 623.jpg",
+   "2020-04-03_Correspondance_Émetteur fictif 623.jpg"
+  ]
+ }
+}

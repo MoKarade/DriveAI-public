@@ -1,0 +1,135 @@
+/**
+ * Filet de tests du MIROIR TS des garde-fous (contrainte NON négociable de l'ADR-0008 :
+ * l'app mute Drive elle-même ⇒ les garde-fous dupliqués doivent être couverts par des tests).
+ * Miroir de : aParentProtege_ strict (Maintenance.gs), normaliserCle_ (Entites.gs), prédicat
+ * « déjà rangé » 3 granularités (Maintenance.gs).
+ */
+
+import { describe, it, expect } from 'vitest';
+import {
+  detachementAutorise,
+  verdictReclassement,
+  normaliserCle,
+  nomEstNormalise,
+  VIOLATION_PROFIL_ABSENT,
+} from '../src/garde-fous';
+
+const PROTEGE = 'ID_IMMIGRATION';
+
+describe('detachementAutorise (miroir aParentProtege_ strict)', () => {
+  it('ancêtre protégé (même profond, multi-parents) → refus', () => {
+    expect(detachementAutorise({ ids: ['a', PROTEGE, 'b'], complete: true }, [PROTEGE])).toBe(false);
+  });
+  it('aucun ancêtre protégé → autorisé', () => {
+    expect(detachementAutorise({ ids: ['a', 'b', 'c'], complete: true }, [PROTEGE])).toBe(true);
+  });
+  it('ascendance INCOMPLÈTE (branche illisible) → refus (échec fermé, comme le strict du moteur)', () => {
+    expect(detachementAutorise({ ids: ['a'], complete: false }, [PROTEGE])).toBe(false);
+    expect(detachementAutorise({ ids: [], complete: false }, [PROTEGE])).toBe(false);
+  });
+});
+
+describe('verdictReclassement (point de passage obligé avant toute mutation Drive)', () => {
+  it('cas sain → aucune violation', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: ['x'], complete: true },
+        nouveauNom: '2024-03-05_Facture_Hydro-Québec.pdf',
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toEqual([]);
+  });
+  it('document en zone protégée → violation zone-protegee (jamais détaché)', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: [PROTEGE], complete: true },
+        nouveauNom: '2024-03-05_Passeport_IRCC.pdf',
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toContain('zone-protegee');
+  });
+  it('nom hors convention → violation nom-invalide', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: [], complete: true },
+        nouveauNom: 'scan sans date.pdf',
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toContain('nom-invalide');
+  });
+  it('SANS repères (profil du moteur indisponible) → refus `profil-absent`, jamais un défaut permissif', () => {
+    const base = { ascendanceActuelle: { ids: ['a'], complete: true }, deplacementSeul: true };
+    expect(verdictReclassement(base)).toContain(VIOLATION_PROFIL_ABSENT);
+    expect(verdictReclassement({ ...base, racinesProtegees: [] })).toContain(VIOLATION_PROFIL_ABSENT);
+    expect(verdictReclassement({ ...base, racinesProtegees: [PROTEGE] })).toEqual([]);
+  });
+});
+
+describe('verdictReclassement en mode deplacementSeul (C21-02 : drag-and-drop, nom conservé)', () => {
+  it('relâche UNIQUEMENT la règle de nom (nom quelconque accepté)', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: ['x'], complete: true },
+        deplacementSeul: true,
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toEqual([]);
+    // La RÈGLE est relâchée (pas seulement l'optionalité) : nom fourni NON conforme accepté.
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: ['x'], complete: true },
+        nouveauNom: 'IMG_1234 brouillon sans date.jpg',
+        deplacementSeul: true,
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toEqual([]);
+  });
+  it('la zone protégée reste INCONDITIONNELLE — jamais relâchée par le mode manuel', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: [PROTEGE], complete: true },
+        deplacementSeul: true,
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toContain('zone-protegee');
+  });
+  it('ascendance illisible → refus même en manuel (échec fermé)', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: [], complete: false },
+        deplacementSeul: true,
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toContain('zone-protegee');
+  });
+  it('sans le mode, un nom manquant reste une violation (compat reclassement)', () => {
+    expect(
+      verdictReclassement({
+        ascendanceActuelle: { ids: [], complete: true },
+        racinesProtegees: [PROTEGE],
+      }),
+    ).toContain('nom-invalide');
+  });
+});
+
+describe('nomEstNormalise (miroir 3 granularités du nommage par type)', () => {
+  it.each([
+    ['2024-03-05_Facture_Hydro-Québec.pdf', true],
+    ['2024-03_Relevé_Bellerives.pdf', true],
+    ['2021_Diplôme_Institut-Exemple.pdf', true],
+    ['IMG_2734.jpg', false],
+    ['scan.pdf', false],
+  ])('%s → %s', (nom, attendu) => {
+    expect(nomEstNormalise(nom)).toBe(attendu);
+  });
+});
+
+describe('normaliserCle (miroir normaliserCle_)', () => {
+  it('minuscules, accents, apostrophes, espaces', () => {
+    expect(normaliserCle('Éléctricité De France')).toBe('electricite de france');
+    expect(normaliserCle("Avis d'imposition")).toBe('avis d imposition');
+    expect(normaliserCle('Avis d’imposition')).toBe('avis d imposition');
+    expect(normaliserCle('  IRCC  ')).toBe('ircc');
+    expect(normaliserCle(null)).toBe('');
+  });
+});

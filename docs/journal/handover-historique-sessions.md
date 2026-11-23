@@ -1,0 +1,415 @@
+# Journal du HANDOVER : historique des sessions (ancien §7)
+
+> Déplacé tel quel depuis `HANDOVER.md` (PR b du plan #468, 21/10/2026).
+
+- **2026-07-06 — Chantier #16 CODÉ : tri Gmail natif (ADR-0012) — EN ATTENTE DU GO TEMPS-RÉEL DE MARC.**
+  `TriGmail.gs` : décision PURE (suspect prime/jamais archivé ; doute → `À vérifier` ; lu → archivé ;
+  promo DÉTERMINISTE (List-Unsubscribe) non-lue → archivée sauf zone protégée ; `⏰` jamais archivé),
+  heuristiques phishing étroites + signal LLM, table `TriAppris` adresse→libellé (jamais le nom
+  affiché), mini-appel catégorie par FIL validé contre les libellés EXISTANTS (jamais de création),
+  30 fils/run, idempotence `tri|<fil>|<ts>` sans charger les messages, tri APRÈS les intentions
+  (attend l'analyse du dernier message). `⏰` posé par `marquerMailImportant_`. Résumé hebdo :
+  « ⚠️ Suspects » EN TÊTE, compteur triés, « 🗞️ newsletters jamais ouvertes ». VERROU CI :
+  `test/surface-gmail-ecriture.test.js` (corbeille/Spam/suppression/création de libellés interdits
+  dans src/ + manifeste jamais > gmail.modify). App : clés `tri|` exclues. **Moteur 223 tests.**
+  ⚠️ SÉQUENCE DE MERGE : PR avec label `do-not-merge` (code + scope `gmail.modify` + constitution) —
+  ne merger que sur GO temps-réel de Marc (gel des déclencheurs → il ré-autorise dans la foulée),
+  puis vérifier le run Deploy réel + la reprise par signaux Drive + les premiers libellés posés.
+
+- **2026-07-06 — Chantier #16 DÉCIDÉ (ADR-0012) : tri Gmail natif, remplace la tâche Cowork de Marc.**
+  Le propriétaire a répondu explicitement (AskUserQuestion) : ÉCRITURE Gmail oui (libellés + archivage —
+  levée du garde-fou §3, scope `gmail.modify`, jamais de suppression), tri AU FIL DE L'EAU,
+  SOUS-LIBELLÉS existants (~60 libellés hérités du Cowork, vérifiés via MCP), extras hebdo =
+  phishing en tête + newsletters jamais lues (écartés : docs manquants, registre montants).
+  Défaut posé à valider : zone protégée = libellés oui, archivage non. ⚠️ À l'implémentation,
+  séquencer le merge du scope avec Marc (gel des déclencheurs jusqu'à ré-autorisation). Une fois
+  livré/vérifié, Marc supprime sa tâche Cowork. Rien codé — backlog C16-01→06 ⬜.
+
+- **2026-07-06 (même session) — CALIBRAGE global (2 salves de questions à Marc) + audit ADR-0012 intégré.**
+  Audit sécurité de l'ADR-0012 (7 corrections intégrées : motifs anti-corbeille/Spam complets en check CI
+  REQUIS, label `do-not-merge` obligatoire sur toute PR touchant `appsscript.json` — l'auto-merge aurait
+  gelé le moteur sans Marc —, archivage non-lu sur signaux DÉTERMINISTES seulement — un phishing rédigé en
+  newsletter ne peut pas se masquer —, `gmail.modify` confirmé scope minimal, ARCHITECTURE.md corrigée).
+  Réponses Marc intégrées à l'ADR : zone protégée triée comme le reste (archivage si LU seulement), stock
+  initial = fenêtre 30 j, `⏰ À traiter` jamais archivé par le moteur, promos non-lues archivées. CODÉ dans
+  la foulée (CAL-01/02) : **plus aucun mail d'alerte immédiat** (tout au résumé hebdo — choix Marc informé
+  du risque ; l'auto-réparation du chien de garde reste) et **campagne historique 20 → 60 min/j** (Marc
+  voulait 100 — impossible, quota dur ~90 min/j). Nouveaux chantiers actés : **#17** (confiance visible
+  dans l'app) et **#18** (entités auto-validées à 3 occurrences). Moteur **203 tests**.
+
+- **2026-07-06 — Reprise après recharge (+20 $ Marc) → Correctif R2.** Constat à la reprise : la panne
+  crédit est FINIE (dernière ligne « PANNE DE COMPTE » à 08:21, garde R1 : 689 lignes en 4 j, zéro
+  nouvelle quarantaine) MAIS **le quota de lecture Gmail du jour était épuisé** — pendant la panne, les
+  scans re-parcouraient toute la fenêtre à chaque tick sans rien marquer (rien ne s'indexe) → moteur
+  re-bloqué côté Gmail jusqu'au reset quotidien (~3 h du matin, minuit heure du Pacifique). R2 livré :
+  panne PERSISTÉE (`DriveAI_LLM_PANNE`) → sources du tick suspendues pendant la panne, re-sonde bornée
+  (≤ 1 run normal/h, `LLM_PANNE_RESONDE_MS`), rétablissement auto journalisé au 1ᵉʳ appel 200 ;
+  early-exit des scans si la panne tombe en cours de run ; fichier Google natif signalé UNE fois
+  (fin des ~576 lignes/jour de bruit). Moteur **203 tests**. **Reste côté Marc** : poser
+  `DriveAI_EMAIL` (toujours absente — le résumé hebdo du lundi 6 n'a pas pu partir) et cliquer
+  `dequarantaine()` (les 64 photos ne dépendent pas de Gmail : effet immédiat).
+
+- **2026-07-03 — GROS CHECK-UP (demande Marc) → Correctif R1.** Vérification par signaux indépendants
+  (fichiers récents Drive, contenu des dossiers par parentId, Sheet d'état exportée en xlsx et analysée
+  hors-ligne). Constats : moteur VIVANT (heartbeat 22:16), Index 2381 docs, entités saines, app déployée —
+  MAIS **crédit API Anthropic ÉPUISÉ depuis le 01-07 20:56** (1330 échecs HTTP 400 en 2 jours, coût
+  juillet 7,33 $ au compteur), **~89 docs quarantainés À TORT** (3 « essais » brûlés contre un mur de
+  plateforme ; ~64 photos Facebook physiquement coincées dans 00·À trier, sautées SUR PLACE par
+  l'idempotence), et **597 alertes mail TOUTES mortes en silence** (`Session.getEffectiveUser()` exige un
+  scope userinfo jamais présent : chien de garde, quarantaines et résumé hebdo n'ont JAMAIS envoyé un
+  mail). La campagne historique C12 tourne mais s'écrase sur le mur du crédit ; le « Rangement : 62 % »
+  est figé au 01-07 (à réévaluer après recharge). Correctif R1 livré : garde « panne de PLATEFORME »
+  (jamais imputée aux documents, appels suspendus par run, re-sonde auto) + canal d'alerte via Script
+  Property `DriveAI_EMAIL` (aucun nouveau scope = aucun gel). **RESTE CÔTÉ MARC (R1-03)** : recharger le
+  crédit Anthropic, poser `DriveAI_EMAIL`, puis UN clic `dequarantaine()`. Moteur **197 tests**.
+
+- **2026-07-02 — Chantiers #13-#14 : PHASE 3 VISIBLE & MAILS IMPORTANTS (ADR-0010 §2-3) — roadmap v2
+  COMPLÈTE.** Dernier lot « mails » : (1) le résumé hebdo NOMME désormais chaque tâche/RDV créé
+  (section « 🗓️ Actions & RDV détectés », plafonnée avec « … et N de plus ») et le dashboard app
+  gagne la même section (lecture seule, lien vers le mail source) ; (2) le mini-check Haiku passe à
+  DEUX signaux en UN appel (JSON `{action, important}`, 24 tokens — `miniVerifActionRdv_` remplacé
+  par `miniCheckMail_` + parse pur `parserMiniCheck_`) avec dégradations ASYMÉTRIQUES voulues :
+  `action` ouverte sur échec (ne jamais rater une action), `important` fermé (anti-bruit — décision
+  Marc : jamais de notification immédiate, le résumé suffit). Un mail important (question directe,
+  échéance, administration/officiel) → ligne Index `important|<messageId>` idempotente, posée AVANT
+  le tri action/pas-action (une question ouverte sans action créable remonte quand même), jamais en
+  zone protégée, AUCUNE écriture Gmail. Section « 📌 À traiter » au hebdo (sujet + lien Gmail
+  `#all/`, plafond 10) et au dashboard. Les clés mail restent exclues de la Recherche app. **Revue
+  flotte intégrée (1 BLOQUANT)** : le corps est désormais lu et la garde §1 re-vérifiée dessus
+  AVANT la pose du flag — y compris sur le chemin « important sans action » qui ne lisait jamais
+  le corps (un mail protégé détectable par son corps seul ne remonte JAMAIS dans « À traiter ») ;
+  critère `important` resserré (réponse/geste PERSONNEL attendu — jamais relevé/reçu/facture
+  récurrente, sinon saturation) ; dashboard : lignes « mail » exclues des agrégats documents.
+  Moteur **189 tests**, app **57**, build ok. **Toute la roadmap v2 (#10-#15) est codée.**
+
+- **2026-07-02 — Chantier #12 : HISTORIQUE GMAIL COMPLET (ADR-0010 §1) — design v2 après démolition
+  adversariale.** Le design v1 (curseur rétrograde « jour le plus ancien traité + 1 », commit a8e9df4)
+  a été **démoli par 3 agents adversariaux** : (a) Gmail trie les fils par DERNIER message ⇒ un vieux
+  fil ravivé TÉLÉPORTAIT le curseur des mois en arrière (PJ des fils intermédiaires perdues à jamais) ;
+  (b) un jour à > `GMAIL_HISTO_PAGE_FILS` fils ⇒ la même page revenait toujours (plateau infini, jamais
+  « terminé ») ; (c) aucun sous-plafond ⇒ chaque tick consommait les 4,5 min ⇒ quota runtime (~90 min/j)
+  épuisé en ~2 h, intake vivant MORT le reste de la journée. **Réécrit (v2)** : ancre FIXE posée une
+  seule fois à −30 j (`DriveAI_GMAIL_HISTO_ANCRE`) ⇒ la requête `has:attachment before:<ancre>` porte
+  sur un ensemble **immuable** ⇒ pagination par offset persistant SÛRE (la leçon « pagination mouvante »
+  interdit le mouvant, pas l'offset) ; l'offset n'avance que sur page COMPLÈTE (coupure budget/plafond
+  ⇒ rejeu de page, gratuit par idempotence Index, converge car les déjà-indexées ne comptent plus) ;
+  plafond `GMAIL_HISTO_MAX_PJ_INEDITES: 2`/run (le vivant garde la priorité runtime) ; fil-poison sauté
+  AVEC avance d'offset (journalisé) ; terminaison figée sur page vide. Fil ravivé pendant la campagne
+  ⇒ couvert par le scan VIVANT (son nouveau message l'y fait entrer, toutes les PJ du fil traitées).
+  `curseurSuivantHisto_` supprimé (surface mise à jour). ROADMAP/BACKLOG/ADR-0010 réécrits (ils
+  décrivaient le v1). **Une 2ᵉ contre-vérification a ensuite durci la v2** (C12-04) : (P3) « terminé »
+  ne se fige plus sur la première page vide — si la passe a eu la moindre activité, l'offset repart à
+  0 pour une **passe de VÉRIFICATION** (guérit 3 pertes silencieuses : fil ravivé par un message SANS
+  PJ — invisible du vivant, Gmail matche PAR message —, fil glissé sous l'offset par une suppression,
+  fil sauté sur erreur transitoire ; re-passe quasi gratuite, convergence garantie) ; (P4) garde-temps
+  et plafond **PAR PJ** — un message à 20 PJ ne crève plus le mur des 6 min sans `finally` — appliqué
+  aussi au scan VIVANT (`traiterFil_`) ; (P5) fil en erreur : compteur d'Échecs `histo|fil|<id>`,
+  abandonné après 3 essais (la terminaison n'est jamais bloquée). **Puis une 3ᵉ contre-vérification
+  (workflow 3 lentilles sur l'IMPLÉMENTATION) a trouvé 2 importants** (C12-05) : (a) le plafond par
+  RUN ne borne pas la JOURNÉE — 288 ticks × 25 s = 2 h/j > quota runtime ~90 min/j (tous les
+  déclencheurs, chien de garde inclus, gelés l'après-midi) → **budget QUOTIDIEN** 20 min/j (ms
+  réelles persistées, `GMAIL_HISTO_BUDGET_JOUR_MS`) ; (b) l'échec d'un fil se comptait par REJEU de
+  page (toutes les 5 min) et non par PASSE → 3 essais brûlés en 15 min sur une erreur transitoire →
+  compté **à la COMPLÉTION de page seulement** (une erreur qui guérit avant = aucune trace). Plus :
+  gardes à CHAQUE niveau de boucle (une page de fils bavards sans PJ réelles faisait ~1000 appels
+  Gmail après le budget), ancre **−29 j** (vrai chevauchement, `before:` exclusif), terminaison à
+  **2 passes propres consécutives**, abandon annoncé une seule fois. **16 tests d'orchestration** —
+  moteur **175 tests**.
+
+- **2026-07-02 — Chantier #15 : APP V2 (ADR-0011) + audit global (#58).** Audit « no dead code » :
+  sain d'origine (0 fonction/config/CSS/i18n morte) mais `rejouerLaRevue` retiré (devenu DESTRUCTEUR :
+  il aurait vidé l'Index) + 7 morceaux morts + ~15 docstrings mensongères + résumé hebdo véridique. La
+  vérification ADVERSARIALE (5 agents) a attrapé un retrait raté (`deciderRoutage_` avalée par regex —
+  syntaxe ET tests unitaires aveugles) → réparée + **filet de surface** (`test/surface-moteur.test.js`,
+  tout le moteur chargé ensemble, ~60 fonctions du contrat interne vérifiées) + leçon durable. Puis app
+  v2 : **Fusionner 1-clic** (statut « variante de : X »), **rejet en masse** (cases + bouton, cellule par
+  cellule), **graphe d'activité 30 j**, **quarantaine avec Relancer** — l'app APPEND une demande (onglet
+  `Relances`), le moteur consomme au tick (`appliquerRelancesQuarantaine_` — frontière d'exécution
+  respectée), **PWA** (manifest + SW passe-plat sans cache). **Vérification adversariale (3 agents) intégrée** : la relance
+  n'est plus jamais un no-op silencieux (clé `migre|` figée ⇒ le fichier est RE-INJECTÉ dans 00·À trier
+  avec garde §1 ; PJ Gmail/partage hors fenêtre ⇒ limite journalisée) ; le dashboard ne tronque plus la
+  quarantaine ni l'activité (Index complet — seul le comptage par domaine se borne) ; compteur de sélection
+  purgé à valider/fusionner ; buckets d'activité en date LOCALE. Moteur **158 tests**, app **54**, build ok.
+
+- **2026-07-02 — Chantier #11 : FAST-PATH MÉDIAS BRUTS (ADR-0009 §2).** Vidéo/audio/gif → `_Médias`
+  SANS OCR ni LLM ; photo → `_Médias` seulement si nom NON-documentaire (ID numérique ≥ 8 chiffres —
+  export Facebook —, IMG_/DSC/PXL, captures) **ET extrait OCR < 20 cars** — **l'OCR reste le juge (§1)** :
+  un scan de passeport nommé `IMG_NNNN.jpg` contient du texte → analyse complète (testé). Nom d'origine
+  CONSERVÉ (traçabilité), `_Médias` à la racine (jamais re-scanné), doublons de médias toujours dédupés
+  AVANT (empreinte calculée en amont). Accélère fortement le rangement Facebook en cours (~50 fichiers
+  en file → plus d'OCR+LLM+escalade Sonnet pièce par pièce). **Revue flotte intégrée** — sécurité CONFORME (R1 : fast-path
+  photo seulement si l'OCR a été TENTÉ — une photo > 20 Mo garde son analyse ; R3 : mot-clé protégé
+  dans le nom = documentaire) ; intake « approuvé sous conditions » toutes traitées (P1 : blob paresseux —
+  une vidéo de 300 Mo va dans `_Médias` au lieu de quarantaine ; P2 : `extraireTexte_` rend **null sur
+  échec** ≠ '' sans texte — une panne OCR n'envoie plus un scan sensible en `_Médias` en silence ; P3 :
+  clé `drive|` à l'Index ⇒ jamais re-collecté par le rangement). Estimation file-checker : le lot Facebook
+  passe de ~10-15 min + ~74 appels LLM à ~1 tick et **0 appel LLM**. +11 tests → **154**.
+
+- **2026-07-02 — Chantier #10 : ENTITÉS PROPRES (ADR-0009 §1, 1ᵉʳ de la roadmap v2).** Cause racine
+  trouvée : le PROMPT enseignait littéralement les génériques (« (logement, véhicule, banque,
+  diplôme...) » — les 4 mots recrachés tels quels dans la file). Corrigé (« NOM PROPRE identifiable…
+  sinon null ») + double filet : `estEntiteGenerique_` (lexique calibré sur la file réelle — générique
+  ssi TOUS les jetons du lexique, un identifiant suffit à garder) et consolidation par INCLUSION de
+  jetons (`estFusionnableEntite_` — jamais Levenshtein : « Modèle D an 1 » ≠ « 2017 ») avec compteur
+  « Vu N fois ». **Curation one-shot gatée `c1`** de la file (~160) : génériques → « refusée
+  (générique) », doublons → « variante de : X » (canonique = plus courte) — STATUTS seulement,
+  réversible, borné, reprenable. **Revue flotte intégrée** (structure + code + LLM) : jamais d'ALIAS de
+  routage (une variante fusionnable avec une VALIDÉE aurait routé dans son dossier = fusion de facto —
+  les 2 reviewers l'ont vue), garde ANNÉE anti-effondrement transitif (« Modèle D » n'avale pas
+  2014/2017), pluriels du lexique, few-shot filtré des génériques hérités (sinon l'exemple gagnerait
+  contre le prompt), exemples de contraste (« Banque Boréale »), avertissement sur validation explicite
+  d'un générique, tri « Vu N fois » dans la file de l'app. +14 tests → **143** (+51 app).
+
+- **2026-07-02 — C9-07 : recherche structurée (dernière surface ADR-0008) → chantier #9 COMPLET, roadmap
+  brainstorm soldée.** Nouvel onglet **Recherche** dans l'app : **filtres instantanés** sur l'Index
+  (texte normalisé nom+chemin, domaine, statut, année du DOCUMENT — préfixe du nom conventionnel),
+  plafond d'affichage 200, plus récents d'abord ; **plein texte délégué à la recherche native Drive**
+  (`fullText contains`, échappé, dossiers exclus — AUCUN index de contenu propre, ADR-0007 intact) ;
+  chaque résultat ouvre le document dans Drive (lien direct quand la clé d'Index porte le fileId —
+  `drive|`/`migre|` — sinon recherche Drive sur le nom exact, dégradation propre). Helpers PURS testés
+  (`filtrerIndex`, `fileIdDepuisCle`, `lienDrivePourLigne`…) : +9 tests → **51 vitest** (+129 moteur).
+  Lecture seule (la surface anti-suppression couvre le nouveau code par construction). **Les 9 chantiers
+  du brainstorm 2026-07-01 sont tous livrés.** Reste optionnel : C6-05 (déplacer le fichier déjà classé
+  depuis le formulaire mail — l'app web le fait déjà mieux, probablement à clore).
+
+- **2026-07-02 — Chantier #9 (v1) : APP WEB Phase 4 (ADR-0008).** **Nouveau dossier `app/`** — SPA
+  React/Vite/TS **sans backend** : l'app parle directement aux API Google (Sheets + Drive) avec le jeton
+  OAuth de l'utilisateur connecté (GIS token flow, jeton en mémoire jamais persisté ; rien de public,
+  aucun secret embarqué — le Client ID est un identifiant public par nature). Deux surfaces v1 :
+  **Tableau de bord** (Santé + activité Journal + comptage Index par domaine) et **Corrections** —
+  dont la **validation 1-clic des entités** (Statut→« validée » écrit dans la Sheet, lu par en-têtes
+  réels ; ferme le reste du chantier #4) et le **reclassement immédiat** (déplacement/renommage Drive
+  sous garde-fous, journalisé dans `Corrections` ⇒ few-shot). **Contrainte non négociable ADR-0008
+  respectée** : garde-fous ré-implémentés en TS PUR (`garde-fous.ts`, miroir de `aParentProtege_`
+  strict/`normaliserCle_`/prédicat 3 granularités) + **test de surface « aucune suppression »** (le
+  code de `src/` ne peut contenir DELETE/trashed/deleteRange sans casser la CI). **42 tests vitest**, job
+  CI dédié (`app` : npm ci → vitest → tsc+build). UI bilingue FR/EN. **Revue flotte passée** : sécurité 🟢
+  (recos appliquées : motifs anti-suppression renforcés `:clear`/`/trash`/méthode non littérale, backslash
+  échappé dans la recherche, CSP) ; code 🟠→réglé — dont les 2 requis : la **journalisation Corrections est
+  désormais COMPLÈTE** (émetteur pré-rempli depuis le nom + domaine en datalist Index + entité — une ligne
+  sans émetteur était MORTE pour le few-shot, `Corrections.gs` la saute) et le **401 rebascule sur l'écran
+  de connexion** (jeton GIS ~1 h). UX : destination = **lien Drive collé tel quel** (extraction d'ID) +
+  datalist des entités validées (leur Dossier ID est déjà dans la Sheet — zéro duplication de config).
+  **Côté Marc (une fois, ~10 min)** : client OAuth Google Cloud + import Vercel (Root Directory=`app`) —
+  `DEPLOIEMENT.md` §Phase 4. **Reste : C9-07 recherche structurée (v1.1), C6-05.**
+
+- **2026-07-02 — Chantier #8 : MIGRATION de l'existant vers la nouvelle taxonomie (ADR-0002).** **Nouveau
+  module `Migration.gs`.** Campagne gatée par `CONFIG.MIGRATION_TAG` (m1) : les documents classés AVANT la
+  refonte (#3-#6 : nommage par type, entités, 07·Santé, few-shot) sont re-passés au **pipeline complet EN
+  PLACE** (déplacement/renommage seul — jamais via `00·À trier`, où leur clé Index existante bloquerait le
+  re-traitement). 3 mécanismes décisifs : **clé dédiée `migre|tag|fileId`** (additive, idempotence des autres
+  sources intacte, convergence de la collecte) ; **`ignorerDoublon`** dans le pipeline (un doc classé a son
+  empreinte dans l'Index — sans bypass, tout le Drive migré partirait en `_Doublons` comme « doublon de
+  lui-même ») ; **zone protégée** exclue des racines + revérif STRICTE avant mutation (refus inscrit →
+  convergence, fichier non touché). Attend la fin du grand rangement ; APRÈS l'intake dans le tick (flux
+  vivant prioritaire) ; page de 12 docs/run (OCR+LLM lourds). **Bug latent corrigé au passage** : les
+  prédicats du rangement (`estAReclasser_`/`estAReclasserLeger_`) ne reconnaissaient que `AAAA-MM-JJ_` —
+  or le nommage PAR TYPE produit aussi `AAAA_`/`AAAA-MM_` → une future campagne de rangement aurait
+  re-collecté ces noms en boucle infinie. Regex élargie aux 3 granularités (testé). `renommer_` (PATCH nom
+  seul) ajouté à `DriveRest.gs` (destination = dossier courant). +8 tests → **128**. Relance : bumper
+  `MIGRATION_TAG` (m2…) — utile après validation d'entités en masse. **Revue flotte passée** :
+  security-auditor 🟢 CONFORME (aucun chemin de détachement de 04, `renommer_` sans champ parents par
+  construction) ; quotas + file-checker → correctifs appliqués : quarantaine sur doc illisible pré-pipeline
+  (sinon campagne jamais figée), try par item, **sous-budget `MIGRATION_BUDGET_MS` 2 min/tick** (protège le
+  quota journalier ~90 min/j — l'intake reste vivant toute la journée), `creerRaccourci_` idempotent
+  (`raccourciExiste_`). Coût estimé ~3-5 $ one-shot, campagne étalée 1-2 jours. +9 tests → **129**.
+  **Reste roadmap : #9 (app web), C6-05, validation 1-clic entités.**
+- **2026-07-02 — Chantier #7 : fichiers PARTAGÉS (source d'intake #3, ADR-0005).** **Nouveau module
+  `Partages.gs`.** À parité avec les PJ Gmail : les fichiers récemment partagés avec Marc (`sharedWithMe`,
+  REST `files.list` trié `sharedWithMeTime desc`) de type document (allowlist images + PDF/Office) sont
+  **COPIÉS** dans son arbo (l'original reste chez la personne) et suivent le pipeline commun (dédup MD5 →
+  OCR → LLM → routage). Idempotence par l'Index (`shared|fileId`, posée par le pipeline). Borné
+  (`PARTAGES_MAX_PAR_RUN=15`/run + garde-temps), **storage-aware** (vérif lazy du quota `about.get` ;
+  au-delà de 95 % on SUSPEND la copie — jamais de suppression — + 1 alerte mail, reprise auto). Câblé dans
+  le tick comme source #3 (après Gmail+dépôts, avant intentions Phase 3), **budget-gatée + enveloppée
+  try/catch** (ne bloque jamais l'intake). Décisions pures testées (`estTypeDocumentPartage_`,
+  `classerRecencePartage_`, `stockagePresquePleinCalc_`), +6 tests → **120**. **Aucun nouveau scope OAuth**
+  (`drive` couvre les partages) → rien de neuf côté Marc. **Revue flotte passée** : security-auditor 🟢
+  CONFORME (parité stricte avec les PJ Gmail, aucun chemin destructif, vie privée OK) ; apps-script-quota
+  et file-checker → correctifs appliqués : (a) blob téléchargé 1× (mémoïsé) au lieu de 2 downloads/fichier ;
+  (b) récence TRI-ÉTAT (`classerRecencePartage_` : date absente ⇒ saut d'item, jamais un STOP global qui
+  gèlerait la collecte) ; (c) **garde de taille** `PARTAGES_TAILLE_MAX` (50 Mo — les partages ne sont pas
+  plafonnés comme les PJ Gmail ~25 Mo), skip journalisé ; (d) `placerRevue` mort supprimé + log de fin
+  toujours émis. Convergence assurée : petite fenêtre de récence + skip des déjà-copiés + cap sur les copiés
+  (pas le plateau de l'historique Gmail). **Reste roadmap : #8 (migration existant), #9 (app web), C6-05
+  (déplacement fichier corrigé).**
+
+- **2026-07-02 — Chantier #6 (partie 2, C6-04) : entité corrigée → « validée » (ADR-0003).** **Modif du
+  MOTEUR.** Une correction du formulaire qui nomme une entité + son domaine la **promeut « validée »** dans
+  le référentiel (`promouvoirEntiteValidee_`, `Entites.gs`) : find-or-create idempotent (no-op SANS I/O Sheet
+  si déjà validée ; `en_attente`→`validée` sinon ; inconnue → ajoutée validée). Câblé dans
+  `lireEtAppliquerCorrections_` après `enregistrerCorrection_`. Le dossier d'entité est matérialisé au tick
+  suivant (`creerDossiersEntitesValidees_`, déjà en place) et le routage l'utilise. **Validation EXPLICITE de
+  Marc via le formulaire = pas d'auto-prolifération** (garde-fou respecté). Prédicat pur `correctionValideUneEntite_`
+  testé. +1 test → **108**. Revue flotte (structure + code) en cours. **Reste C6-05** : déplacer/renommer le
+  FICHIER déjà classé (champ « Fichier concerné ») — différé (nommage texte libre fragile ; le few-shot corrige
+  déjà le futur). ⚠️ Toujours en attente : ré-autorisation du scope `forms` par Marc au prochain déploiement.
+
+- **2026-07-02 — Chantier #6 (partie 1) : correction via formulaire Google (ADR-0003 §1-2).** **Modif du
+  MOTEUR + NOUVEAU SCOPE.** Le propriétaire a choisi le canal **Google Forms** (vs édition directe de la Sheet). Nouveau
+  module `Formulaire.gs` : formulaire de correction find-or-create (`assurerFormulaireCorrection_`, ID en
+  Script Property), lu 1×/tick AVANT l'intake (`lireEtAppliquerCorrections_`) — les nouvelles réponses
+  (idempotence par horodatage) sont enregistrées via `enregistrerCorrection_` et nourrissent le few-shot du
+  #5. Parsing PUR testé (`reponseVersCorrection_`, `domainesPourFormulaire_`). Borné (`CORRECTIONS_MAX_PAR_RUN`
+  =20 + garde-temps), enveloppé try/catch (ne gèle jamais l'intake). Lien du formulaire ajouté au résumé
+  hebdo. +5 tests → **107**. **⚠️ Action Marc : nouveau scope `https://www.googleapis.com/auth/forms` dans
+  `appsscript.json` → ré-autorisation Google unique au prochain déploiement** (frontière d'exécution : la
+  session Claude ne peut ni créer le formulaire ni déployer). **Reste C6-04** : appliquer la correction au
+  FICHIER déjà classé (déplacer/renommer) + promouvoir l'entité corrigée en « validée ». Revue flotte
+  (sécurité/scope + correction + quota) en cours.
+- **2026-07-02 — Chantier #5 (partie 1) : boucle d'apprentissage (ADR-0003 §3).** **Modif du MOTEUR.**
+  Nouvel onglet `Corrections` + module `Corrections.gs` : à chaque classement, les corrections passées du
+  **même émetteur** sont injectées en **exemples few-shot** en tête du prompt LLM (`appelAnthropic_`), bornées
+  (`FEWSHOT_MAX`=3, `FEWSHOT_SEUIL`=0.6) — prévisible sur le récurrent (mêmes fournisseurs/écoles), souple
+  ailleurs. Sélection PURE et testée : `scoreCorrection_` (pertinence par émetteur), `correctionsPertinentes_`
+  (top-N triés), `blocFewShot_` (formatage). Cache 1×/run (reset dans `tickDriveAI`), try/catch → dégrade à 0
+  exemple si l'onglet est illisible (n'empêche jamais de classer). Primitive `enregistrerCorrection_` (append
+  idempotent) prête pour le **canal de saisie = chantier #6** (mail → mini-formulaire). +6 tests → **101**.
+  Revue flotte (coût/correction/quota) en cours. ⚠️ **Récup git** : le conteneur avait redémarré sur un vieux
+  commit (P1-14) sans `test/` ; l'état complet (C1→C4, 95 tests) était **sauf sur le distant** — resynchronisé
+  par fast-forward vers `origin/claude/…` (92eed34). Rien perdu.
+- **2026-07-01 (nuit) — Chantier #4 (partie 1) : garde anti-variantes d'entités (ADR-0002 §4).** **Modif
+  du MOTEUR.** Moteur de similarité **pur** dans `Entites.gs` (`tokensEntite_`, `jaccardTokens_`,
+  `distanceLevenshtein_`, `similariteEntite_` = max de Jaccard/inclusion/Levenshtein, `chercherVariante_`).
+  À la proposition d'une entité (`entiteEnAttenteAjouter_`), on signale la plus proche existante **du même
+  domaine** dans une nouvelle colonne `Variante possible ?` (seuil `CONFIG.SEUIL_VARIANTE`=0.6) — pour
+  fusion **1-clic** par Marc, **jamais de fusion auto** (anti-prolifération renforcé, pas affaibli). +8
+  tests → **94**. Piège de test rencontré : `deepStrictEqual` échoue sur un tableau renvoyé par le bac à
+  sable vm (prototype d'un autre realm) → spread `[...x]` dans le test. Revue flotte en cours. **Reste
+  C4-03** : validation 1-clic (mail → formulaire, rejoint ADR-0003 / chantiers #5-6).
+- **2026-07-01 (nuit) — Chantier #3 (partie 3, C3-03) : dossiers `07 · Santé` + `_Technique` (ADR-0002 §3).**
+  **Modif du MOTEUR** + **change la taxonomie Drive**. `07 · Santé` = domaine **auto-créé** (`Config.DOMAINES_AUTO`,
+  `Router.dossierDomaineAuto_` find-or-create à côté des domaines) proposé au LLM (`domainesAutorises_`).
+  `_Technique` = fichiers **code/CAO** (par extension `CONFIG.EXT_TECHNIQUES`) routés vers `_Technique`
+  **sans OCR ni LLM** (`Pipeline` après le fast-path doublon ; économie de coût). **Renumérotage Perso 07→08**
+  (`CONFIG.DOMAINES` clé `08 · Perso & projets`, même ID) avec `Main.assurerNomsDomaines_` (gated
+  `NOMS_DOMAINES_TAG` = `s1`, renomme le dossier physique pour coller à la config — renommage seul,
+  réversible, zéro clic). `Router.dossierRacineParNom_` généralisé (`_Doublons`/`_Technique`). **+6 tests →
+  86.** `docs/TAXONOMY.md` mis à jour. Revue flotte en cours (structure-keeper, code-reviewer, security,
+  llm-cost). **Chantier #3 : terminé.** Prochain : #4 (entités systématiques + validation 1-clic + garde
+  anti-variantes, ADR-0002 §4).
+- **2026-07-01 (nuit) — Chantier #3 (partie 1) : nommage par type de document (ADR-0002 §6).** **Modif du
+  MOTEUR** (le nom des documents classés change). `src/Router.gs` : `nomParType_` + `schemaNommage_` (règles
+  ordonnées de mots-clés → granularité de date jour/mois/année + libellé fixe `Relevé`/`Paie`/`CV`) +
+  `tronquerDate_`. `deciderRoutage_` et `doublon_` appellent `nomParType_` ; `nomNormalise_` (format
+  historique jour) conservé comme défaut → dégradation gracieuse (type inconnu = format historique, jamais
+  un blocage). Ex. : relevé → `2024-03_Relevé_Bellerives`, diplôme → `AAAA_Diplôme_Université A`, facture →
+  `2024-03-05_Facture_Hydro-Québec`. `docs/NAMING.md` réécrit (table par type). **+9 tests → 69 au total.**
+  Pas de bump `VERSION` (nouveaux docs seulement ; renommage de l'existant = migration, chantier #8).
+  **C3-02 deviner-du-nom** (même session) : `Router.devinerTypeDepuisNom_` (pur ; séparateurs `_ - .` →
+  espaces, mots-clés/regex ancrés → type canonique, ex. `…_TP4_…` → « TP ») + `enrichirClassifDepuisNom_`
+  (complète `classif.type_doc` s'il est vide, sans écraser), appelé dans `Pipeline.traiterDocument_` avant
+  le routage. **+5 tests → 80 au total.** Revue 🟢 (file-checker CONFORME : idempotence/déterminisme intacts).
+  **Reste chantier #3** : nouveaux dossiers `07·Santé`/`_Technique`. Prochain aussi possible : #4 (entités
+  1-clic + anti-variantes, ADR-0002).
+- **2026-07-01 (nuit) — Chantier #2 : chien de garde (watchdog, ADR-0004).** **Modif du MOTEUR** (déployée).
+  `src/Main.gs` : heartbeat `DriveAI_LAST_TICK` (finally du tick), 2ᵉ déclencheur `chienDeGarde` (30 min,
+  `assurerTriggerChienDeGarde_` create-if-absent, posé aussi par `installerTrigger`), décision **pure**
+  `actionChienDeGarde_` (machine à 3 états détecter→réparer→alerter, dédupée par épisode = valeur du heartbeat
+  figé), auto-réparation (`installerTrigger` + re-vérif `presenceTriggerTick_` anti-fausse-alerte) puis alerte
+  mail rassurante (`alerterChienDeGarde_`, dédupée, à soi-même). `src/Resume.gs` : `etatSysteme_` + ligne
+  « État du système » au résumé hebdo. `src/Config.gs` : `WATCHDOG_MINUTES=30`, `WATCHDOG_SEUIL_MS=45min`.
+  **+10 tests** → **60 au total**. **Revue flotte 🟢** (security CONFORME, quota CONFORME — correctif A1
+  appliqué : ne pas fausse-alerter si un log échoue après une réparation réussie ; code-reviewer 🟢). RUNBOOK
+  à jour (l'incident « déclencheur désactivé » est désormais auto-réparé). Latence de détection assumée :
+  jusqu'à ~75-105 min (seuil 45 min + cycles watchdog 30 min) — « rassurer, pas réagir à la seconde ».
+  Prochain : chantier #3 (nommage par type + `07·Santé`/`_Technique`, ADR-0002).
+- **2026-07-01 (soir ter) — Chantier #1 (fondation testable) — partie 2/2 : Journal borné + onglet `Santé`.**
+  **Modif du MOTEUR** (déployée). `src/Journal.gs` : `lignesJournalASupprimer_` (pure, hystérésis `max+marge`
+  → purge en lot, ramène à `max`), `bornerJournal_` (`deleteRows` de LOG — jamais un document, §2 intact),
+  `majSante_` (onglet `Santé` : heartbeat, catalogue Index, coût du mois, statut rangement — **métadonnées
+  seulement**, une seule `setValues`). `src/Main.gs` : les deux dans le `finally` de `tickDriveAI`, chacun
+  enveloppé, `releaseLock` durci (try/finally imbriqué → verrou toujours relâché). `src/Config.gs` :
+  `JOURNAL_MAX_LIGNES=20000` (> `RESUME_MAX_LIGNES=15000`), `JOURNAL_MARGE=5000`. **+13 tests** (rotation
+  Journal, coût pur, invariant Santé) → **50 tests** au total. **Revue flotte 🟢** (security CONFORME,
+  quota CONFORME — 2 points appliqués : commentaire précisé + `releaseLock` durci ; code-reviewer 🟢 — sa
+  suggestion de test invariant Santé appliquée). Chantier #1 : **socle posé**. Prochain : chantier #2 (chien
+  de garde, ADR-0004). Le grand rangement continue en fond.
+- **2026-07-01 (soir bis) — Chantier #1 (fondation testable) — partie 1/2.** Premier code post-brainstorm.
+  Posé un **harness Node** (`test/harness.js`) qui charge les `.gs` Apps Script dans un bac à sable `vm`
+  avec des **mocks Google déterministes** (Utilities.formatDate/Session/Date partagé, faux Drive dont un
+  `getParents()` qui peut lever comme le cas P1-17) — **sans modifier le code source** (le comportement testé
+  = celui déployé). **37 tests** (`node --test`, zéro dépendance) couvrant la logique de décision : nommage,
+  dates, entités/sous-dossiers hors schéma, prédicats de collecte, le **garde-fou §1** (zone protégée jamais
+  détachée : multi-parents, chaîne d'ancêtres, échoue-fermé/ouvert, borne anti-cycle), et l'**invariant vie
+  privée ADR-0007** (`indexAjouter_` n'écrit que des métadonnées). **Job CI** « Tests unitaires (logique pure) »
+  ajouté à `ci.yml` (Node 20). Piège rencontré (test, pas code) : un faux itérateur `getParents` *infini*
+  faisait boucler la garde (borne de profondeur ≠ borne de largeur) → corrigé en modélisant un vrai cycle
+  Drive (itérateurs finis) ; et `instanceof Date` échouait entre réalités vm/test → `Date` de l'hôte partagé
+  dans le sandbox. **Reste chantier #1 (partie 2/2)** : Journal borné + onglet `Santé`. Le grand rangement de
+  l'ancien Drive continue en fond.
+- **2026-07-01 (soir) — Brainstorm produit « niveau pro » + dossier de conception.** Après la session
+  marathon de correctifs (P1-13→P1-20) et le lancement du grand rangement, Marc a demandé un brainstorm
+  détaillé pour élever DriveAI au niveau pro avec bonne documentation. Produit un **dossier de conception
+  complet** par ADR (Architecture Decision Records) : **0001** cadrage (perso, qualité pro, précision >
+  contrôle > fiabilité, rester gratuit) ; **0002** taxonomie/entités/nommage ; **0003** contrôle &
+  correction (mail hebdo → formulaire 1-clic, `Corrections` few-shot) ; **0004** fiabilité (chien de garde) ;
+  **0005** sources = fichiers partagés ; **0006** ⭐ FONDATION (testabilité + filet de tests CI + Journal
+  borné/`Santé`) ; **0007** sécurité/vie privée (LLM = tout tel quel ; **état = métadonnées seulement**,
+  *vérifié sur le code* : Index = nom/date/chemin/statut/hash, aucun corps de doc → règle durable ajoutée
+  `CLAUDE.md` §7) ; **0008** app web Phase 4 (recherche/dashboard/corrections, login Google, plein texte via
+  index natif Drive pour respecter 0007). **Roadmap** (`docs/ROADMAP.md`) réordonnée à 9 chantiers, socle #1
+  = fondation testable. Runbook + guide écrits. **4 PR docs mergées** (#33-#36) via auto-merge. Fil rouge :
+  deux fois un choix de Marc contredisait une décision récente (app applique direct ↔ garde-fous §1/§2 ;
+  plein texte ↔ 0007 métadonnées) → **surfacé avant de figer**, réconcilié (recherche) ou documenté avec la
+  contrainte attachée (corrections : garde-fous ré-implémentés + testés). **Aucun code moteur touché** — que
+  de la doc. Le grand rangement a continué en autonomie tout du long. **Prochain pas : coder le chantier #1.**
+- **2026-06-30 (P2.7 ancien Drive + Phase 3 complète)** — Diagnostiqué un blocage de pipeline CI/CD
+  (GitHub Actions muet 26-27/06, puis branche en conflit avec `main` bloquant la CI sur la PR) → résolu
+  (fusion `-s ours`, conflits de docs/squash réconciliés), PR #19 (P2.5+P2.6) mergée et déployée en prod
+  avec vérification run-par-run (pas seulement « ça devrait marcher »). **P2.7** : ancien Drive de Marc
+  identifié (« ancienne racine », pas `_Archive 2025`) et branché sur le grand rangement
+  (`RANGEMENT_RACINES_SUP`, tag `r2`) ; audit sécurité a détecté un trou (OCR vide → `sensible=false`
+  sans signal → classement auto d'un possible passeport/doc fiscal) → corrigé par un garde-fou dédié
+  (dépôt + OCR non exploitable → revue forcée), re-audité 🟢 par security-auditor et file-checker (pas
+  de sur-blocage). **Phase 3 codée** (remplace l'agent mail externe de Marc) : scopes Tasks/Calendar
+  + clients REST (`Tasks.gs`/`Calendar.gs`/`GoogleApi.gs`) ; pré-filtre 3 étages (`Prefiltre.gs`) ;
+  extraction d'intentions LLM + routage Tasks/Calendar (`Llm.gs`) ; orchestration + idempotence à 2
+  niveaux + ID client Calendar (`Intentions.gs`). Re-audité par 4 spécialistes en 2 passes : sécurité,
+  coût (~1-4 $/mois), idempotence 🟢 du premier coup ; apps-script-quota a trouvé un **vrai BLOQUANT**
+  (pagination par offset numérique sur une fenêtre Gmail mouvante → stagnation permanente au-delà de
+  ~200 messages, vérifié manuellement par traçage du scénario plutôt que pris pour argent comptant) →
+  corrigé par un scan à deux voies (offset pour le mail neuf + curseur de date absolue persisté pour le
+  rattrapage d'historique), re-vérifié 🟢. Repéré et corrigé seul, AVANT tout audit, un bug d'ID Calendar
+  non scopé par message (collision possible entre deux mails à intention identique) — leçon : toujours
+  relire son propre code avant de l'envoyer en revue. Repéré aussi qu'une suggestion d'audit (« ajoute
+  arc/cra aux mots-clés protégés ») aurait introduit un faux-positif massif (« arc » dans « Marc ») avec
+  l'implémentation substring existante → corrigé le matcher (mot entier pour les motifs courts) avant
+  d'appliquer la suggestion. **2 agents de la flotte ont halluciné un sujet sans rapport** (exemples
+  d'outils MCP non pertinents) lors d'un premier essai — relancés avec un prompt plus strict, succès.
+- **2026-06-27 (P2.5 escalade + P2.6 grand rangement)** — **P2.5** : la confiance basse ne part plus en
+  revue → `analyseApprofondie_` (Sonnet ×3, consensus de domaine puis confiance max), classé au meilleur
+  endroit ; fallback Sonnet simple sur échec Haiku total (anti-boucle de coût), plafond d'escalades/run,
+  docs sensibles jamais escaladés. **P2.6** : `rangerToutLeDrive`/`rangerUnePage_` + hook auto
+  `appliquerRangementInitial_` (gated `CONFIG.RANGEMENT_TAG`) renvoient au fil des ticks tout le « vrac »
+  des domaines vers `00·À trier`. Garde-fous re-audités par la flotte : **sécurité** — un fichier ayant un
+  parent dans (ou sous) `04 · Immigration` est écarté à la collecte ET re-vérifié avant tout déplacement
+  (`aParentProtege_`/`chaineMonteVersProtege_`), jamais détaché de la zone protégée (BLOQUANT initial levé) ;
+  **garde-temps** — collecte récursive bornée + try/catch → `notifierEchec_`, amorce `tickDriveAI()` seulement
+  s'il reste du budget (anti-dépassement des 6 min). Convergence garantie : le pipeline renomme toujours en
+  `AAAA-MM-JJ_` → jamais re-collecté (idempotent).
+- **2026-06-25 (P2.2 — full auto)** — **Auto-déploiement** : Action `Deploy` (`.github/workflows/deploy.yml`,
+  `clasp push` sur merge `main`, secrets `CLASPRC_JSON`/`SCRIPT_ID`, inactive sans secrets). **Auto-rejeu** :
+  `CONFIG.VERSION` + `appliquerRejeuSiNouvelleVersion_`/`rejeuAutoDesDepots_` renvoient les dépôts partis
+  en revue vers `00·À trier` sur bump de version — chirurgical (dépôts `drive|…` seulement, par `fileId`),
+  réversible (aucune corbeille), borné (`REJEU_PAGE` + garde-temps), reprenable. Re-audité par la flotte
+  (sécurité + quotas) après un 1er design jugé dangereux (corbeille + vidage Index en auto) → corrigé.
+- **2026-06-25 (P2.1)** — Calibration : entité non validée → classée au domaine (pas en revue).
+- **2026-06-25 (Phase 2)** — Codé le **dépôt manuel** (`Intake.gs`, scan `00·À trier`, fichiers
+  déplacés via Drive REST) et le **référentiel d'entités** (`Entites.gs` : cache 1×/run, résolution
+  insensible casse/accents, lignes `en_attente` auto-remplies, création des dossiers d'entités
+  validées + sous-dossiers fixes). Pipeline unifié Gmail+dépôt (`Pipeline.gs`), routage à l'entité
+  (`Router.gs`), raccourcis multi-entités + doublons (empreinte MD5). Revue par la flotte (7 agents) :
+  correctifs appliqués — `rejouerLaRevue` ne corbeille plus un original déposé (le renvoie en
+  `00·À trier`), garde-temps + plafond sur la création de dossiers, empreinte bornée par la taille,
+  clé d'idempotence `drive|fileId`, garde « sous-dossier hors schéma », retry Drive REST.
+- **2026-06-25** — Correctif **OCR** : le 1er run réel échouait sur chaque doc
+  (`Drive is not defined`, service avancé inactif après `clasp push`). Réécriture de `src/Ocr.gs`
+  pour appeler l'**API Drive en REST via `UrlFetchApp`** (token OAuth, scope `drive` déjà accordé),
+  dégradation propre si échec. Mergé (PR #10). Reste à Marc : `git pull && clasp push`.
+- **2026-06-23 (suite)** — Phase 1 **déployée** par Marc (clasp) et **validée en réel** ;
+  recalibrage du flag `sensible` (trop large → immigration + fiscal seulement) ; documents vivants
+  (HANDOVER, DEPLOIEMENT) + tenue à jour automatique mis en place.
+- **2026-06-23** — Session initiale : scaffolding & automatisation (PR #1, mergée) ; Phase 1
+  complète, revue par la flotte et corrigée (PR #2, mergée) ; mise en place des documents
+  vivants (HANDOVER, déploiement) et de leur tenue à jour.

@@ -1,0 +1,57 @@
+# Roadmap — DriveAI
+
+> Priorisée lors du **brainstorm produit du 2026-07-01** (Marc + Claude). Le *pourquoi* de chaque
+> décision est dans `docs/adr/`. Statuts : ⬜ à faire · 🟦 en cours · ✅ fait.
+
+## Cap produit (ADR-0001)
+Outil **personnel**, qualité **pro**. Priorités : **① précision · ② contrôle/correction · ③ fiabilité**
+(la vitesse n'est plus prioritaire). On reste sur le **compte Google gratuit**.
+
+## À venir — ordre validé
+
+| # | Chantier | Axe | Effort | ADR | Statut |
+|---|----------|-----|--------|-----|--------|
+| 1 | **Fondation testable** — refactor logique pure ↔ effets de bord, filet de tests en CI (Node), **Journal borné + onglet `Santé`**, + test d'invariant vie privée « aucun corps de document dans l'état/les logs » ([0007](adr/0007-securite-vie-privee.md)) | Qualité (socle) | M | [0006](adr/0006-architecture-qualite.md) | ✅ socle posé (harness + 50 tests + job CI · Journal borné · onglet `Santé`) — couverture à étendre au fil des chantiers |
+| 2 | **Chien de garde** (heartbeat, ré-armage auto du déclencheur, alerte si échec) — écrit dans l'onglet `Santé` du #1 | Fiabilité | S-M | [0004](adr/0004-fiabilite.md) | ✅ (2ᵉ déclencheur, auto-réparation + alerte dédupée, état système au résumé hebdo) |
+| 3 | **Nommage par type de doc** + « deviner depuis le nom d'origine » + nouveaux dossiers `07 · Santé` et `_Technique` | Précision | M | [0002](adr/0002-refonte-taxonomie-entites-nommage.md) | ✅ nommage par type + deviner-du-nom + `07·Santé` (auto) + `_Technique` (code/CAO) + renumérotage Perso→08 |
+| 4 | **Entités : validation 1 clic + garde anti-variantes** (« IUT Université A » ≈ « IUT A ») | Précision | M | [0002](adr/0002-refonte-taxonomie-entites-nommage.md) | ✅ garde anti-variantes (similarité + colonne « Variante possible ? ») + validation 1-clic via l'app web (#9) · ⚠️ la file de validation d'entités a été retirée ensuite (ADR-0031) : le référentiel validé demeure |
+| 5 | **Boucle d'apprentissage** — onglet `Corrections` injecté en exemples few-shot | Contrôle | M | [0003](adr/0003-controle-correction.md) | ✅ onglet `Corrections` + sélection few-shot par émetteur (top-N borné) injectée au prompt ✅ · canal de saisie = #6 |
+| 6 | **Correction via mail → mini-formulaire** (cas « Inconnu » + entités à valider) | Contrôle | M-L | [0003](adr/0003-controle-correction.md) | ✅ formulaire Google → corrections (few-shot) + **entité corrigée promue « validée »** (C6-04) ✅ · lien au résumé hebdo · **⚠️ nouveau scope `forms` = ré-autorisation de Marc** · déplacement du fichier corrigé = couvert par l'app web (#9) |
+| 7 | **Sources d'entrée : fichiers partagés** (copie auto dans l'arbo, garde-fous type/dédup/storage) | Sources | M | [0005](adr/0005-sources-entree.md) | ✅ `Partages.gs` — source #3 : `sharedWithMe` récents → COPIE (pipeline commun), idempotence `shared|fileId`, allowlist PDF/Office/images, dédup MD5, borné/run + storage-aware. Aucun nouveau scope. ✅ |
+| 8 | **Migration de l'existant** vers la nouvelle taxonomie (réutilise le grand rangement) | Précision | M | [0002](adr/0002-refonte-taxonomie-entites-nommage.md) | ✅ `Migration.gs` — campagne gatée `MIGRATION_TAG` : re-passe l'existant au pipeline complet EN PLACE (clé `migre\|tag\|fileId` additive, `ignorerDoublon`, zone protégée exclue + revérif stricte) + fix convergence rangement (3 granularités de date) ✅ |
+| 9 | **App web (Phase 4)** — recherche structurée (Index + plein texte natif Drive), tableau de bord santé, corrections (login Google) | Contrôle/Accès | L | [0008](adr/0008-app-web-recherche-controle.md) | ✅ `app/` (SPA React/Vite/TS sans backend) : **dashboard santé** + **corrections** (validation 1-clic des entités = reste du #4 ; reclassement immédiat sous garde-fous TS miroir testés — jamais de suppression par construction) + **recherche structurée** (filtres Index + plein texte natif Drive, ADR-0007 intact) · CI dédiée (51 tests) · **⚙️ côté Marc : client OAuth + projet Vercel (10 min, DEPLOIEMENT §Phase 4)** |
+
+**Rationale :** la **fondation testable** en socle (tests + logique pure isolée = on améliore le reste
+sans casser la prod, et le Journal borné/Santé règle le trou d'observabilité vécu le 2026-07-01) → chien
+de garde (s'appuie sur l'onglet Santé) → gros gains de précision → contrôle/apprentissage (qui a besoin
+que le reste existe) → sources d'entrée → migration → **app web en Phase 4** (dernière, s'appuie sur tout
+le reste : Santé, Corrections, Index enrichi).
+
+## Déjà fait (avant le brainstorm)
+Phases 1–3 (moteur Gmail→classement, entités, tâches/agenda), grand rangement de l'ancien Drive,
+dédup fast-path, documents sensibles auto-classés, un seul dossier d'arrivée + nom final direct, etc.
+Détail : lignes `P1-01 → P1-20` de l'ancien `BACKLOG.md` (aujourd'hui un renvoi vers les issues) : `git show dd5e4fe:BACKLOG.md`.
+
+## Roadmap v2 — brainstorm du 2026-07-02 (ordre validé par Marc : moteur → site → mails)
+
+| # | Chantier | Axe | Effort | ADR | Statut |
+|---|----------|-----|--------|-----|--------|
+| 10 | **Entités propres** — filtre anti-génériques + consolidation des variantes à la proposition + curation one-shot de la file existante (~160) | Moteur/Précision | M | [0009](adr/0009-qualite-entites-medias.md) | ✅ codé : lexique calibré sur la file réelle (`estEntiteGenerique_`), fusion par INCLUSION seule (`estFusionnableEntite_`), colonne « Vu N fois », prompt LLM corrigé (il enseignait les génériques !), curation gatée `c1` (statuts seuls, réversible) ✅ · ⚠️ la file d'entités et ses propositions ont été retirées ensuite (ADR-0031) ; le fast-path médias (#11) demeure |
+| 11 | **Fast-path médias bruts** — vidéo/gif direct, photo « nom non-documentaire + OCR vide » → `_Médias`, sans LLM | Moteur/Coût | S-M | [0009](adr/0009-qualite-entites-medias.md) | ✅ codé : `_Médias` (racine, jamais re-scanné), nom d'origine conservé, l'OCR reste le JUGE (un scan de passeport mal nommé garde son analyse — testé) ✅ |
+| 12 | **Historique Gmail complet** — ancre FIXE (`before:<ancre>` figée) + offset, terminé par DEUX passes de VÉRIFICATION propres, toutes les vieilles PJ classées | Mails | M | [0010](adr/0010-mails-historique-visibilite.md) | ✅ codé (design v2, durci par 3 vérifs adversariales — le curseur rétrograde v1 perdait des PJ + plateau infini) : budget QUOTIDIEN 20 min/j (le plafond/run ne borne pas la journée : 288×25 s > quota ~90 min/j), offset n'avance que sur page COMPLÈTE (rejeu idempotent), gardes à chaque niveau (fil/message/PJ, 2 inédites/run), fil en erreur compté par PASSE (jamais par rejeu) puis abandonné à 3 essais, ancre −29 j (vrai chevauchement), « terminé » sur 2 passes propres consécutives ✅ |
+| 13 | **Phase 3 visible** — « Actions & RDV détectés » au résumé hebdo + dans l'app | Mails | S | [0010](adr/0010-mails-historique-visibilite.md) | ✅ codé : section hebdo nommant chaque tâche/RDV créé (plafonnée, « … et N de plus »), section dashboard app (lecture seule, lien vers le mail source) ✅ |
+| 14 | **Mails importants** — flag `important` (mini-check existant) → section « À traiter » du hebdo, plafonnée | Mails | S-M | [0010](adr/0010-mails-historique-visibilite.md) | ✅ codé : mini-check à DEUX signaux en un appel (JSON, dégradations asymétriques — action ouverte, important fermé anti-bruit), ligne Index `important\|<id>` idempotente, section « À traiter » avec lien Gmail (hebdo + app), jamais de notification immédiate ✅ |
+| 15 | **App v2** — fusion 1-clic des variantes, rejet en masse, dashboard enrichi (activité 30 j, quarantaine + relance), PWA | Site | M-L | [0011](adr/0011-app-v2-curation.md) | ✅ codé : Fusionner → « variante de : X », cases + « Refuser la sélection », graphe d'activité, relance de quarantaine pilotée par la Sheet (onglet `Relances`, le moteur consomme au tick), manifest+SW passe-plat ✅ · ⚠️ boutons de curation retirés avec la file d'entités (ADR-0031), interface refaite par l'ADR-0051 (v7), PWA conservée |
+| 16 | **Tri Gmail natif** — libellés (sous-libellés existants) + archivage prudent + ⚠️ phishing + newsletters jamais lues, au fil de l'eau (remplace la tâche Cowork de Marc) | Mails | M-L | [0012](adr/0012-tri-gmail-natif.md) | ✅ livré 2026-07-06 (PR #66, 2 rondes adversariales, verrou CI + tripwire scope↔constitution) — vérification réelle après ré-autorisation de Marc, puis il supprime sa tâche Cowork |
+| 17 | **Confiance visible** — colonne Confiance à l'Index + filtre « confiance basse » dans l'app (choix Marc : voir les « classés au mieux » dans l'app, pas dans le hebdo) | Site | S | — | ✅ absorbé par #19 (colonne Confiance et filtre dans l'app v3) |
+| 18 | **Entités auto-validées à 3 occurrences** (choix Marc) — dossier créé sans clic, signalé au hebdo, réversible, jamais en zone protégée | Moteur | S | — | ✅ codé (seuil 3, `Entites.gs`) puis COUPÉ le 2026-07-17 sur décision de Marc (`CONFIG.ENTITES_AUTO_VALIDATION: false`) ; ADR-0031 : plus aucune proposition spontanée |
+| 19 | **App v3** — refonte complète (visuel + 5 sections + mobile/PWA) : vue Tri Gmail, Santé & coût, recherche filtrée, confiance (#17 absorbé) | Site | L | — | ✅ livré 2026-07-06 (PR #73→#78) : 6 sections, thème sombre/clair, calendrier réel + création Tasks/Calendar, tri visible + TriAppris corrigeable, confiance (#17), Santé |
+
+**Rationale v2 :** moteur d'abord (choix Marc) — #10 assainit la source ET la file existante (la
+validation redevient courte avant même l'app v2), #11 accélère le rangement Facebook en cours.
+Puis #15 (les outils de curation profitent d'une file déjà propre), puis les mails (#12 volume,
+#13-#14 visibilité) — l'historique complet bénéficie du moteur assaini.
+
+## Hors périmètre (ADR-0001)
+Produit/SaaS, multi-utilisateur, Google Workspace payant, sortie d'Apps Script — écartés (ré-évaluables
+plus tard).

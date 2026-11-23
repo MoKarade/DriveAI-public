@@ -1,0 +1,19 @@
+# Sans ce fichier, un checkout sous `core.autocrlf=true` (Windows, réglage par défaut) convertit
+# les fichiers texte en CRLF — et une regex qui suppose `\n` littéral (JS/TS, CSS) cesse de
+# matcher en silence. C'est ce qui a fait tomber 4 tests après une fusion sur une machine
+# Windows (`pilote-ci.test.js`, `surface-tasks-calendar.test.js`, `app/test/audit.test.ts`,
+# `app/test/corbeille.test.ts`) alors que la CI (runners Linux, LF par défaut) restait verte —
+# le dépôt lui-même n'imposait rien.
+* text=auto eol=lf
+
+# Binaires : jamais de conversion de fin de ligne (et jamais un diff texte).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary

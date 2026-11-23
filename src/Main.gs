@@ -1,0 +1,1519 @@
+/**
+ * Main.gs — Orchestration du pipeline et installation du déclencheur (CONFIG.TICK_MINUTES).
+ *
+ * À lancer une fois à la main : installerTrigger().
+ *
+ * Sources d'intake : PJ Gmail, dépôt manuel `00·À trier`, fichiers partagés (ADR-0005) —
+ * plus la migration (#8) qui re-passe l'existant. Chaque document
+ * passe par le pipeline partagé (Pipeline.gs). Avant le routage, on matérialise
+ * les entités fraîchement validées par Marc (création des dossiers).
+ *
+ * Idempotence : la clé Index est posée APRÈS placement réussi. Concurrence : un
+ * verrou empêche deux exécutions de se chevaucher. Coupure : un garde-temps borne
+ * le run ; le reste est repris au tick suivant.
+ */
+
+/**
+ * Installe (idempotemment) le déclencheur temporel (CONFIG.TICK_MINUTES).
+ * Appelé (a) À LA MAIN par Marc et (b) AUTOMATIQUEMENT par le chien de garde (`chienDeGarde`) en
+ * auto-réparation. Dans les deux cas on est hors du run `tickDriveAI` lui-même (le watchdog est un
+ * déclencheur DISTINCT) → l'ordre delete-then-create est sûr (le bref instant à 0 déclencheur, ou un
+ * tick manqué, est sans conséquence — c'est justement l'état qu'on répare). L'ajustement AUTOMATIQUE
+ * en cours de run, lui, utilise l'ordre inverse (create-then-delete) — cf. assurerIntervalleTick_.
+ */
+function installerTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'tickDriveAI') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('tickDriveAI').timeBased().everyMinutes(CONFIG.TICK_MINUTES).create();
+  PropertiesService.getScriptProperties().setProperty('DriveAI_TICK_MINUTES', String(CONFIG.TICK_MINUTES));
+  journalInfo_('Setup', 'Déclencheur ' + CONFIG.TICK_MINUTES + ' min installé.');
+  assurerTriggerResume_();      // installe aussi le résumé hebdo (idempotent)
+  assurerTriggerChienDeGarde_(); // et le chien de garde (idempotent, ADR-0004)
+}
+
+/**
+ * Installe (si absent) le déclencheur du CHIEN DE GARDE (`chienDeGarde`, toutes les
+ * `CONFIG.WATCHDOG_MINUTES`). Idempotent (crée seulement s'il n'existe pas → anti-saturation du
+ * quota de déclencheurs ~20). Appelé par `installerTrigger` ET en tête de tick (enveloppé) pour
+ * s'auto-installer sur un déploiement existant sans re-`installerTrigger` manuel.
+ */
+function assurerTriggerChienDeGarde_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'chienDeGarde') return; // déjà installé
+  }
+  ScriptApp.newTrigger('chienDeGarde').timeBased().everyMinutes(CONFIG.WATCHDOG_MINUTES).create();
+  journalInfo_('Setup', 'Chien de garde installé (toutes les ' + CONFIG.WATCHDOG_MINUTES + ' min).');
+}
+
+/**
+ * Aligne le NOM des dossiers de domaine sur les clés de `CONFIG.DOMAINES` (source de vérité).
+ * Gated par `CONFIG.NOMS_DOMAINES_TAG` (Script Property) → ne parcourt les domaines qu'une fois par tag,
+ * pas à chaque tick. Sert notamment au renumérotage « 07 · Perso » → « 08 · Perso » (ADR-0002). Renommage
+ * seul (jamais de suppression/déplacement), réversible (bumper le tag + rétablir la clé rejoue). Enveloppé.
+ */
+function assurerNomsDomaines_() {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_NOMS_DOMAINES') === CONFIG.NOMS_DOMAINES_TAG) return; // déjà fait pour ce tag
+  var noms = Object.keys(CONFIG.DOMAINES);
+  var renommes = 0;
+  for (var i = 0; i < noms.length; i++) {
+    try {
+      var d = DriveApp.getFolderById(CONFIG.DOMAINES[noms[i]]);
+      if (d.getName() !== noms[i]) { d.setName(noms[i]); renommes++; }
+    } catch (e) {
+      journalErreur_('Setup', 'Renommage du domaine « ' + noms[i] + ' » impossible : ' + e);
+    }
+  }
+  props.setProperty('DriveAI_NOMS_DOMAINES', CONFIG.NOMS_DOMAINES_TAG);
+  if (renommes) journalInfo_('Setup', renommes + ' dossier(s) de domaine renommé(s) pour coller à la config.');
+}
+
+/* ---------- Chien de garde (watchdog, ADR-0004) ---------- */
+
+/**
+ * Vrai s'il existe au moins un déclencheur `tickDriveAI`. Sert à confirmer qu'une auto-réparation a
+ * bien recréé le déclencheur même si un log annexe a levé ensuite (ne propage jamais d'exception).
+ * @return {boolean}
+ */
+function presenceTriggerTick_() {
+  try {
+    var t = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < t.length; i++) {
+      if (t[i].getHandlerFunction() === 'tickDriveAI') return true;
+    }
+  } catch (e) { /* lecture des déclencheurs impossible → on ne peut pas confirmer */ }
+  return false;
+}
+
+/**
+ * Décision PURE du chien de garde (testée), machine à 3 états — détecter → réparer → (si toujours
+ * en panne) alerter UNE fois. Les clés `*Tick` identifient l'ÉPISODE de panne (= la valeur du
+ * heartbeat figé pendant la panne) pour ne réparer/alerter qu'une fois par épisode.
+ * @param {number} maintenant   ms (Date.now())
+ * @param {number} dernierTick  ms du dernier heartbeat (0 = jamais tourné)
+ * @param {number} seuil        ms de silence au-delà duquel on agit
+ * @param {number} repareTick   heartbeat pour lequel une réparation a déjà été tentée
+ * @param {number} alerteTick   heartbeat pour lequel une alerte a déjà été envoyée
+ * @return {'rien'|'reparer'|'alerter'}
+ */
+function actionChienDeGarde_(maintenant, dernierTick, seuil, repareTick, alerteTick) {
+  if (!dernierTick) return 'rien';                        // jamais tourné → rien à réparer (trigger assuré ailleurs)
+  if ((maintenant - dernierTick) <= seuil) return 'rien'; // le moteur tourne (heartbeat frais)
+  if (alerteTick === dernierTick) return 'rien';          // déjà alerté pour CET épisode → silence
+  if (repareTick === dernierTick) return 'alerter';       // réparation déjà tentée, toujours en panne → escalade
+  return 'reparer';                                        // première détection de l'épisode → auto-réparation
+}
+
+/**
+ * Chien de garde — 2ᵉ déclencheur, doit être TRIVIALEMENT robuste (jamais d'exception propagée,
+ * sinon Google le désactiverait lui aussi). Lit le heartbeat, décide, et au besoin ré-installe le
+ * déclencheur principal (auto-réparation) puis, si ça ne suffit pas, alerte UNE fois. Public (cible
+ * d'un déclencheur → pas de suffixe `_`).
+ */
+function chienDeGarde() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    // Signal de vie = le PLUS RÉCENT du heartbeat de tick ET d'une exécution MANUELLE (C28-33) : une
+    // séance de un-clic enchaînés tient le verrou du tick et fait sauter presque tous les ticks
+    // (TICK_MINUTES 5 vs boucle manuelle ~4,5 min) — sans ça, le chien de garde déclarerait « moteur
+    // silencieux » à tort au bout de 45 min, et l'épisode remonterait au résumé hebdo.
+    var dernierTick = Math.max(
+      Number(props.getProperty('DriveAI_LAST_TICK')) || 0,
+      Number(props.getProperty('DriveAI_LAST_MANUEL')) || 0
+    );
+    var action = actionChienDeGarde_(
+      Date.now(), dernierTick, CONFIG.WATCHDOG_SEUIL_MS,
+      Number(props.getProperty('DriveAI_WATCHDOG_REPARE')) || 0,
+      Number(props.getProperty('DriveAI_WATCHDOG_ALERTE')) || 0
+    );
+    if (action === 'reparer') {
+      var repare = false;
+      try {
+        installerTrigger(); // delete+create du déclencheur principal (auto-réparation)
+        repare = true;
+      } catch (e) {
+        // `installerTrigger` a pu RECRÉER le déclencheur avant qu'un log annexe (Sheet HS, cause de panne
+        // corrélée) ne lève : on ne croit pas l'exception sur parole, on RE-VÉRIFIE la présence réelle du
+        // déclencheur. Un simple échec de log ne doit jamais requalifier une réparation réussie en alerte.
+        repare = presenceTriggerTick_();
+        if (!repare) { // réparation VRAIMENT impossible → on alerte tout de suite (marqué, non répété)
+          props.setProperty('DriveAI_WATCHDOG_ALERTE', String(dernierTick));
+          alerterChienDeGarde_(dernierTick, e);
+        }
+      }
+      if (repare) {
+        props.setProperty('DriveAI_WATCHDOG_REPARE', String(dernierTick));
+        try { journalInfo_('Chien de garde', 'Moteur silencieux → déclencheur principal ré-installé (auto-réparation).'); }
+        catch (e2) { /* log best-effort : ne doit pas défaire une réparation réussie */ }
+      }
+    } else if (action === 'alerter') {
+      props.setProperty('DriveAI_WATCHDOG_ALERTE', String(dernierTick));
+      alerterChienDeGarde_(dernierTick, null);
+    }
+  } catch (e) {
+    // Le chien de garde ne DOIT jamais planter (invariant ADR-0004). On avale tout en silence.
+  }
+}
+
+/**
+ * Envoie l'UNIQUE alerte de panne (mail rassurant : souvent le quota quotidien, sinon un clic).
+ * Ne propage jamais d'exception (appelé depuis le chien de garde).
+ * @param {number} dernierTick
+ * @param {*} err  cause d'échec de réparation, ou null (réparation tentée sans effet)
+ */
+function alerterChienDeGarde_(dernierTick, err) {
+  var quand = dernierTick
+    ? Utilities.formatDate(new Date(dernierTick), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm')
+    : 'inconnu';
+  var corps = 'DriveAI ne semble plus traiter depuis ' + quand + '.\n\n' +
+    'Souvent bénin : le quota quotidien du compte gratuit (~90 min/jour) est atteint — ça reprend seul demain.\n' +
+    'Si rien ne repart d\'ici demain, un seul geste : ouvrir le projet Apps Script « DriveAI » et exécuter installerTrigger.\n' +
+    (err ? '\n(Auto-réparation impossible : ' + err + ')' : '\n(Auto-réparation tentée, sans effet pour l\'instant.)');
+  // Décision Marc 2026-07-06 : plus de mail immédiat — l'épisode est journalisé et l'état
+  // « silencieux » apparaît dans le résumé hebdo (etatSysteme_). L'AUTO-RÉPARATION, elle, a déjà
+  // été tentée avant d'arriver ici et reste le vrai filet.
+  journalErreur_('Chien de garde', 'Moteur silencieux (dernier tick : ' + quand + ') — ' + corps.split('\n')[0]);
+}
+
+/**
+ * Installe (si absent) le déclencheur HEBDOMADAIRE du résumé (`resumeHebdo`). Idempotent :
+ * crée UNIQUEMENT s'il n'existe encore aucun déclencheur `resumeHebdo`, pour ne pas en
+ * accumuler à chaque tick (anti-saturation du quota ~20, cf. audit quotas). Jour/heure : CONFIG.
+ * Appelé en tête de tick, enveloppé d'un try/catch par l'appelant : un échec ne bloque pas l'intake.
+ */
+function assurerTriggerResume_() {
+  var triggers = ScriptApp.getProjectTriggers();
+  // C28-75 (décision Marc 2026-09-07) : mails coupés ⇒ le déclencheur est RETIRÉ s'il existe, et
+  // jamais recréé. C'est la moitié qui compte : sans elle, « ne plus créer » laissait partir le
+  // déclencheur déjà posé chaque lundi — et Marc ne pouvait pas le supprimer à la main, ce tick le
+  // réinstallait. Idempotent : zéro écriture si rien à retirer.
+  if (!CONFIG.MAILS_ACTIFS) {
+    for (var k = 0; k < triggers.length; k++) {
+      if (triggers[k].getHandlerFunction() === 'resumeHebdo') {
+        ScriptApp.deleteTrigger(triggers[k]);
+        journalInfo_('Setup', 'Déclencheur du résumé hebdo RETIRÉ (mails désactivés, CONFIG.MAILS_ACTIFS).');
+      }
+    }
+    return;
+  }
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'resumeHebdo') return; // déjà installé
+  }
+  ScriptApp.newTrigger('resumeHebdo').timeBased()
+    .onWeekDay(ScriptApp.WeekDay[CONFIG.RESUME_JOUR]).atHour(CONFIG.RESUME_HEURE).create();
+  journalInfo_('Setup', 'Déclencheur du résumé hebdo installé (' +
+    CONFIG.RESUME_JOUR + ' ' + CONFIG.RESUME_HEURE + 'h).');
+}
+
+/**
+ * Réinstalle le déclencheur si son intervalle (CONFIG.TICK_MINUTES) a changé depuis le
+ * dernier réglage (Script Property `DriveAI_TICK_MINUTES`). Permet de changer la fréquence
+ * par config seule, appliquée automatiquement au déploiement suivant — sans re-`installerTrigger`.
+ *
+ * Sûreté (audit quotas) :
+ *   1. on CRÉE le nouveau déclencheur d'ABORD → jamais 0 déclencheur (qui figerait le moteur) :
+ *      si la création échoue, l'ancien subsiste et on retentera au tick suivant ;
+ *   2. on pose la propriété JUSTE APRÈS la création réussie → empêche d'accumuler un nouveau
+ *      déclencheur à chaque tick si la purge échoue ensuite (anti-saturation du quota ~20) ;
+ *   3. on purge enfin les autres `tickDriveAI` (au pire un doublon résiduel, dédupliqué par le verrou).
+ * L'appelant enveloppe d'un try/catch : un échec d'ajustement ne doit jamais bloquer l'intake.
+ */
+function assurerIntervalleTick_() {
+  var props = PropertiesService.getScriptProperties();
+  var voulu = intervalleTickVoulu_();
+  if (props.getProperty('DriveAI_TICK_MINUTES') === String(voulu)) return;
+
+  var nouveau = ScriptApp.newTrigger('tickDriveAI').timeBased().everyMinutes(voulu).create();
+  props.setProperty('DriveAI_TICK_MINUTES', String(voulu)); // marqué FAIT dès la création
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'tickDriveAI' && t.getUniqueId() !== nouveau.getUniqueId()) {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+  journalInfo_('Setup', 'Intervalle du déclencheur ajusté à ' + voulu + ' min.');
+}
+
+/**
+ * Intervalle SOUHAITÉ du tick (#22, choix Marc : un réglage global) : l'app écrit
+ * `Réglages!B2` (A2 = TICK_MINUTES) ; valeur absente/invalide → CONFIG.TICK_MINUTES.
+ * Une lecture Sheet par tick (2 cellules) — négligeable.
+ */
+function intervalleTickVoulu_() {
+  try {
+    var v = feuille_('Réglages').getRange('B2').getValue();
+    var valide = validerTickMinutes_(v);
+    if (valide !== null) return valide;
+  } catch (e) { /* onglet illisible → défaut */ }
+  return CONFIG.TICK_MINUTES;
+}
+
+/**
+ * Valide une valeur de tick venue de la Sheet (donnée UTILISATEUR) : seules les valeurs
+ * qu'Apps Script accepte ET qui respectent les quotas sont admises — jamais < 5 min
+ * (1 min ferait 1440 runs/j : quotas Sheet/Gmail). PURE (testée).
+ * @param {*} v
+ * @return {?number} minutes valides, ou null
+ */
+function validerTickMinutes_(v) {
+  var n = Number(v);
+  return (n === 5 || n === 10 || n === 15 || n === 30) ? n : null;
+}
+
+/** Un passage du pipeline : Gmail + dépôts + partagés (+ migration, importance des mails, tri) → tout est CLASSÉ (plus de revue depuis 2026-07-01). */
+function tickDriveAI() {
+  // ÉCHEC FERMÉ (#497) : sans le profil privé, `CONFIG` ne porte que des identifiants FICTIFS — le
+  // moteur travaillerait sur des dossiers qui n'existent pas. On saute le tick, on le DIT, et
+  // la Santé expose la même raison. Rien n'est déplacé, rien n'est perdu : le tick suivant reprend.
+  var profil = etatProfilPrive_();
+  if (profil.etat !== 'ok') {
+    journalInfo_('Pipeline', 'Profil privé ' + profil.etat + ' — tick sauté (fichier driveai-profil-prive.json dans le Drive, docs/PROFIL-PRIVE.md). ' + profil.raison);
+    return;
+  }
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) {
+    journalInfo_('Pipeline', 'Run précédent encore actif — on saute ce tick.');
+    return;
+  }
+  try {
+    suiviReset_(); // suivi générique C28-44 (ADR-0038) : l'enregistreur repart à zéro À CHAQUE run
+    reinitialiserIndexCache_();
+    reinitialiserEntitesCache_();
+    reinitialiserCorrectionsCache_(); // référentiel d'apprentissage relu 1×/run (few-shot, ADR-0003)
+    reinitialiserEscalades_(); // plafond d'escalades LLM par run (anti-emballement de coût)
+    // Horloge de budget démarrée AVANT les chargeurs de panne et les `assurer*` : ces étapes font
+    // des I/O (Properties, Sheet, et depuis C28-48 une SONDE réseau bornée). Les laisser HORS de
+    // l'horloge revenait à leur offrir un temps invisible du garde-temps, prélevé sur le mur dur
+    // de 6 min avant même que le budget ne commence à courir (revue sécurité C28-48).
+    var debut = Date.now();
+    chargerPannePlateforme_(); // panne de compte PERSISTÉE (R2) : suspend les sources, re-sonde ≤ 1×/h
+    chargerPanneGmail_();      // quota Gmail JOURNALIER épuisé (C28-15) : suspend les scans Gmail, re-sonde ≤ 2 h
+    reinitialiserTriApprisCache_();  // table adresse→libellé du tri (#16), rechargée 1×/run
+    reinitialiserConfianceCache_();  // expéditeurs « pas suspect » (C28-19), rechargés 1×/run
+    reinitialiserLibellesCache_();   // libellés Gmail de Marc, rechargés 1×/run
+    reinitialiserPromoSetCache_();   // fils CATEGORY_PROMOTIONS (signal déterministe), 1×/run
+    reinitialiserPanneEcriture_();   // panne d'ÉCRITURE Gmail : nouvelle chance à chaque run
+    reinitialiserUsage_();     // compteur de coût LLM du run (mesure réelle, P1-09)
+    reinitialiserFreinBudget_(); // frein budget des campagnes (R3, §2.6), relu 1×/run
+
+    // Applique un éventuel changement d'intervalle (CONFIG.TICK_MINUTES) sans action manuelle,
+    // et installe le déclencheur du résumé hebdo s'il manque. Secondaire : un échec ne doit
+    // JAMAIS bloquer l'intake (cf. audit quotas).
+    try { assurerIntervalleTick_(); }
+    catch (e) { journalInfo_('Setup', 'Ajustement d\'intervalle différé : ' + e); }
+    try { assurerTriggerResume_(); }
+    catch (e) { journalInfo_('Setup', 'Installation du résumé hebdo différée : ' + e); }
+    try { assurerTriggerChienDeGarde_(); }
+    catch (e) { journalInfo_('Setup', 'Installation du chien de garde différée : ' + e); }
+    try { assurerNomsDomaines_(); }
+    catch (e) { journalErreur_('Setup', 'Sync des noms de domaines différée : ' + e); }
+
+    var estBudgetDepasse = function () { return Date.now() - debut > budgetMsRun_(); };
+    // « BUDGET TAIL » (incident 2026-07-23) : garde-temps ÉTENDU au VRAI mur Apps Script
+    // (CONFIG.BUDGET_MS = 4,5 min) pour les tâches PURE I/O Drive/Sheet SANS risque LLM — la
+    // consolidation (moveTo + hash MD5). Le flux vivant reste borné au budget de tick 3 min
+    // (budgetMsRun_ sous ANALYSE_V2, marge de sécurité face aux appels Sonnet) ; la consolidation,
+    // remontée juste après lui, n'utilise que le RELIQUAT jusqu'à 4,5 min : elle est ainsi GARANTIE
+    // de s'exécuter à chaque tick sans jamais voler une ms au flux vivant (leçon §7 « tôt + gated »).
+    var estBudgetDepasseStandard = function () { return Date.now() - debut > CONFIG.BUDGET_MS; };
+    // ⚠️ GARDE-TEMPS « DÉMARRAGE DE DOCUMENT » (🔴 revue quotas ADR-0056). Un sous-budget local ne
+    // peut pas protéger le TICK : `appliquerReanalyseCiblee_` retranchait bien sa marge de SON
+    // budget (2 min), mais le terme qui mord dès que l'amont a consommé 2 min est celui-ci
+    // (`budgetMsRun_()` = 3 min), qui n'en avait aucune. Un document pris à 179 s de tick coûte
+    // encore 1 à 3 min : 179 + 180 + les écritures d'état du `finally` franchissent le mur DUR de
+    // 6 min, où l'exécution est TUÉE — le `finally` ne tourne pas, les ms consommées ne sont pas
+    // imputées (jusqu'à ~4 min sur un budget quotidien de 8), et le MÊME document repart en tête
+    // au tick suivant, sans compteur pour l'arrêter. Une protection annoncée et absente est pire
+    // qu'une protection absente : elle clôt la question.
+    // Réservé aux étapes qui lancent un DOCUMENT LLM complet (OCR + Sonnet ×2) ; les étapes I/O
+    // gardent leur budget nominal.
+    var estBudgetDepasseDoc = function () {
+      return Date.now() - debut > budgetMsRun_() - CONFIG.PILOTE_MARGE_DOC_MS;
+    };
+
+    // Suivi générique C28-44 (ADR-0038) : gates PARTAGÉES du wrapper `etapeSuivie_`. Contrat :
+    // chaque gate rend une RAISON DE SKIP NON VIDE, ou null pour laisser passer ('' = passe
+    // aussi — ne jamais s'en servir comme raison). Mêmes prédicats et MÊME ORDRE d'évaluation
+    // que les `if` qu'elles remplacent : le coût par tick ne bouge pas d'un appel.
+    var gBudgetTick = function () { return estBudgetDepasse() ? 'budget de tick épuisé' : null; };
+    var gBudgetStandard = function () { return estBudgetDepasseStandard() ? 'budget standard épuisé' : null; };
+    var gFreinCampagnes = function () { return budgetCampagnesAtteint_() ? 'frein budget campagnes' : null; };
+    var gResetEnCours = function () { return resetEnCours_() ? 'reset en cours' : null; };
+    var gResetActif = function () { return CONFIG.RESET_ACTIF ? null : 'désactivée (CONFIG)'; };
+    // Flux Gmail (intake-gmail, tri-gmail) : quota journalier épuisé → l'étape sort en silence.
+    // Sans gate elle s'enregistrait « ok » et la ligne Progression restait « en cours » (DriveAI#804).
+    var gPanneGmail = function () { return estPanneGmail_() ? 'quota Gmail épuisé' : null; };
+
+    // Auto-rejeu sur nouvelle version du classement : renvoie les DÉPÔTS partis en revue vers
+    // 00·À trier pour reclassement. SECONDAIRE → enveloppé : un échec ne doit JAMAIS bloquer
+    // l'intake. (Chaque étape passe désormais par `etapeSuivie_` — C28-44 : l'enregistreur voit
+    // l'erreur AVANT le catch custom, le catch garde sa sémantique exacte.)
+    etapeSuivie_('rejeu-version', [], function () { appliquerRejeuSiNouvelleVersion_(estBudgetDepasse); },
+      function (e) { journalErreur_('Maintenance', 'Rejeu de version différé : ' + e); });
+
+    // Dé-quarantaine AUTOMATIQUE one-shot (R3, gatée par CONFIG.DEQUARANTAINE_TAG) : relance les
+    // quarantainés — les 3 échecs datant d'une panne de compte sont des faux positifs (vécu :
+    // 32 fichiers de la panne du 1ᵉʳ juillet sautés en silence 6 jours). Le RÉTABLISSEMENT d'une
+    // panne ré-arme ce one-shot tout seul (Llm.signalerRetablissement_). NOYAU seulement
+    // (`dequarantainerLignes_`, JAMAIS `dequarantaine()` : son tickDriveAI() final serait
+    // réentrant — verrou relâché par le finally du tick imbriqué, bloquant revue R3), et clés
+    // `drive|` seulement (re-présentables par la collecte ; une clé Gmail hors fenêtre serait
+    // libérée « dans le vide » et perdrait son bouton Relancer dans l'app). Le noyau invalide les
+    // caches → les libérés sont re-traités dès CE tick. SECONDAIRE → enveloppée.
+    etapeSuivie_('dequarantaine', [function () {
+      // Cette gate lit une Property (I/O) : enveloppée pour ne JAMAIS lever — une gate hors try
+      // qui lève gèlerait tout le reste du tick (leçon §7), là où l'ancien try/catch l'attrapait.
+      // Un blip devient un skip ENREGISTRÉ (visible dans l'app), l'étape retentera au tick suivant.
+      try {
+        return PropertiesService.getScriptProperties().getProperty('DriveAI_DEQUARANTAINE') === CONFIG.DEQUARANTAINE_TAG
+          ? 'déjà fait (one-shot)' : null;
+      } catch (e) { return 'état illisible (blip)'; }
+    }], function () {
+      dequarantainerLignes_('drive|');
+      PropertiesService.getScriptProperties().setProperty('DriveAI_DEQUARANTAINE', CONFIG.DEQUARANTAINE_TAG);
+    }, function (e) { journalErreur_('Maintenance', 'Dé-quarantaine automatique différée : ' + e); });
+
+    // SEED des entités de Marc (C28-26, décision Marc 2026-07-17 : « c'est toi qui le fais ») —
+    // one-shot gaté par tag : valide d'office SES listes (4 logements, 3 véhicules, 2 employeurs,
+    // 6 écoles) et DÉVALIDE les entités bancaires de 02 (« pas de dossier par banque »).
+    // SECONDAIRE → enveloppée.
+    etapeSuivie_('seed-entites', [], function () { seedEntitesMarc_(); },
+      function (e) { journalErreur_('Entités', 'Seed des entités différé : ' + e); });
+
+    // #18 (décision Marc : seuil 3) : auto-valide les entités en_attente vues ≥ 3 fois, AVANT la
+    // matérialisation (le dossier naît au même tick). Jamais une variante, jamais un générique,
+    // jamais la zone protégée. SECONDAIRE → enveloppée. COUPÉE depuis le 2026-07-17
+    // (ENTITES_AUTO_VALIDATION: false — « l'ajout de dossiers vraiment sécurisé, utile seulement » :
+    // seuls le seed, le formulaire de correction et l'app de Marc valident désormais une entité).
+    etapeSuivie_('entites-auto-validation',
+      [function () { return CONFIG.ENTITES_AUTO_VALIDATION ? null : 'désactivée (CONFIG)'; }],
+      function () { autoValiderEntitesFrequentes_(estBudgetDepasse); },
+      function (e) { journalErreur_('Entités', 'Auto-validation différée : ' + e); });
+
+    // Matérialise les entités validées par Marc (Statut = « validée ») avant le routage, bornée par
+    // le garde-temps. SECONDAIRE → enveloppée : une erreur Drive/Sheet ne doit jamais geler l'intake.
+    etapeSuivie_('entites-dossiers', [], function () { creerDossiersEntitesValidees_(estBudgetDepasse); },
+      function (e) { journalErreur_('Entités', 'Création des dossiers d\'entités différée : ' + e); });
+
+    // Curation one-shot de la file d'entités (#10, ADR-0009) : génériques refusés, variantes
+    // regroupées — statuts seulement, gatée par tag. SECONDAIRE → enveloppée + budget-gatée.
+    etapeSuivie_('entites-curation', [gBudgetTick], function () { appliquerCurationEntites_(estBudgetDepasse); },
+      function (e) { journalErreur_('Entités', 'Curation de la file différée : ' + e); });
+
+    // Relances de quarantaine demandées depuis l'app web (#15, ADR-0011) : le tick consomme
+    // l'onglet `Relances` (l'app n'exécute jamais de fonction moteur). SECONDAIRE → enveloppée.
+    etapeSuivie_('relances-quarantaine', [gBudgetTick], function () { appliquerRelancesQuarantaine_(estBudgetDepasse); },
+      function (e) { journalErreur_('Maintenance', 'Relances de quarantaine différées : ' + e); });
+
+    // Lit les corrections soumises par Marc (formulaire Google) et les enregistre AVANT l'intake, pour
+    // que les documents classés dans ce même tick profitent des règles fraîchement apprises (few-shot).
+    // SECONDAIRE → enveloppée : un formulaire absent/illisible ne doit jamais geler l'intake. Budget-gatée
+    // comme ses pairs : si une étape amont a épuisé le budget, on ne lance pas la lecture (protège l'intake).
+    etapeSuivie_('corrections', [gBudgetTick], function () {
+      lireEtAppliquerCorrections_(estBudgetDepasse);
+      // Corrections MANUELLES (C28-65) — même famille, donc PAS d'étape dédiée : le registre du
+      // suivi est borné (~9 Ko de Property, leçon C28-44) et une étape de plus faisait dépasser
+      // le plafond de 84 octets. Payer du budget d'état PERMANENT pour un one-shot de 4 fichiers
+      // n'aurait pas de sens, et relever la borne de sécurité pour se faire de la place encore
+      // moins. Enveloppé : un échec ici ne doit pas emporter la lecture du formulaire.
+      try { appliquerCorrectionsManuelles_(estBudgetDepasse); }
+      catch (eCorr) { journalErreur_('Corrections', 'Corrections manuelles différées : ' + eCorr); }
+    },
+      function (e) { journalErreur_('Corrections', 'Lecture des corrections différée : ' + e); });
+
+    // Grand rangement (zéro clic, une fois par `CONFIG.RANGEMENT_TAG`) : COLLECTE une page de l'ancien
+    // Drive vers 00·À trier. Tourne TÔT pour ne pas être affamé par l'intake (sinon l'ancien Drive ne
+    // se vide jamais), MAIS uniquement si la file a de la place — DRAINER AVANT D'ALIMENTER : on ne
+    // collecte de nouveaux fichiers que si 00·À trier en compte moins que `RANGEMENT_SEUIL_FILE`, ce qui
+    // empêche à la fois l'engorgement de la file ET la famine du rangement. ENVELOPPÉ : une erreur de
+    // collecte Drive ne gèle jamais l'intake (le `try` du tick n'a qu'un `finally`).
+    // `rangementTermine_()` (1 Property, cheap) court-circuite le comptage Drive une fois le rangement
+    // fini — sinon on itérerait jusqu'à 40 fichiers de 00·À trier à chaque tick pour rien, à vie.
+    etapeSuivie_('rangement', [
+      gBudgetTick,
+      function () { return estPannePlateforme_() ? 'panne API (compte)' : null; },
+      function () { return rangementTermine_() ? 'campagne terminée' : null; },
+      gFreinCampagnes,
+      // Le comptage Drive reste la DERNIÈRE gate (c'est la seule qui coûte) — ordre inchangé.
+      function () {
+        return nbFichiersATrier_(CONFIG.RANGEMENT_SEUIL_FILE) < CONFIG.RANGEMENT_SEUIL_FILE
+          ? null : 'file 00·À trier pleine';
+      },
+    ], function () { appliquerRangementInitial_(estBudgetDepasse); },
+      function (e) { journalErreur_('Rangement', 'Grand rangement différé : ' + e); });
+
+    // INTAKE : draine la file (dépôts manuels + sortie du grand rangement) et les PJ Gmail.
+    // R2 : pendant une panne de COMPTE API persistée, TOUTES les sources sont suspendues — les
+    // scans ne produiraient rien (les docs sont sautés) et re-parcourir la fenêtre Gmail à chaque
+    // tick brûle le quota de lecture quotidien (vécu 07-06 : moteur re-bloqué 24 h APRÈS la
+    // recharge). La re-sonde (chargerPannePlateforme_) rouvre tout automatiquement, ≤ 1 h.
+    if (!estPannePlateforme_()) {
+    // Étapes NUES de l'intake (aucun `onErreur`) : l'erreur est enregistrée PUIS RE-LEVÉE telle
+    // quelle — exactement la sémantique d'avant (elle remonte au finally du tick).
+    etapeSuivie_('intake-gmail', [gPanneGmail], function () { traiterGmail_(estBudgetDepasse); });       // source 1 : PJ Gmail
+    if (estPanneGmail_()) suiviSkip_('intake-gmail', 'quota Gmail épuisé');
+    etapeSuivie_('intake-depots', [gBudgetTick], function () { traiterDepots_(estBudgetDepasse); }); // source 2 : 00·À trier (draine la file)
+
+    // Source 3 : fichiers PARTAGÉS récents (ADR-0005). COPIE dans l'arbo (comme Gmail), pipeline commun.
+    // ENVELOPPÉE : un échec réseau (liste/quota Drive) ne doit jamais bloquer l'analyse des mails ci-dessous
+    // ni le reste du tick. Budget-gatée : ne démarre pas si l'intake documentaire a déjà épuisé le budget.
+    etapeSuivie_('intake-partages', [gBudgetTick], function () { collecterPartages_(estBudgetDepasse); },
+      function (e) { journalErreur_('Partages', 'Collecte des fichiers partagés différée : ' + e); });
+
+    // ⚖️ ORDRE D'ÉQUITÉ STRICT (C28-15, décision Marc « équilibre strict » 2026-07-10) : le FLUX
+    // VIVANT Gmail (le tri, qui décide lui-même « à traiter » sur sujet + corps depuis l'ADR-0075 6b ;
+    // l'étape `intentions` est retirée le 2026-11-06) passe AVANT toutes les campagnes de masse. Avant, il passait en DERNIER : la
+    // campagne historique épuisait le quota d'appels Gmail dès ~08h10 et les mails de Marc
+    // n'étaient plus ni triés ni archivés de la journée (vécu : 4-17 fils/j au lieu de ~90).
+    // Le premier arrivé se sert — désormais c'est le vivant.
+    // Sous `ANALYSE_V2` (3 min), l'intake documentaire épuisait tout le budget de tick et affamait
+    // `tri-gmail` : le budget tail `estBudgetDepasseStandard` (4,5 min, 90 s garanties après la fin
+    // du budget 3 min, sûr sous le mur Apps Script de 6 min pour des appels Haiku/Flash courts sans OCR
+    // ni Sonnet ×2 et bornés par `TRI_MAX_FILS_PAR_RUN`) empêche cette famine à chaque tick.
+    // ENVELOPPÉS : une erreur (quota compris — détectée par signalerPanneGmail_ dans le catch) ne
+    // bloque jamais la suite du tick.
+    etapeSuivie_('tri-gmail', [gBudgetStandard, gPanneGmail], function () { trierFilsGmail_(estBudgetDepasseStandard); },
+      function (e) {
+        if (!signalerPanneGmail_(e)) journalErreur_('TriGmail', 'Tri Gmail différé : ' + e);
+      });
+    if (estPanneGmail_()) suiviSkip_('tri-gmail', 'quota Gmail épuisé');
+
+    // ⚖️ CONSOLIDATION de l'arborescence (C28-26, ADR-0024) — REMONTÉE ICI, juste après le flux
+    // vivant et AVANT les campagnes legacy + la réconciliation (incident 2026-07-23 : placée EN
+    // DERNIER, elle était affamée et ne draînait JAMAIS — anti-patron leçon §7). « BUDGET TAIL » :
+    // gatée par estBudgetDepasseStandard (mur 4,5 min) et non par le budget de tick 3 min — elle est
+    // PURE I/O Drive (moveTo + hash MD5, aucun risque LLM). Le flux vivant ci-dessus (borné à 3 min)
+    // a déjà eu sa part ; la consolidation n'utilise que le reliquat → GARANTIE à chaque tick sans
+    // rien lui voler. EXÉCUTION avant GÉNÉRATION (drainer avant d'alimenter). Bornée par ses budgets
+    // run + quotidien + la contre-pression. ⚠️ ARRÊTÉE le 21/09 (C49-20) : ses deux budgets
+    // quotidiens sont rendus à 0 et les gates ci-dessous portent l'interrupteur — ce qui suit
+    // décrit donc un mécanisme INERTE aujourd'hui, gardé parce qu'il redémarre d'un booléen.
+    // SECONDAIRES → enveloppées (jamais bloquer l'intake).
+    // Suspendues pendant le RESET (C28-33, ADR-0030 « Transition ») : une seule main déplace à la
+    // fois, sinon le flux concurrent re-remplit ce que le reset vide (non-convergence structurelle,
+    // leçon §7 C28-26). `resetEnCours_()` = false dès que les 3 phases du reset sont terminées (ou
+    // si Marc suspend RESET_ACTIF) → conso-2 reprend automatiquement, sans geste manuel.
+    etapeSuivie_('consolidation-exec',
+      [function () { return CONFIG.CONSOLIDATION_EXEC_ACTIF ? null : 'désactivée (CONFIG)'; }, gBudgetStandard, gResetEnCours],
+      function () { appliquerPlanConsolidation_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('ConsolidationExec', 'Exécution du plan différée : ' + e); });
+    etapeSuivie_('consolidation-gen',
+      [function () { return CONFIG.CONSOLIDATION_ACTIF ? null : 'désactivée (CONFIG)'; }, gBudgetStandard, gResetEnCours],
+      function () { genererPlanConsolidation_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Consolidation', 'Génération du plan différée : ' + e); });
+
+    // 🎯 MISSIONS de curation (C28-49, ADR-0039 — brief Marc du 17/08) : le rangement FIN,
+    // dossier par dossier. « BUDGET TAIL » : pure I/O Drive (moveTo seul, zéro LLM) →
+    // estBudgetDepasseStandard. APRÈS la consolidation (dont elles héritent le budget réalloué),
+    // gatées `!resetEnCours_()` (une seule main déplace) + budget QUOTIDIEN partagé (l'ORDRE
+    // ci-dessous = la priorité). SECONDAIRES → enveloppées (jamais bloquer l'intake).
+    var gMissionsActif = function () { return CONFIG.MISSIONS_ACTIF ? null : 'désactivée (CONFIG)'; };
+    etapeSuivie_('mission-vehicule', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('vehicule', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission véhicule différée : ' + e); });
+    etapeSuivie_('mission-logement', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('logement', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission logement différée : ' + e); });
+    // `gMissionsAmont03_` : dispatch03 attend la convergence de vehicule+logement — ses verdicts
+    // s'appuient sur des cibles/fenêtres que ces deux missions sont en train de CONSTRUIRE.
+    etapeSuivie_('mission-dispatch-03', [gMissionsActif, gMissionsAmont03_, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('dispatch03', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission dispatch 03 différée : ' + e); });
+    etapeSuivie_('mission-ecoles-archives-06', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('ecoles-archives06c', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission archives 06 différée : ' + e); });
+    // PR2 (Carrière + Finances). `paies` AVANT `carriere` : le domicile UNIQUE des paies est
+    // 02/« Revenus & paie »/<Employeur> — les deux missions y routent par la MÊME fonction
+    // canonique (`employeurDuNom_`), l'ordre ne change que la priorité de drainage.
+    etapeSuivie_('mission-paies', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('paies', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission paies différée : ' + e); });
+    etapeSuivie_('mission-carriere', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('carriere', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission carrière différée : ' + e); });
+    etapeSuivie_('mission-annees-02', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('annees02', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission années 02 différée : ' + e); });
+    etapeSuivie_('mission-impots', [gMissionsActif, gBudgetStandard, gResetEnCours, gMissionsJour_],
+      function () { executerMission_('impots', estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Missions', 'Mission impôts différée : ' + e); });
+
+    // 🔗 FUSION des dossiers en double (#47 PR2, ADR-0037) — applique le PlanFusion CURÉ par Marc
+    // (lignes source `Fusionner`). GATÉE OFF (`FUSION_EXEC_ACTIF`) : one-shot au feu vert. « BUDGET
+    // TAIL » : pure I/O Drive (moveTo seul, zéro LLM) → estBudgetDepasseStandard (mur 4,5 min). APRÈS
+    // la consolidation (drain prioritaire du backlog) et gatée `!resetEnCours_()` (une seule main
+    // déplace — le reset consolide déjà 04 en interne). SECONDAIRE → enveloppée (jamais bloquer l'intake).
+    etapeSuivie_('fusion-exec',
+      [function () { return CONFIG.FUSION_EXEC_ACTIF ? null : 'désactivée (CONFIG)'; }, gBudgetStandard, gResetEnCours],
+      function () { appliquerPlanFusion_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('FusionExec', 'Exécution du plan de fusion différée : ' + e); });
+
+    // 🧹 RESET complet (C28-33, ADR-0030) : rassemblement → placement → 04 interne, dans cet ordre
+    // (drainer ce que le rassemblement vient d'alimenter, TÔT comme la consolidation qu'il remplace
+    // le temps de la campagne). « BUDGET TAIL » : PURE I/O Drive (moveTo + hash MD5, zéro LLM) →
+    // estBudgetDepasseStandard (mur 4,5 min), pas le budget de tick 3 min. Chaque étape est bornée +
+    // reprenable + convergente (clé dédiée par phase) ; SECONDAIRES → enveloppées (jamais bloquer
+    // l'intake). Suspendues automatiquement une fois `resetTermine_()` (plus rien à faire, lecture
+    // cheap de 3 Properties).
+    etapeSuivie_('reset-rassemblement', [gResetActif, gBudgetStandard],
+      function () { rassemblerReset_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Reset', 'Rassemblement différé : ' + e); });
+    etapeSuivie_('reset-placement', [gResetActif, gBudgetStandard],
+      function () { placerReset_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Reset', 'Placement différé : ' + e); });
+    etapeSuivie_('reset-04-interne', [gResetActif, gBudgetStandard],
+      function () { appliquerReset04Interne_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Reset', '04 interne différé : ' + e); });
+    // NB (revue quota C28-33, RÉÉCRIT après la réallocation) : sur un tick où le reset consomme jusqu'au
+    // bord du mur 4,5 min, il peut faire sauter POUR CE TICK les campagnes gatées par le budget de tick
+    // 3 min PLUS COURT. Ne restent concernées que **migration / réanalyse / dry-run v2 / `etapeReorg_`**
+    // — l'historique Gmail et la réconciliation Index sont désormais SUSPENDUS EXPLICITEMENT pendant le
+    // reset (gate `!resetEnCours_()`, budget réalloué). Ampleur mesurée : le reset consomme ses
+    // 50 min/j en ~19 ticks sur 288, donc ~6 % des ticks « mangés » — pas un gate supplémentaire.
+    // ⚠️ DIAGNOSTIC : si un « creux » apparaît sur `synchroniserIndex_` ou l'historique Gmail pendant un
+    // reset actif, la cause est le GATE explicite (voir plus bas), PAS une famine de budget ici.
+
+    // Passe LLM du RELIQUAT du reset (ADR-0030 PR5, décision Marc 2026-07-31 « fichiers Inconnu,
+    // rien ne se passe ») : les fichiers de `_TRI 2026` que la table ne route PAS passent au
+    // pipeline COMPLET (OCR + analyse v2), un petit lot par tick. Campagne de fond ⇒ budget
+    // QUOTIDIEN en ms réelles (`RESET_LLM_BUDGET_JOUR_MS`, revue flotte C28-42) RÉALLOUÉ dans
+    // l'enveloppe 50 min/j du reset (placement 22→14, 04 8→4 — jamais une augmentation, invariant
+    // testé par mutation) ; frein campagnes §2.6 ; JAMAIS gatée par resetEnCours_() (réciproque
+    // vitale : elle doit tourner PENDANT le reset, et après, jusqu'au drainage). PLACÉE AVANT
+    // TOUTES les campagnes LLM — historique Gmail comprise : à la reprise post-reset (le drapeau
+    // LLM n'entre pas dans resetTermine_), le reliquat garde la priorité du créneau 3 min.
+    // SECONDAIRE → enveloppée : un échec ne bloque jamais la suite du tick.
+    etapeSuivie_('reset-llm', [gResetActif, gBudgetTick, gFreinCampagnes],
+      function () { analyserReliquatReset_(estBudgetDepasse); },
+      function (e) { journalErreur_('Reset', 'Passe LLM du reliquat différée : ' + e); });
+
+    // Campagne HISTORIQUE Gmail (#12, ADR-0010 §1) : remonte tout l'historique de PJ par tranches
+    // ancrées. APRÈS le flux vivant (priorité stricte C28-15). Coût nul une fois finie.
+    // SECONDAIRE → enveloppée : un échec Gmail ne bloque jamais la suite du tick.
+    // SUSPENDUE pendant le RESET (décision Marc 2026-07-29 « accélère l'automatique ») : son budget
+    // quotidien était RÉALLOUÉ au reset — l'enveloppe totale du quota runtime ne bouge pas,
+    // ⚠️ ARRÊTÉE le 21/09 (C49-20) : `GMAIL_HISTO_ACTIF` est false et son budget vaut 0 (20 min
+    // prêtées en tout, à des campagnes depuis retirées par l'ADR-0074). Ce qui suit décrit un mécanisme inerte.
+    // donc aucun risque de gel des déclencheurs. C'est un RATTRAPAGE : quelques jours de retard sont
+    // sans conséquence, et elle reprend SEULE à la convergence du reset (`resetEnCours_` repasse à false).
+
+    // RÉSOLUTION DES IDENTIFIANTS (C49-16) : retrouver le `fileId` des lignes d'Index qui n'en
+    // portent pas — les pièces jointes Gmail, dont la clé `<messageId>|<rang>|<nom>|<taille>`
+    // n'en contient aucun. Sans fileId, un papier classé n'est pas DÉSIGNABLE : ni par la
+    // réconciliation Index↔Drive, ni par les campagnes de doublons et de fusion (ADR-0074).
+    // (Les campagnes vers la Mémoire qu'elle alimentait — audit, rattrapage, périmètre — ont
+    // été retirées par l'ADR-0074 ; elle reste pour les consommateurs ci-dessus.)
+    //
+    // ⚠️ Pas de garde de frein LLM, et ce n'est pas un oubli : cette étape ne peut pas dépenser
+    // un dollar (des recherches Drive, aucun appel de modèle). L'y soumettre ferait attendre les
+    // ENTRÉES d'une campagne à cause d'un budget que la campagne seule consomme.
+    // ⚠️ Pas de gate sur `resetEnCours_()` non plus : gater une passe ONE-SHOT sur une campagne
+    // dont la convergence a déjà été inatteignable une fois (ADR-0035) l'endormirait à vie, et
+    // elle ne dispute rien au reset — quelques centaines de recherches Drive, UNE fois.
+    //
+    // Enveloppée, comme tout ce qui suit l'intake : un échec ne doit jamais le bloquer.
+    try {
+      var propsRes = PropertiesService.getScriptProperties();
+      var etatRes = etatResolutionFileId_(propsRes); // avale déjà ses propres erreurs
+      var tagRes = null;
+      try { tagRes = propsRes.getProperty('DriveAI_RESOLUTION_FILEID_TAG'); }
+      catch (eResTag) { tagRes = null; } // « je ne sais pas » ⇒ on laisse la passe trancher
+      // La suspension de panne (revue quotas) : sans elle, un refus Drive persistant fait
+      // re-lire l'Index ENTIER à chaque tick pour re-échouer — ~20-30 min/j, indéfiniment.
+      var panneRes = panneResolutionFileId_(propsRes);
+      var repriseRes = panneRes.depuisMs
+        ? panneRes.depuisMs + CONFIG.RESOLUTION_FILEID_RESONDE_MS : 0;
+      if (resolutionFileIdDoitTourner_(etatRes, tagRes, CONFIG.RESOLUTION_FILEID_TAG,
+            repriseRes, Date.now())
+          && !estBudgetDepasse()) {
+        etapeResolutionFileId_(estBudgetDepasse, {});
+      }
+    } catch (e) { journalErreur_('ResolutionFileId', 'Résolution des identifiants différée : ' + e); }
+
+    etapeSuivie_('histo-gmail', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+      function () { traiterGmailHistorique_(estBudgetDepasse); },
+      function (e) {
+        if (!signalerPanneGmail_(e)) journalErreur_('Gmail', 'Campagne historique différée : ' + e);
+      });
+
+    // Migration taxonomie (#8, ADR-0002) : re-classe l'EXISTANT (pré-refonte) vers la nouvelle
+    // taxonomie, EN PLACE, une page par tick. APRÈS l'intake (le flux vivant garde la priorité),
+    // AVANT l'analyse des mails (la précision documentaire prime, cap produit ADR-0001). Campagne finie
+    // → 1 Property lue, coût nul. ENVELOPPÉE : un échec ne doit jamais bloquer la suite du tick.
+    etapeSuivie_('migration', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+      function () { appliquerMigrationTaxonomie_(estBudgetDepasse); },
+      function (e) { journalErreur_('Migration', 'Migration taxonomie différée : ' + e); });
+
+    // Re-analyse v2 CIBLÉE (#26, C26-08, ADR-0018) : re-passe les domaines mal classés
+    // (REANALYSE_CIBLES : `06` seul depuis ADR-0056, et à la RACINE du domaine) au pipeline v2, EN PLACE, une page par tick. Ne démarre qu'après
+    // la FIN de m1 (une seule campagne de masse à la fois — garde dans appliquerReanalyseCiblee_).
+    // Même famille que la migration : après l'intake, gatée par le frein budget, enveloppée.
+    etapeSuivie_('reanalyse', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+      function () { appliquerReanalyseCiblee_(estBudgetDepasseDoc); },
+      function (e) { journalErreur_('Réanalyse', 'Re-analyse ciblée différée : ' + e); });
+
+    // Retour des orphelins de `_Doublons` (#468 point 2, ADR-0047 §8) : ONE-SHOT, un lot par tick,
+    // jusqu'à la Property de fin. PAS d'`etapeSuivie_` (registre C28-44 saturé, cf. la validation
+    // des doublons) : ses lots se lisent dans le Journal (source `RetourOrphelins`), ses pannes passent
+    // par `journalErreur_`. Mêmes gates que la migration (budget de tick, frein campagnes, reset).
+    try {
+      if (CONFIG.RETOUR_ORPHELINS_ACTIF && !gBudgetTick() && !gFreinCampagnes() && !gResetEnCours()) {
+        retournerOrphelinsDoublons_(estBudgetDepasse);
+      }
+    } catch (e) { journalErreur_('RetourOrphelins', 'Retour des orphelins impossible : ' + e); }
+
+    // Dry-run v2 (#26, C26-07, ADR-0015) : preuve avant/après sur échantillon réel, ZÉRO mutation
+    // Drive (planRoutageV2_ seul — jamais deciderRoutageV2_). Interrupteur DÉDIÉ (DRYRUN_V2_ACTIF,
+    // OFF par défaut) : n'affecte JAMAIS le flux vivant ni CONFIG.ANALYSE_V2. Même famille que la
+    // migration (après l'intake, gatée par le frein budget campagnes, enveloppée).
+    // Gate du flag EN TÊTE (retour Marc 2026-08-13 : « en cours » pour une campagne OFF est
+    // trompeur — le flag était vérifié À L'INTÉRIEUR de la fonction, invisible du wrapper : la
+    // ligne affichait un run à vide comme de l'activité). Le no-op interne reste (double garde).
+    etapeSuivie_('dryrun-v2',
+      [function () { return CONFIG.DRYRUN_V2_ACTIF ? null : 'désactivée (CONFIG)'; }, gBudgetTick, gFreinCampagnes, gResetEnCours],
+      function () { appliquerDryRunV2_(estBudgetDepasse); },
+      function (e) { journalErreur_('DryRunV2', 'Dry-run v2 différé : ' + e); });
+
+    // Comparaison 1↔2 passes (ADR-0034 §5) : PREUVE avant d'allumer la 2ᵉ passe conditionnelle —
+    // pour chaque doc, le gate (sauterait la passe 2 ?), la divergence de placement et les faux
+    // négatifs `sensible`. Interrupteur DÉDIÉ (DRYRUN_CMP_ACTIF, OFF), ZÉRO mutation, même famille
+    // que le dry-run (après l'intake, gatée par le frein budget campagnes, enveloppée).
+    etapeSuivie_('dryrun-cmp',
+      [function () { return CONFIG.DRYRUN_CMP_ACTIF ? null : 'désactivée (CONFIG)'; }, gBudgetTick, gFreinCampagnes, gResetEnCours],
+      function () { appliquerComparaisonV2_(estBudgetDepasse); },
+      function (e) { journalErreur_('DryRunV2', 'Comparaison 1↔2 passes différée : ' + e); });
+
+    // (Intentions et tri Gmail : remontés AVANT les campagnes — ordre d'équité strict C28-15.)
+
+    // Réorg IA (#21, C21-04/06) : APPLIQUE d'abord les actions validées par Marc (déplacements/
+    // renommages de dossiers, re-vérif zone protégée par mutation — jamais de suppression), PUIS
+    // propose un nouveau plan si demandé (drainer avant d'alimenter). Tout en DERNIER (à la
+    // demande, jamais prioritaire sur l'intake), budget-gaté, enveloppé.
+    etapeSuivie_('reorg', [gBudgetTick], function () { etapeReorg_(estBudgetDepasse); },
+      function (e) { journalErreur_('Reorg', 'Étape réorg différée : ' + e); });
+
+    // (Campagne de réorg AUTOMATIQUE C28-32/ADR-0029 : ABROGÉE par l'ADR-0031 — décision Marc
+    // 2026-07-31 « plus RIEN tout seul ». L'analyse réorg n'a plus que deux déclencheurs, tous
+    // deux À LA DEMANDE : une demande déposée par l'app et, hier, l'outil `proposer_reorg` du chat,
+    // retiré par l'ADR-0074 le 05/11/2026.)
+
+    // Réconciliation Index↔Drive (C28-07, plan P3) : campagne de fond PERPÉTUELLE sur le
+    // reliquat de budget — OBSERVE Drive (jamais ne le modifie) et aligne l'Index append-only
+    // (statuts `déplacé`/`corbeillé`). SECONDAIRE → enveloppée : un échec ne bloque jamais l'intake.
+    // SUSPENDUE pendant le RESET (décision Marc 2026-07-29) : son budget (12 min/j) est RÉALLOUÉ au
+    // reset. Justification EXACTE (corrigée en revue — la 1ʳᵉ version prétendait à tort que le reset
+    // inscrit ces chemins sous la clé canonique : il écrit sous `tri33|`/`tri33p|`, que
+    // `fileIdDepuisCleMaintenance_` ne reconnaît même pas) : pendant le reset un fichier TRANSITE par
+    // `_TRI 2026/<domaine>` avant d'en sortir, donc la réconciliation écrirait DEUX lignes `déplacé`
+    // par fichier — dont une portant un chemin TRANSITOIRE, publié tel quel dans l'app — là où une
+    // seule passe après convergence donne la vérité. La suspension économise des écritures ET évite
+    // d'afficher un état faux. Aucun invariant cassé : `indexContient_` teste la PRÉSENCE d'une clé,
+    // jamais son statut (aucun re-traitement possible), curseur persistant + Index append-only ⇒ la
+    // dette se rattrape intégralement à la reprise (campagne perpétuelle, rien ne se perd).
+    etapeSuivie_('reconciliation-index', [gBudgetTick, gResetEnCours],
+      function () { synchroniserIndex_(estBudgetDepasse); },
+      function (e) { journalErreur_('Maintenance', 'Réconciliation Index différée : ' + e); });
+
+    // (Consolidation C28-26 : REMONTÉE juste après le flux vivant — voir bloc « BUDGET TAIL » plus
+    // haut. Elle était ici EN DERNIER et se faisait affamer par la réconciliation + les campagnes
+    // legacy, incident 2026-07-23.)
+
+    } else {
+      // Suspension R2 : UNE seule évaluation du prédicat (comme avant — jamais 19 appels), mais
+      // chaque étape suspendue est ENREGISTRÉE : l'app montre POURQUOI tout est muet pendant une
+      // panne de compte (trou d'observabilité n° 1 de l'ADR-0038). Liste = les étapes DU BLOC,
+      // couverte par le tripwire (chaque clé y est aussi wrappée `etapeSuivie_` ci-dessus).
+      ['intake-gmail', 'intake-depots', 'intake-partages', 'tri-gmail',
+        'consolidation-exec', 'consolidation-gen',
+        'mission-vehicule', 'mission-logement', 'mission-dispatch-03', 'mission-ecoles-archives-06',
+        'mission-paies', 'mission-carriere', 'mission-annees-02', 'mission-impots',
+        'fusion-exec', 'reset-rassemblement',
+        'reset-placement', 'reset-04-interne', 'reset-llm', 'histo-gmail', 'migration',
+        'reanalyse', 'dryrun-v2', 'dryrun-cmp', 'reorg', 'reconciliation-index'
+      ].forEach(function (cle) { suiviSkip_(cle, 'panne API (compte)'); });
+    } // fin de la suspension R2 (panne de compte API)
+  } finally {
+    // `releaseLock` DOIT toujours s'exécuter : un try/finally imbriqué garantit sa libération même si
+    // un `journalErreur_` d'un catch ci-dessous lève à son tour (panne Sheet) — sinon le verrou resterait
+    // pris jusqu'à expiration (revue apps-script-quota).
+    try {
+      // Heartbeat (ADR-0004) EN PREMIER dans le finally : « le moteur a exécuté un tick ». Écrit même si
+      // l'intake a partiellement échoué — c'est ce timestamp que le chien de garde surveille. Property
+      // unique, robuste ; un échec ici ne doit rien casser (enveloppé).
+      try { PropertiesService.getScriptProperties().setProperty('DriveAI_LAST_TICK', String(Date.now())); }
+      catch (e) { /* écriture Property impossible : rien de plus à faire */ }
+      // Observabilité anti-gel (Vague 2) : trace la DURÉE totale du tick au plus 1×/h. Le « socle »
+      // (relectures Index/Journal, campagnes) n'est budgété par rien ; s'il dérive vers le mur runtime
+      // ~90 min/j (×288 ticks), c'est INVISIBLE aujourd'hui jusqu'au gel. Cette trace horaire le rend
+      // observable AVANT (revue de fond 2026-07-31). Best-effort : un échec ne bloque jamais le tick.
+      try {
+        var pr = PropertiesService.getScriptProperties();
+        var derniereTrace = Number(pr.getProperty('DriveAI_TICK_TRACE_MS')) || 0;
+        if (Date.now() - derniereTrace > 60 * 60 * 1000) {
+          journalInfo_('Perf', 'Durée du tick : ' + Math.round((Date.now() - debut) / 1000) + ' s (trace horaire — dérive vers le mur 90 min/j à surveiller).');
+          pr.setProperty('DriveAI_TICK_TRACE_MS', String(Date.now()));
+        }
+      } catch (e) { /* observabilité best-effort */ }
+      try { flushUsage_(); } catch (e) { journalErreur_('Cout', 'Flush usage impossible : ' + e); }
+      // Observabilité (ADR-0006), SECONDAIRE et enveloppé : un échec ne doit jamais bloquer le tick.
+      // Le heartbeat Santé s'écrit même si l'intake a partiellement échoué (d'où le finally).
+      etapeSuivie_('sante', [], function () { majSante_(); },
+        function (e) { journalErreur_('Santé', 'MàJ Santé impossible : ' + e); });
+      // Progression LIVE des opérations (C28-18) : rendu centralisé UNE fois par tick, dans le
+      // finally — les avancées PARTIELLES d'un run interrompu sont capturées aussi. Enveloppé.
+      etapeSuivie_('progression', [], function () { majProgressions_(); },
+        function (e) { journalErreur_('Progression', 'MàJ progression impossible : ' + e); });
+      // Télémétrie coûts & quotas (C28-24) : même contrat que Progression — une seule écriture
+      // par tick, lue en poll par l'app. Enveloppée : un échec ne bloque jamais le reste.
+      // La VENTILATION du coût par usage (C28-58) est écrite DANS cette étape, pas dans une étape
+      // à elle : le registre de suivi est borné (~9 Ko de Property, tripwire `suivi.test.js`) et une
+      // 36ᵉ entrée le faisait déborder. Même famille (« coûts & quotas »), même contrat : une seule
+      // écriture par tick, enveloppée, jamais bloquante pour l'intake.
+      // Deux écritures INDÉPENDANTES dans une même étape : chacune a son try, sinon un échec de la
+      // télémétrie gèlerait l'onglet `Coûts` en silence — et le message d'erreur ne dirait même pas
+      // laquelle a lâché (revue flotte C28-58).
+      etapeSuivie_('telemetrie', [], function () {
+        try { majTelemetrie_(); } catch (e) { journalErreur_('Télémétrie', 'MàJ télémétrie impossible : ' + e); }
+        try { majCouts_(); } catch (e) { journalErreur_('Coûts', 'MàJ ventilation des coûts impossible : ' + e); }
+      });
+      // Résumé hub (C28-27, retiré par ADR-0078 / CONFIG.HUB_RESUME_ACTIF) : les 4 métriques du widget
+      // du hub étaient pré-calculées ici une fois par tick ; désactivé tant que `HUB_RESUME_ACTIF`
+      // vaut false pour éviter les lectures inutiles et l'erreur « Hub » quand le dossier revue est absent.
+      etapeSuivie_('hub-resume',
+        [function () { return CONFIG.HUB_RESUME_ACTIF ? null : 'désactivée (CONFIG)'; }],
+        function () { majResumeHub_(); },
+        function (e) { journalErreur_('Hub', 'MàJ résumé hub impossible : ' + e); });
+      // Historique QUOTIDIEN du vrac par domaine (demande Marc 2026-08-12) : I/O pur (comptage
+      // Drive), jamais de LLM ⇒ budget TAIL (4,5 min), jamais le budget de tick 3 min. Une seule
+      // sweep complète par jour, curseur reprenable sur plusieurs ticks si besoin ; ne mute rien,
+      // tourne même pendant un reset. Enveloppée : un échec ne bloque jamais le reste.
+      // ⚠️ Gate du flag EN TÊTE (C49-20, patron `dryrun-v2`) : le no-op interne de
+      // `majHistoriqueVrac_` suffit à ne RIEN FAIRE, il ne suffit pas à le DIRE. Sans gate
+      // NOMMÉE, `statutDepuisSuivi_` n'a ni skip ni raison à lire et rend « en cours » sur une
+      // campagne arrêtée. Le no-op interne reste (double garde).
+      etapeSuivie_('historique-vrac',
+        [function () { return CONFIG.HISTORIQUE_VRAC_ACTIF ? null : 'désactivée (CONFIG)'; }],
+        function () { majHistoriqueVrac_(estBudgetDepasseStandard); },
+        function (e) { journalErreur_('HistoriqueVrac', 'MàJ historique vrac impossible : ' + e); });
+
+      // Validation de `_Doublons` par empreinte (C28-49 PR4, ADR-0047) : I/O pur (Drive REST +
+      // Sheet), jamais de LLM, AUCUNE mutation ⇒ budget TAIL, tourne même pendant un reset. PAS
+      // d'`etapeSuivie_` : le registre C28-44 est saturé (8 377/8 500 octets, ~199 par entrée) et
+      // une 43ᵉ clé ferait échouer son tripwire de plafond (le flush, lui, dégrade proprement) — la
+      // campagne se rend donc visible par sa ligne
+      // Santé et son onglet `RapportDoublons` (ADR-0047 §6). Enveloppée : un échec ne bloque rien.
+      try { majValidationDoublons_(estBudgetDepasseStandard); }
+      catch (e) { journalErreur_('Doublons', 'Validation des doublons impossible : ' + e); }
+      // La rotation (deleteRows en lot, 10-30 s) est REPORTÉE si le tick a déjà consommé son
+      // garde-temps standard : elle est en toute fin de `finally`, donc c'est elle qui franchirait
+      // le mur des 6 min (revue #229). Aucun coût à attendre le tick suivant.
+      etapeSuivie_('journal-borne', [], function () { bornerJournal_(estBudgetDepasseStandard); },
+        function (e) { journalErreur_('Santé', 'Journal borné impossible : ' + e); });
+      // Heure des étapes postérieures à `progression` (C28-60) : leur ligne de l'onglet était écrite
+      // AVANT qu'elles ne s'exécutent et montrait le tick précédent. Ré-écrit ces seules lignes,
+      // maintenant qu'elles ont toutes enregistré leur passage. Sans Drive ni LLM (~1 s), donc non
+      // budgétée ; PAS d'`etapeSuivie_` (registre saturé, et l'index d'une clé en bout de registre
+      // n'a pas à bouger). Enveloppée : un échec laisse l'heure du tick précédent, comme avant.
+      try { majProgressionsFinTick_(); }
+      catch (e) { journalErreur_('Progression', 'Rafraîchissement de fin de tick impossible : ' + e); }
+      // Flush du suivi C28-44 — EN DERNIER du finally (revue apps-script-quota PR1 : plus tôt, la
+      // rotation du Journal ci-dessus perdrait son enregistrement de ce run) et JAMAIS auto-observé
+      // (il ne peut pas s'enregistrer lui-même) : un échec ici laisse le persisté du tick précédent
+      // intact, le run courant est simplement perdu pour l'historique — Santé reste le filet.
+      try { flusherSuiviOps_(PropertiesService.getScriptProperties()); }
+      catch (e) { /* best-effort : ne jamais MASQUER une exception du tick en vol (le finally
+                     imbriqué garantit déjà releaseLock) — le run est perdu pour l'historique,
+                     le persisté du tick précédent reste intact */ }
+    } finally {
+      verrou.releaseLock();
+    }
+  }
+}
+
+/**
+ * Auto-rejeu sur changement de version de classement.
+ *
+ * Compare `CONFIG.VERSION` (figée dans le code déployé) à la dernière version vue
+ * (Script Property `DriveAI_VERSION`). Si elles diffèrent — juste après un déploiement
+ * qui change la logique — on RENVOIE les dépôts manuels partis en revue vers 00·À trier
+ * pour qu'ils soient reclassés par le tick courant (l'ancien outil manuel `rejouerLaRevue` a été retiré — audit 2026-07-02).
+ *
+ * Sûreté (audits flotte) : opération **réversible uniquement** (déplacement, jamais de
+ * corbeille), **bornée** par le garde-temps + un plafond/run, et **reprenable** — la
+ * version n'est posée QUE lorsque tout le rejeu est consommé. La passe 2 reprend AUSSI les
+ * copies legacy « [REVUE] confiance » d'origine Gmail (cf. sa docstring) ; les docs déjà
+ * classés ne sont jamais touchés (idempotence préservée → pas de re-OCR/re-LLM inutile).
+ *
+ * @param {function():boolean} estBudgetDepasse
+ */
+function appliquerRejeuSiNouvelleVersion_(estBudgetDepasse) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_VERSION') === CONFIG.VERSION) return;
+
+  // Deux passes, toutes deux en DÉPLACEMENT seul (réversible, aucune corbeille) :
+  //  1. dépôts manuels partis en revue (clé Index `drive|…`) ;
+  //  2. docs « [REVUE] confiance … » (confiance basse) — touchés par un changement de seuil.
+  // La zone protégée (« [REVUE] sensible … ») n'est JAMAIS reprise (garde-fou §1).
+  var reste1 = rejeuAutoDesDepots_(estBudgetDepasse);
+  var reste2 = rejeuAutoDesConfiances_(estBudgetDepasse);
+  if (!reste1 && !reste2) {
+    // Rejeu entièrement consommé → on fige la version (anti-re-déclenchement).
+    props.setProperty('DriveAI_VERSION', CONFIG.VERSION);
+    journalInfo_('Maintenance', 'Rejeu auto terminé — version « ' + CONFIG.VERSION + ' » figée.');
+  }
+}
+
+/**
+ * Grand rangement initial AUTOMATIQUE (zéro clic), gated par `CONFIG.RANGEMENT_TAG`.
+ *
+ * Tant que le tag stocké (`DriveAI_RANGEMENT`) diffère du tag courant, chaque tick renvoie UNE
+ * page (`rangerUnePage_`, bornée par le garde-temps + `RANGEMENT_MAX_PAR_RUN`) du contenu « en
+ * vrac » des domaines NON protégés vers 00·À trier. L'intake les reprend ensuite (OCR → analyse
+ * → renommage → classement). Le tag n'est figé QUE lorsqu'une passe complète ne collecte plus
+ * AUCUN fichier en vrac (tout le Drive est passé au format `AAAA-MM-JJ_` ou parti à l'intake) :
+ * l'opération est donc reprenable sur autant de ticks que nécessaire, sans jamais re-coûter sur
+ * les fichiers déjà normalisés (idempotent). Déplacement seul — aucune suppression (garde-fous §1/§2).
+ *
+ * Placé TÔT dans le tick (AVANT l'intake) pour ne jamais être affamé — sinon l'ancien Drive ne se
+ * vide jamais (cf. incident file figée : le rangement en dernier ne recevait plus de budget). Mais
+ * gated sur une file BASSE (`nbFichiersATrier_ < RANGEMENT_SEUIL_FILE`, cf. tickDriveAI) : on ne
+ * collecte de NOUVEAUX fichiers que si 00·À trier a de la place — on DRAINE avant d'ALIMENTER.
+ * L'intake du même tick (puis des suivants) reprend ensuite la file ; borné, reprenable.
+ *
+ * Barre de progression (onglet `Progression`) : le total « en vrac » est RECENSÉ dans un tick DÉDIÉ —
+ * tant que la base n'est pas posée, ce tick NE range PAS et consacre son budget au comptage — sinon,
+ * sur un gros Drive, un recensement lancé APRÈS une page de rangement ne finirait jamais et la barre
+ * n'apparaîtrait pas (cf. revue quotas). Filet anti-blocage : après `RANGEMENT_RECENS_ESSAIS_MAX`
+ * recensements incomplets, on accepte le compte PARTIEL comme base approximative — le rangement n'est
+ * JAMAIS bloqué par le recensement ; la re-base (`majProgression_`) et la finalisation sur le vrai
+ * signal de fin corrigent tout écart.
+ *
+ * @param {function():boolean} estBudgetDepasse
+ */
+function appliquerRangementInitial_(estBudgetDepasse) {
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_RANGEMENT') === CONFIG.RANGEMENT_TAG) return; // déjà fait pour ce tag
+  if (estBudgetDepasse()) return; // pas de budget ce tick → repris au prochain
+
+  var proteges = ensembleDomainesProteges_();
+
+  // Nouveau tag = nouvelle campagne de rangement → on repart d'une barre VIERGE (re-recensement du
+  // total). Sinon la barre resterait figée sur le total de la campagne précédente.
+  if (props.getProperty('DriveAI_RANGEMENT_BARRE_TAG') !== CONFIG.RANGEMENT_TAG) {
+    props.deleteProperty('DriveAI_RANGEMENT_BASE');
+    props.deleteProperty('DriveAI_RANGEMENT_TRAITES');
+    props.deleteProperty('DriveAI_RANGEMENT_RECENS');
+    props.setProperty('DriveAI_RANGEMENT_BARRE_TAG', CONFIG.RANGEMENT_TAG);
+  }
+
+  // PHASE 1 — RECENSEMENT (tick dédié, une fois) : pose la base de la barre. Ce tick NE range pas.
+  // (Le RENDU de la barre est centralisé dans majProgressions_ au finally du tick — C28-18.)
+  if (props.getProperty('DriveAI_RANGEMENT_BASE') === null) {
+    var essaisFaits = Number(props.getProperty('DriveAI_RANGEMENT_RECENS')) || 0;
+    var rec = compterVracRacines_(estBudgetDepasse);
+    var essais = essaisFaits + 1;
+    if (!rec.complet && essais < CONFIG.RANGEMENT_RECENS_ESSAIS_MAX) {
+      props.setProperty('DriveAI_RANGEMENT_RECENS', String(essais)); // partiel → réessai au prochain tick
+      return;
+    }
+    props.setProperty('DriveAI_RANGEMENT_BASE', String(rec.n || 0)); // complet, ou partiel accepté (filet)
+    props.setProperty('DriveAI_RANGEMENT_TRAITES', '0');
+    props.deleteProperty('DriveAI_RANGEMENT_RECENS'); // compteur d'essais soldé avec le recensement
+    return; // barre initialisée ; le rangement démarre au tick suivant
+  }
+
+  // PHASE 2 — RANGEMENT : une page bornée, puis mise à jour de la barre (cumul des fichiers sortis).
+  var r = rangerUnePage_(estBudgetDepasse, proteges);
+  if (r.deplaces) {
+    try { majProgression_(r.deplaces); }
+    catch (e) { journalErreur_('Progression', 'MàJ barre impossible : ' + e); }
+    journalInfo_('Rangement', r.deplaces + ' fichier(s) en vrac renvoyé(s) dans 00·À trier (rangement initial auto).');
+  }
+  // Terminé seulement quand une passe NON interrompue ne collecte plus aucun fichier en vrac.
+  if (!r.reste && r.collectes === 0) {
+    try { finaliserProgression_(); } // vrai signal de fin → barre à 100 %
+    catch (e) { journalErreur_('Progression', 'Finalisation barre impossible : ' + e); }
+    props.setProperty('DriveAI_RANGEMENT', CONFIG.RANGEMENT_TAG);
+    journalInfo_('Rangement', 'Rangement initial terminé — tout le Drive est passé au pipeline (tag « ' + CONFIG.RANGEMENT_TAG + ' »).');
+  }
+}
+
+/** Vrai si le grand rangement initial est déjà terminé pour le tag courant (lecture cheap, 1 Property). */
+function rangementTermine_() {
+  return PropertiesService.getScriptProperties().getProperty('DriveAI_RANGEMENT') === CONFIG.RANGEMENT_TAG;
+}
+
+/**
+ * Renvoie les docs « [REVUE] confiance … » de `00·À vérifier` vers `00·À trier` pour
+ * reclassement avec le seuil courant. **Déplacement seul** (réversible) : aucune corbeille,
+ * aucune écriture d'Index. La copie déplacée se re-traite comme un dépôt (clé `drive|nouvelId`,
+ * non indexée) ; la PJ Gmail d'origine reste « faite » dans l'Index → pas de doublon. La zone
+ * protégée (« [REVUE] sensible … ») est ignorée (jamais reprise).
+ *
+ * @param {function():boolean} estBudgetDepasse
+ * @return {boolean} vrai s'il reste des docs à renvoyer (plafond/budget atteint).
+ */
+function rejeuAutoDesConfiances_(estBudgetDepasse) {
+  // Marc peut avoir SUPPRIMÉ le dossier `00·À vérifier` (vide depuis P1-16, on l'y a invité) : dans
+  // ce cas il n'y a rien à rejouer — sans ce garde, l'exception ferait échouer le rejeu À CHAQUE
+  // tick après un bump de VERSION (la Property ne se poserait jamais), pour toujours.
+  var dossier;
+  try { dossier = DriveApp.getFolderById(CONFIG.DOSSIERS.A_VERIFIER); }
+  catch (e) { return false; } // plus de dossier revue = plus de legacy à reprendre
+  var it = dossier.getFiles();
+  var ids = [];
+  while (it.hasNext()) {
+    var f = it.next();
+    if (f.getName().indexOf('[REVUE] confiance') === 0) ids.push(f.getId());
+  }
+  if (!ids.length) return false;
+
+  var n = 0;
+  for (var i = 0; i < ids.length; i++) {
+    if (n >= CONFIG.REJEU_PAGE || estBudgetDepasse()) break;
+    var fid = ids[i];
+    var nom = DriveApp.getFileById(fid).getName();
+    if (deplacerEtRenommer_(fid, CONFIG.DOSSIERS.A_TRIER, CONFIG.DOSSIERS.A_VERIFIER, nom)) n++;
+  }
+  if (n) {
+    journalInfo_('Maintenance', n + ' doc(s) « confiance basse » renvoyé(s) dans 00·À trier (rejeu auto).');
+  }
+  return ids.length > n;
+}
+
+/**
+ * Renvoie les DÉPÔTS MANUELS partis en revue (clé Index `drive|…`, statut `revue`)
+ * vers 00·À trier pour reclassement, et retire leur ligne d'Index (sinon l'intake
+ * les sauterait). Borné (garde-temps + plafond). Aucune corbeille, aucune perte :
+ * un déplacement est réversible et l'original déposé reste unique mais retrouvable.
+ *
+ * @param {function():boolean} estBudgetDepasse
+ * @return {boolean} vrai s'il reste des dépôts à renvoyer (rejeu non terminé).
+ */
+function rejeuAutoDesDepots_(estBudgetDepasse) {
+  var f = feuille_('Index');
+  var dern = f.getLastRow();
+  if (dern < 2) return false;
+
+  var v = f.getRange(2, 1, dern - 1, 6).getValues(); // A=Clé … C=Fichier … F=Statut
+  var cibles = [];
+  for (var i = 0; i < v.length; i++) {
+    var cle = String(v[i][0]);
+    if (v[i][5] === 'revue' && cle.indexOf('drive|') === 0) {
+      cibles.push({ ligne: i + 2, fileId: cle.substring(6), nom: v[i][2] });
+    }
+  }
+  if (!cibles.length) return false;
+
+  var lignes = [], renvoyes = 0;
+  for (var j = 0; j < cibles.length; j++) {
+    if (lignes.length >= CONFIG.REJEU_PAGE || estBudgetDepasse()) break;
+    var c = cibles[j];
+    // Tentative de déplacement (réversible). On retire la ligne d'Index DANS TOUS LES CAS
+    // après tentative : un dépôt définitivement immobile (supprimé par Marc, etc.) ne doit
+    // pas bloquer l'avancée de la version à chaque tick. Le retry transitoire est déjà géré
+    // dans deplacerEtRenommer_.
+    if (deplacerEtRenommer_(c.fileId, CONFIG.DOSSIERS.A_TRIER, CONFIG.DOSSIERS.A_VERIFIER, c.nom)) {
+      renvoyes++;
+    }
+    lignes.push(c.ligne);
+  }
+  // Retire les lignes d'Index traitées (ordre décroissant : pas de décalage).
+  lignes.sort(function (a, b) { return b - a; });
+  for (var k = 0; k < lignes.length; k++) f.deleteRow(lignes[k]);
+
+  if (renvoyes) {
+    journalInfo_('Maintenance', renvoyes + ' dépôt(s) renvoyé(s) dans 00·À trier (rejeu auto).');
+  }
+  return cibles.length > lignes.length; // reste-t-il des cibles non traitées (plafond/budget) ?
+}
+
+/**
+ * Parcourt les fils Gmail récents avec PJ, paginés, dans le budget temps.
+ * @param {function():boolean} estBudgetDepasse
+ */
+function traiterGmail_(estBudgetDepasse) {
+  if (estPanneGmail_()) return; // quota Gmail épuisé (C28-15) : suspendu jusqu'à la re-sonde
+  // « RETARD PJ » (revue Vague 2, apps-script-quota) : le MUR « page à jour » plus bas suppose
+  // « PJ inédite ⇒ en page 0 ». Vrai en RÉGIME (rien n'attend), FAUX dès qu'un BACKLOG existe —
+  // reprise après une suspension quota/panne de crédit, rafale, ou budget épuisé en plein drainage
+  // laissent des PJ inédites sur les pages 1+, que le tri Gmail (par DERNIER message) ne remonte
+  // jamais en page 0. Sans filet, le mur les abandonnerait à vie (le TRI avait le même piège, fermé
+  // par `scanCycliqueTri_`). PJ ≠ tri : une PJ indexée est TERMINALE (jamais re-vue) → un cyclique
+  // perpétuel brûlerait le quota pour rien. On DÉSACTIVE donc juste le mur tant qu'un backlog est
+  // possible : on repagine toute la fenêtre (comme AVANT le mur) jusqu'à l'épuiser une fois
+  // (`!fils.length`), puis le mur reprend (perf en régime préservée). Le drapeau ne bouge qu'aux
+  // BORDS d'un backlog → ZÉRO écriture de Property en régime.
+  // I/O Property ENVELOPPÉE (revue code-reviewer) : `traiterGmail_` est appelé NU dans l'intake,
+  // JUSTE avant `traiterDepots_` — un blip Property transitoire ne doit jamais avorter le tick
+  // (leçon §7 « protéger l'intake : toute étape enveloppée d'un try/catch »). Indispo ⇒ défaut
+  // prudent `retard = true` : le mur est désactivé ce tick (COMPLÉTUDE privilégiée au perf ; l'état
+  // réel est relu au prochain tick, la logique converge). `props = null` coupe aussi les écritures.
+  var props = null;
+  var retard = true;
+  try {
+    props = PropertiesService.getScriptProperties();
+    retard = props.getProperty('DriveAI_GMAIL_PJ_RETARD') === '1';
+  } catch (e) { props = null; retard = true; }
+  var debutPage = 0;
+  var scanne = false;       // a-t-on lu ≥ 1 page ? (sinon on n'a rien appris sur le backlog)
+  var fenetreAJour = false; // fin PROPRE atteinte (fin de fenêtre OU mur) ⇒ aucun backlog en attente
+  // La panne de compte peut être détectée EN COURS de run (re-sonde qui échoue) : on sort tôt —
+  // continuer à lister des fils dont chaque document sera sauté ne ferait que brûler du quota Gmail.
+  while (!estBudgetDepasse() && !estPannePlateforme_() && !estPanneGmail_()) {
+    var fils;
+    try {
+      fils = pageFils_(debutPage);
+    } catch (e) {
+      if (!signalerPanneGmail_(e)) notifierEchec_('Gmail', 'Recherche des mails impossible : ' + e);
+      break; // quota (suspension posée) ou erreur de page : fenêtre NON épuisée → le retard s'arme
+    }
+    signalerRetablissementGmail_(); // re-sonde concluante : la suspension persistée est levée
+    scanne = true;
+    if (!fils.length) { fenetreAJour = true; break; } // fin de la fenêtre 30 jours : tout est drainé
+
+    var ineditesPage = 0;
+    var coupe = false;
+    var erreurFil = false;
+    for (var i = 0; i < fils.length; i++) {
+      if (estBudgetDepasse()) {
+        journalInfo_('Pipeline', 'Budget temps atteint — reprise au prochain tick.');
+        coupe = true; break;
+      }
+      if (estPannePlateforme_()) { coupe = true; break; } // détectée en cours de run → stop
+      // Erreur isolée par fil (ex. getMessages/piecesJointes) : on saute ce fil sans interrompre le
+      // scan — chaque PJ est déjà protégée dans traiterDocument_. SAUF le quota (C28-15) qui frappe
+      // TOUS les fils suivants → coupe (suspension et sortie).
+      try { ineditesPage += traiterFil_(fils[i], estBudgetDepasse); }
+      catch (e) {
+        if (signalerPanneGmail_(e)) { coupe = true; break; }
+        erreurFil = true;
+        journalErreur_('Gmail', 'Fil ignoré (erreur) : ' + e);
+      }
+    }
+    if (coupe || estBudgetDepasse() || estPannePlateforme_() || estPanneGmail_()) break; // fenêtre NON épuisée → retard armé plus bas
+    // MUR « page à jour » (PERF Vague 2, patron des scans intentions/tri) — DÉSACTIVÉ tant qu'un
+    // backlog est possible (`retard`). Aucune PJ INÉDITE sur toute la page : les fils sont servis du
+    // PLUS RÉCENT au plus ancien, une PJ neuve remonte en page 0 → en RÉGIME, une page 0 à jour ⇒
+    // tout l'historique 30 j l'est aussi, inutile de re-paginer à CHAQUE tick (chaque fil coûte
+    // getMessages + getAttachments sur le quota Gmail PARTAGÉ, croissant avec la boîte).
+    if (!retard && ineditesPage === 0 && !erreurFil) { fenetreAJour = true; break; }
+    debutPage += CONFIG.PAGE_FILS;
+  }
+  // BORDS du backlog (aucune écriture en régime) : une fin PROPRE (fenêtre épuisée ou mur) LÈVE le
+  // retard — le mur reprend ; toute coupe AVANT la fin (budget, panne, erreur de page) l'ARME dès
+  // qu'on a scanné ≥ 1 page, pour que le prochain tick repagine SANS le mur et draine les pages 1+.
+  // Écritures ENVELOPPÉES (idem lecture) : un blip Property dégrade à « pas de changement de drapeau
+  // ce tick » (recalculé au prochain), jamais un tick avorté. `props` null (I/O indispo) ⇒ on saute.
+  try {
+    if (props) {
+      if (fenetreAJour) { if (retard) props.deleteProperty('DriveAI_GMAIL_PJ_RETARD'); }
+      else if (scanne && !retard) props.setProperty('DriveAI_GMAIL_PJ_RETARD', '1');
+    }
+  } catch (e) { /* blip Property : pas de changement de drapeau ce tick (l'état réel est relu ensuite) */ }
+}
+
+/**
+ * Traite toutes les PJ d'un fil. Chaque PJ est indépendante (idempotence par clé).
+ * Garde-temps vérifié PAR PJ (revue C12) : un message dense (20 PJ inédites) ne doit pas crever
+ * le mur des 6 min — le fil interrompu est rejoué au tick suivant (offset 0, PJ indexées sautées).
+ * @param {GmailThread} fil
+ * @param {function():boolean} estBudgetDepasse
+ */
+function traiterFil_(fil, estBudgetDepasse) {
+  var messages = fil.getMessages();
+  var inedites = 0; // PJ NON encore indexées rencontrées (sert au mur « page à jour » de l'appelant)
+  for (var m = 0; m < messages.length; m++) {
+    if (estBudgetDepasse()) return inedites; // aussi PAR MESSAGE : un long fil sans PJ « réelles » ne
+    var message = messages[m];               // doit pas enchaîner les getAttachments après le budget
+    var pjs = piecesJointes_(message);
+    for (var p = 0; p < pjs.length; p++) {
+      if (estBudgetDepasse()) return inedites;
+      // Déjà indexée (idempotence) → gratuit, ne compte pas comme inédite : sur une page 100 %
+      // indexée, `inedites` reste 0 et l'appelant arrête de paginer (test AVANT le dépôt, comme la
+      // campagne historique). `traiterDocument_` re-teste de toute façon — ici on évite juste l'appel.
+      if (indexContient_(cleAttachement_(message, p, pjs[p]))) continue;
+      inedites++;
+      traiterPjGmail_(message, p, pjs[p]);
+    }
+  }
+  return inedites;
+}
+
+/**
+ * Ligne de Santé de la RE-DATATION de `06` (C28-92, ADR-0056) : où en est la campagne, et combien
+ * de son budget quotidien elle a consommé AUJOURD'HUI.
+ *
+ * Pourquoi elle existe : la campagne rallume de la dépense LLM, et `DriveAI_REANALYSE_JOUR` n'était
+ * lisible nulle part. Sans ce chiffre, « elle tourne » et « elle n'a jamais démarré » se ressemblent
+ * — c'est exactement ce qui a permis à C26-08 de rester en pause deux semaines sans que personne ne
+ * le voie (§1.6). Les DEUX gardes amont sont dites explicitement, parce qu'un zéro à 0 min/j ne
+ * distingue pas « rien à faire » de « jamais atteinte ».
+ * Échec fermé : toute lecture qui lève rend un texte neutre, jamais un faux « terminée ».
+ * @return {string}
+ */
+function texteSanteReanalyse_() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var suspension = statutReanalyse_(
+      !CONFIG.REANALYSE_ACTIF,
+      props.getProperty('DriveAI_REANALYSE') === CONFIG.REANALYSE_TAG,
+      !rangementTermine_(),
+      props.getProperty('DriveAI_MIGRATION') !== CONFIG.MIGRATION_TAG,
+      budgetCampagnesAtteint_(),
+      resetEnCours_(),
+      estPannePlateforme_());
+    // ⚠️ LE RETOUR ANTICIPÉ DES SIX AUTRES SUSPENSIONS PASSE AVANT LES TROIS LECTURES DE
+    // PROPERTY ci-dessous (revue code C49-20). Descendre d'abord les lire mettait un frein
+    // budget ou une panne de plateforme à la merci d'une lecture qui lève : le `catch` aurait
+    // rendu « état illisible » À LA PLACE de la cause, donc le diagnostic aurait été perdu pour
+    // une raison sans aucun rapport avec lui. Seul le cas « arrêtée » descend, parce qu'il est
+    // le seul à avoir besoin de `avance`.
+    if (suspension && CONFIG.REANALYSE_ACTIF) return suspension;
+    var budget = Math.round(CONFIG.REANALYSE_BUDGET_JOUR_MS / 60000);
+    var consomme = budgetJourReanalyse_(props, dateGmail_(new Date()));
+    var base = props.getProperty('DriveAI_REANALYSE_BASE');
+    var traites = Number(props.getProperty('DriveAI_REANALYSE_TRAITES')) || 0;
+    var avance = base === null
+      ? 'recensement en cours'
+      : traites + ' / ' + base + ' documents';
+    // ⚠️ UN ARRÊT DÉLIBÉRÉ GARDE SON AVANCEMENT À L'ÉCRAN. Les autres suspensions sont des états
+    // TRANSITOIRES dont la cause est le sujet ; celle-ci est définitive et laisse un travail à
+    // moitié fait — « arrêtée » tout court effacerait le seul chiffre qui dit ce qu'on a perdu,
+    // et la question « où ça en était ? » n'aurait plus de réponse nulle part.
+    // (Pas de `if (suspension) return suspension;` ici : le retour anticipé ci-dessus l'a déjà
+    //  traité, et `arretee` est la PREMIÈRE garde de `statutReanalyse_` — donc à ce point,
+    //  `!REANALYSE_ACTIF` implique `suspension` non vide. Le garder serait du code mort qui a
+    //  l'air vivant.)
+    if (!CONFIG.REANALYSE_ACTIF) return suspension + ' — ' + avance + ' au moment de l\'arrêt';
+    return 'en cours — ' + avance + ' · ' + Math.round(consomme / 60000) + ' des ' + budget +
+      ' min/j consommées aujourd\'hui (campagne « ' + CONFIG.REANALYSE_TAG + ' »)';
+  } catch (e) {
+    return 'état illisible (' + e + ')';
+  }
+}
+
+/**
+ * Cause d'ARRÊT de la re-datation, ou '' si la campagne peut tourner. PURE (testée).
+ *
+ * ⚠️ Les SEPT gardes, pas deux (🟠 revues code, quotas ET sécurité ADR-0056 ; la septième,
+ * l'arrêt délibéré, est arrivée en C49-20). La première version
+ * n'en disait que deux — et la ligne affichait « en cours — 0 / 328 · 0 des 8 min/j » pendant que
+ * le frein à 40 $, le reset ou une panne de plateforme tenaient la campagne à l'arrêt. Un « 0 min
+ * aujourd'hui » ne distingue pas « pas encore passée » de « ne passera plus » : c'est le mode de
+ * panne du §1.6 mot pour mot, DANS la surface écrite pour le fermer. Même contrat que le jumeau
+ * `statutHistoGmail_`, dont le commentaire raconte déjà qu'une cause y avait été oubliée.
+ * L'ORDRE suit celui des gardes réelles du tick : la cause la plus définitive d'abord.
+ * @return {string} '' si rien ne l'arrête
+ */
+function statutReanalyse_(arretee, terminee, rangementEnCours, migrationEnCours, freinBudget, resetEnCours, pannePlateforme) {
+  // ⚠️ SEPTIÈME garde, et la PREMIÈRE de l'ordre (C49-20) : un arrêt par la CONFIG est la cause la
+  // plus définitive de toutes — il survit au rétablissement d'une panne, au réarmement du budget
+  // et à la fin du reset. L'annoncer après elles ferait lire « en pause, reprise demain » sur une
+  // campagne qui ne reprendra jamais toute seule.
+  if (arretee) return 'arrêtée (CONFIG, C49-20) — campagne « ' + CONFIG.REANALYSE_TAG + ' »';
+  if (terminee) return 'terminée ✅ (campagne « ' + CONFIG.REANALYSE_TAG + ' »)';
+  if (rangementEnCours) return 'en attente — le grand rangement passe d\'abord';
+  if (migrationEnCours) return 'en attente — la migration « ' + CONFIG.MIGRATION_TAG + ' » doit finir d\'abord';
+  if (pannePlateforme) return 'suspendue — panne de plateforme LLM (reprise dès le rétablissement)';
+  if (freinBudget) return 'en pause — frein budget campagnes atteint (' + CONFIG.LLM_BUDGET_CAMPAGNES + ' $)';
+  if (resetEnCours) return 'suspendue — le grand reset a la main (une seule à la fois)';
+  return '';
+}
+
+/**
+ * Ligne de SANTÉ de la campagne historique Gmail — état, avancement, et minutes RÉELLEMENT
+ * consommées aujourd'hui sur son budget quotidien. PURE au sens I/O (Properties seules).
+ *
+ * Pourquoi elle existe (C28-99) : cette campagne réserve **20 min/j** dans l'enveloppe de runtime,
+ * le plus gros bloc de toutes les campagnes, et le compteur qui dirait si elles servent vraiment —
+ * les MINUTES consommées — n'existait nulle part. (L'onglet Progression, lui, porte bien une ligne
+ * `histo-gmail` depuis C28-44, avec statut et compteur de fils : une première rédaction affirmait
+ * le contraire, à tort.) Le registre de suivi C28-44 étant SATURÉ (8 377/8 500 octets), ce chiffre
+ * ne pouvait pas y prendre une 43ᵉ clé : il se rend donc visible ICI, comme `Doublons` et
+ * « Rangement ancien Drive ». Sans lui, réallouer ces 20 minutes serait une SUPPOSITION — et §1.6
+ * l'interdit : « ne pas déclarer une campagne finie sans lire son compteur ».
+ * @return {string}
+ */
+function texteSanteHistoGmail_() {
+  var budget = Math.round(CONFIG.GMAIL_HISTO_BUDGET_JOUR_MS / 60000);
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var statut = statutHistoGmail_(!CONFIG.GMAIL_HISTO_ACTIF,
+      props.getProperty('DriveAI_GMAIL_HISTO') === 'terminé',
+      estPanneGmail_(), budgetCampagnesAtteint_(), resetEnCours_());
+    if (statut === 'terminé') {
+      // ⚠️ DIRE ce qui a DÉJÀ été prêté (🟡 revue sécurité ADR-0056). Sans ce rappel, la prochaine
+      // session lit « ses 12 min/j sont RÉALLOUABLES » exactement comme celle-ci a lu « 20 », et
+      // prête une SECONDE fois des minutes déjà cédées — l'enveloppe se creuse sans que personne
+      // ne voie le double emploi. Le donneur annonce donc son solde, pas seulement son budget.
+      var pretees = CONFIG.GMAIL_HISTO_PRETEES_MIN || 0;
+      // ⚠️ Un budget à ZÉRO ne se dit pas « réallouable » : à zéro la campagne est MUETTE, et
+      // la phrase inviterait à prendre ce qui n'existe plus. Le donneur annonce alors son état.
+      if (!budget) {
+        return 'terminée ✅ — donneur À SEC : ses ' + pretees + ' min/j sont DÉJÀ prêtées. '
+          + 'Prélever ailleurs.';
+      }
+      return 'terminée ✅ — ses ' + budget + ' min/j sont RÉALLOUABLES' +
+        (pretees ? ' (' + pretees + ' min déjà prêtées à d\'autres campagnes)' : '');
+    }
+    // ⚠️ Le COMPTE de fils n'est PAS répété ici : l'onglet Progression le porte déjà, et de façon
+    // MONOTONE (l'offset brut repart à 0 aux passes de vérification — c'est une position de scan,
+    // pas un cumul). Deux surfaces qui affichent le même fait avec deux conversions différentes,
+    // c'est le défaut que §9 interdit. Le seul chiffre RÉELLEMENT neuf est celui des minutes.
+    var aujourdhui = dateGmail_(new Date());
+    var msJour = props.getProperty('DriveAI_GMAIL_HISTO_JOUR') === aujourdhui
+      ? Number(props.getProperty('DriveAI_GMAIL_HISTO_MS_JOUR')) || 0
+      : 0;
+    // ⚠️ Les MINUTES ne sont PAS le seul plafond : la campagne est AUSSI bornée à
+    // `GMAIL_HISTO_MAX_FILS_JOUR` fils/jour, et c'est ce plafond-là qui mord en régime normal. Une
+    // campagne qui tourne À PLEIN peut donc afficher « 0,4 des 20 min/j » — lire ça comme
+    // « 20 minutes sont libres » serait l'erreur même que cette ligne existe pour empêcher.
+    // Les deux compteurs sont donc affichés ensemble (revue C28-99).
+    // `compteurFilsJour_` plutôt qu'une seconde écriture des mêmes clés : c'est la fonction que la
+    // télémétrie et la web app utilisent déjà, et la thèse de ce lot est « une règle, deux
+    // consommateurs » — la contredire ici serait cocasse (relevé en revue C28-99).
+    var filsJour = compteurFilsJour_(props, 'DriveAI_GMAIL_HISTO', aujourdhui);
+    // Passes PROPRES : le seul indicateur de proximité de la fin (deux d'affilée ⇒ terminée).
+    var propres = Number(props.getProperty('DriveAI_GMAIL_HISTO_PASSES_PROPRES')) || 0;
+    // Au dixième de minute : sous la minute, `Math.round` afficherait « 0 » — or c'est précisément
+    // la différence entre « elle n'a rien consommé » et « elle a commencé » qui décide ici.
+    return statut + ' — ' + (Math.round(msJour / 6000) / 10) + ' des ' + budget + ' min/j et ' +
+      filsJour + ' des ' + CONFIG.GMAIL_HISTO_MAX_FILS_JOUR + ' fils/j consommés aujourd\'hui' +
+      (propres ? ' · passe de vérification ' + propres + '/2' : '') +
+      (statut === 'en cours' ? '' : ' (elle ne PEUT pas consommer : ne pas conclure « inutilisée »)');
+  } catch (e) {
+    // Journalisé : sans ça, une lecture qui échoue à chaque tick n'a aucun canal hors de la cellule.
+    try { journalErreur_('Santé', 'État de l\'historique Gmail illisible : ' + e); } catch (e2) { /* rien */ }
+    return 'illisible (' + String(e).slice(0, 60) + ')'; // jamais « terminée » par défaut
+  }
+}
+
+/**
+ * Chantier #12 (ADR-0010 §1) — HISTORIQUE Gmail complet : ancre FIXE + pagination par OFFSET,
+ * terminée par une PASSE DE VÉRIFICATION propre.
+ *
+ * Le scan vivant ne voit que 30 j. Cette campagne parcourt tout l'historique de PJ : l'ancre
+ * (`before:<date>`) est posée au 1ᵉʳ run et NE BOUGE JAMAIS — l'ensemble de recherche est donc
+ * STABLE pour le courrier normal (le passé ne reçoit pas de nouveaux mails), ce qui rend l'offset
+ * persistant sûr (leçon « pagination mouvante » : le piège est l'insertion en tête, pas l'offset).
+ * MAIS l'ORDRE, lui, peut bouger (contre-vérification adversariale) : Gmail trie les fils par
+ * DERNIER message — un vieux fil qui reçoit un message SANS PJ se téléporte derrière l'offset sans
+ * jamais entrer dans le scan vivant ; une suppression en zone déjà scannée décale un fil innocent
+ * sous l'offset ; une erreur transitoire fait sauter un fil. Ces trois pertes silencieuses ont le
+ * MÊME antidote (leçon durable « ne figer le fait que quand une passe ne collecte plus rien ») :
+ * une page vide ne termine PAS la campagne — si la passe qui s'achève a eu la moindre activité
+ * (PJ inédite, fil sauté), l'offset repart à 0 pour une passe de VÉRIFICATION ; « terminé » ne se
+ * fige que sur une passe 100 % propre. Une passe de re-lecture est quasi gratuite (PJ indexées =
+ * métadonnées seules, cf. Pipeline) et la convergence est garantie : l'Index ne fait que croître.
+ *
+ * Discipline de quota (2ᵉ contre-vérification) : le quota RUNTIME des déclencheurs (~90 min/j) est
+ * LA borne, et un plafond PAR RUN ne la protège pas (288 ticks × 25 s = 2 h/j !). Deux étages :
+ * (1) budget QUOTIDIEN `GMAIL_HISTO_BUDGET_JOUR_MS` (ms réellement consommées, comptées par jour
+ * dans les Properties) — la campagne s'arrête pour la journée, le vivant garde son quota ;
+ * (2) par run, au plus `GMAIL_HISTO_MAX_PJ_INEDITES` PJ inédites, garde-temps et plafond vérifiés
+ * à CHAQUE niveau de boucle — fil, message, PJ (une page de fils bavards sans PJ « réelles » ne
+ * fait plus d'appels Gmail après le budget ; un message dense ne crève plus le mur des 6 min).
+ * L'offset n'avance que si la page a été entièrement parcourue : une page interrompue est rejouée
+ * (idempotente) et converge. Un fil en erreur n'est COMPTÉ (compteur d'Échecs `histo|fil|<id>`)
+ * qu'à la COMPLÉTION de la page — jamais sur un rejeu (sinon une erreur transitoire de 15 min
+ * brûlerait les 3 essais en 3 ticks) : une erreur qui guérit avant la complétion ne laisse AUCUNE
+ * trace, une erreur persistante donne un essai par PASSE, puis ABANDON définitif à
+ * `QUARANTAINE_MAX` (la terminaison n'est jamais bloquée — l'onglet Échecs garde la trace).
+ * Terminaison : il faut DEUX passes propres consécutives (une mutation d'ordre — suppression —
+ * peut masquer un fil pendant la passe de vérification elle-même ; la re-passe est quasi gratuite).
+ * @param {function():boolean} estBudgetDepasse
+ */
+function traiterGmailHistorique_(estBudgetDepasse) {
+  if (!CONFIG.GMAIL_HISTO_ACTIF) return; // C49-20 — arrêtée ; l'interrupteur avant tout le reste
+  if (estPanneGmail_()) return; // quota Gmail épuisé (C28-15) : suspendu jusqu'à la re-sonde
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty('DriveAI_GMAIL_HISTO') === 'terminé') return; // campagne finie (1 lecture)
+
+  // Budget QUOTIDIEN : borne la JOURNÉE, pas seulement le run (quota runtime ~90 min/j).
+  var aujourdhui = dateGmail_(new Date());
+  var msJour = props.getProperty('DriveAI_GMAIL_HISTO_JOUR') === aujourdhui
+    ? Number(props.getProperty('DriveAI_GMAIL_HISTO_MS_JOUR')) || 0
+    : 0;
+  if (msJour >= CONFIG.GMAIL_HISTO_BUDGET_JOUR_MS) return; // repris demain (le vivant garde le quota)
+
+  var debutRunMs = Date.now();
+  try {
+    traiterPageHistorique_(props, estBudgetDepasse);
+  } finally {
+    // Comptage RÉEL (une passe de re-lecture, quasi gratuite, n'entame presque pas le budget).
+    props.setProperty('DriveAI_GMAIL_HISTO_JOUR', aujourdhui);
+    props.setProperty('DriveAI_GMAIL_HISTO_MS_JOUR', String(msJour + (Date.now() - debutRunMs)));
+  }
+}
+
+/**
+ * Un run de la campagne historique : une page de fils, sous plafonds. Voir traiterGmailHistorique_.
+ * @param {Properties} props
+ * @param {function():boolean} estBudgetDepasse
+ */
+function traiterPageHistorique_(props, estBudgetDepasse) {
+  // Plafond QUOTIDIEN de FILS (C28-21, plan architecte) : le budget en ms ne borne pas un quota
+  // d'APPELS — la passe de VÉRIFICATION, « gratuite » côté traitement (Index), lisait des
+  // centaines de fils en 20 min et drainait le quota Gmail du compte en continu (vécu 11-13/07 :
+  // re-mort en 8 s-6 min à chaque re-sonde, flux vivant affamé). Compté dans SON unité (fils).
+  var aujourdhui = dateGmail_(new Date());
+  var filsJour = props.getProperty('DriveAI_GMAIL_HISTO_JOUR') === aujourdhui
+    ? Number(props.getProperty('DriveAI_GMAIL_HISTO_FILS_JOUR')) || 0
+    : 0;
+  if (props.getProperty('DriveAI_GMAIL_HISTO_JOUR') !== aujourdhui) {
+    // Purge au ROLLOVER (revue flotte C28-21) : la date est écrite par le finally de
+    // traiterGmailHistorique_ à CHAQUE run, mais le compteur seulement quand des fils sont lus —
+    // sans cette purge, un 1ᵉʳ run du jour à 0 fil (page VIDE de fin de passe, erreur de
+    // recherche) laisse le compteur de la VEILLE sous la date du jour : maxCeRun = 0 → campagne
+    // silencieusement bloquée une journée entière à chaque frontière de passe.
+    props.setProperty('DriveAI_GMAIL_HISTO_FILS_JOUR', '0');
+  }
+  var maxCeRun = Math.min(CONFIG.GMAIL_HISTO_MAX_FILS_PAR_RUN,
+    Math.max(0, CONFIG.GMAIL_HISTO_MAX_FILS_JOUR - filsJour));
+  if (maxCeRun <= 0) return; // plafond de fils du jour atteint — repris demain (aucune recherche)
+
+  var ancre = props.getProperty('DriveAI_GMAIL_HISTO_ANCRE');
+  if (!ancre) {
+    // 1ᵉʳ run : ancre posée UNE FOIS à −29 j — `before:` est EXCLUSIF et `newer_than:30d` peut être
+    // glissant (30×24 h) : −29 garantit un VRAI chevauchement d'un jour avec le scan vivant
+    // (idempotent par l'Index), quel que soit l'arrondi — jamais de trou entre les deux scans.
+    var d = new Date();
+    d.setDate(d.getDate() - 29);
+    ancre = dateGmail_(d);
+    props.setProperty('DriveAI_GMAIL_HISTO_ANCRE', ancre);
+  }
+  var offset = Number(props.getProperty('DriveAI_GMAIL_HISTO_OFFSET')) || 0;
+
+  var fils;
+  try {
+    fils = pageFilsHisto_(ancre, offset);
+  } catch (e) {
+    if (signalerPanneGmail_(e)) return; // quota épuisé : suspension posée, offset inchangé
+    journalErreur_('Gmail', 'Recherche historique impossible : ' + e);
+    return; // re-tenté au tick suivant, offset inchangé
+  }
+  signalerRetablissementGmail_();
+  if (!fils.length) {
+    // Fin d'une PASSE — pas forcément de la campagne. Si la passe a eu de l'activité (inédite,
+    // fil sauté), un fil a PU être manqué par un décalage d'ordre : on re-vérifie depuis 0.
+    // Ordre des écritures VOULU (leçon « écritures d'état ») : l'offset d'abord, les marques
+    // ensuite — une coupure laisse au pire une passe de plus, jamais un « terminé » prématuré.
+    if (props.getProperty('DriveAI_GMAIL_HISTO_PASSE_SALE') === 'oui') {
+      props.setProperty('DriveAI_GMAIL_HISTO_OFFSET', '0');
+      props.deleteProperty('DriveAI_GMAIL_HISTO_PASSES_PROPRES');
+      props.deleteProperty('DriveAI_GMAIL_HISTO_PASSE_SALE');
+      journalInfo_('Gmail', 'Passe historique finie avec activité (' + offset + ' fils) — ' +
+        'passe de VÉRIFICATION relancée depuis l\'offset 0.');
+      return;
+    }
+    // Passe propre : il en faut DEUX consécutives (l'ordre peut avoir muté PENDANT la passe).
+    var propres = (Number(props.getProperty('DriveAI_GMAIL_HISTO_PASSES_PROPRES')) || 0) + 1;
+    if (propres >= 2) {
+      props.setProperty('DriveAI_GMAIL_HISTO', 'terminé');
+      journalInfo_('Gmail', 'Campagne HISTORIQUE terminée : ' + propres + ' passes complètes sans rien ' +
+        'collecter (' + offset + ' fils, ancre ' + ancre + ').');
+    } else {
+      props.setProperty('DriveAI_GMAIL_HISTO_OFFSET', '0');
+      props.setProperty('DriveAI_GMAIL_HISTO_PASSES_PROPRES', String(propres));
+      journalInfo_('Gmail', 'Passe historique propre (' + propres + '/2) — passe de confirmation relancée.');
+    }
+    return;
+  }
+
+  var inedites = 0;
+  var filsParcourus = 0; // frein d'appels API (C28-15) : chaque fil LU coûte du quota Gmail
+  var pageComplete = true;
+  var echecsRun = []; // fils en erreur de CE run — comptés seulement si la page se complète
+  var saleMarquee = props.getProperty('DriveAI_GMAIL_HISTO_PASSE_SALE') === 'oui';
+  var marquerSale = function () {
+    if (!saleMarquee) { props.setProperty('DriveAI_GMAIL_HISTO_PASSE_SALE', 'oui'); saleMarquee = true; }
+  };
+  // Garde-temps ET plafond à CHAQUE niveau (fil, message, PJ) : sans la garde au niveau fil/message,
+  // une page de vieux fils bavards SANS PJ « réelles » (inline seulement — `has:attachment` matche
+  // aussi l'inline) ferait des centaines d'appels Gmail APRÈS l'épuisement du budget.
+  var doitSarreter = function () {
+    return estBudgetDepasse() || estPannePlateforme_() || estPanneGmail_() ||
+      inedites >= CONFIG.GMAIL_HISTO_MAX_PJ_INEDITES ||
+      filsParcourus >= maxCeRun; // par-run ET reliquat du plafond quotidien (C28-21)
+  };
+  for (var i = 0; i < fils.length && pageComplete; i++) {
+    if (doitSarreter()) { pageComplete = false; break; }
+    var filId = 'offset ' + (offset + i); // repli si getId échoue aussi
+    try {
+      filId = fils[i].getId(); // clé STABLE du compteur d'échecs (la position ne l'est pas)
+      filsParcourus++;
+      var messages = fils[i].getMessages();
+      for (var mi = 0; mi < messages.length && pageComplete; mi++) {
+        if (doitSarreter()) { pageComplete = false; break; }
+        var pjs = piecesJointes_(messages[mi]);
+        for (var p = 0; p < pjs.length; p++) {
+          // La page interrompue est rejouée au tick suivant (les PJ déjà traitées, inscrites à
+          // l'Index au fil de l'eau, seront gratuites) — l'offset n'avance pas.
+          if (doitSarreter()) { pageComplete = false; break; }
+          if (!indexContient_(cleAttachement_(messages[mi], p, pjs[p]))) {
+            inedites++;
+            marquerSale(); // la passe a collecté → une passe de vérification suivra
+          }
+          traiterPjGmail_(messages[mi], p, pjs[p]);
+        }
+      }
+    } catch (e) {
+      // Quota Gmail épuisé (C28-15) : panne de PLATEFORME — jamais imputée au fil, la page
+      // interrompue rejouera après la re-sonde (offset inchangé, PJ indexées gratuites).
+      if (signalerPanneGmail_(e)) { pageComplete = false; break; }
+      // Compté PLUS TARD, seulement si la page se complète : une page rejouée (plafond/budget) ne
+      // doit pas brûler les essais d'un fil toutes les 5 min — un essai par PASSE, pas par tick.
+      echecsRun.push({ filId: filId, erreur: String(e) });
+    }
+  }
+  // Coût RÉEL compté même sur page INTERROMPUE (déviation documentée au plan C28-21, qui comptait
+  // dans `pageComplete`) : le rejeu re-lira ces fils — le quota de LECTURE est consommé, page
+  // complétée ou non. Sinon, dès que le reliquat du jour devient plus petit qu'une page, la page
+  // ne se complète jamais et ses re-lectures ne seraient JAMAIS comptées : drainage silencieux à
+  // chaque tick, le bug même que ce plafond corrige. La DATE du compteur reste écrite par
+  // `traiterGmailHistorique_` (finally), SEUL écrivain de DriveAI_GMAIL_HISTO_JOUR.
+  if (filsParcourus > 0) {
+    props.setProperty('DriveAI_GMAIL_HISTO_FILS_JOUR', String(filsJour + filsParcourus));
+  }
+  if (pageComplete) {
+    for (var k = 0; k < echecsRun.length; k++) {
+      var essais = 0;
+      try { essais = incrementerEchec_('histo|fil|' + echecsRun[k].filId); } catch (e2) { /* compteur indisponible */ }
+      if (essais === CONFIG.QUARANTAINE_MAX) {
+        // Abandon DÉFINITIF (pas de marque « sale ») : un fil irrécupérable ne doit pas empêcher
+        // la campagne de se terminer — l'onglet Échecs garde la trace pour un rejeu manuel.
+        journalErreur_('Gmail', 'Fil historique ABANDONNÉ après ' + essais + ' essais (' +
+          echecsRun[k].filId + ') : ' + echecsRun[k].erreur);
+      } else if (essais < CONFIG.QUARANTAINE_MAX) {
+        marquerSale(); // le fil sera revisité par la passe de vérification
+        journalErreur_('Gmail', 'Fil historique sauté (' + echecsRun[k].filId + ', essai ' +
+          (essais || '?') + ') : ' + echecsRun[k].erreur);
+      }
+      // essais > QUARANTAINE_MAX : déjà annoncé abandonné — silencieux, pas de marque « sale ».
+    }
+    props.setProperty('DriveAI_GMAIL_HISTO_OFFSET', String(offset + fils.length));
+  }
+}
+
+/**
+ * Construit le descripteur d'une PJ Gmail et le passe au pipeline.
+ * Source en lecture seule : on COPIE la PJ vers sa destination (l'original reste
+ * dans Gmail), à la différence d'un dépôt manuel qui est déplacé.
+ * @param {GmailMessage} message
+ * @param {number} indexPj
+ * @param {GmailAttachment} pj
+ */
+function traiterPjGmail_(message, indexPj, pj) {
+  traiterDocument_({
+    cle: cleAttachement_(message, indexPj, pj),
+    nom: pj.getName(),
+    taille: pj.getSize(),
+    expediteur: message.getFrom(),
+    sujet: message.getSubject(),
+    date: message.getDate(),
+    blob: function () { return pj.copyBlob(); },
+    placer: function (dossierId, nom) { return deposer_(pj.copyBlob(), dossierId, nom); }
+  });
+}

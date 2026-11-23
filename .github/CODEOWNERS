@@ -1,0 +1,7 @@
+# Proprietaire des chemins qui commandent la chaine (CI, hooks, qualite, deploiement, migrations, secrets). Aucun motif * : le reste se fusionne seul.
+/.github/ @MoKarade
+/scripts/hooks/ @MoKarade
+/app/qualite/ @MoKarade
+/vercel.json @MoKarade
+/.env* @MoKarade
+/.mergify.yml @MoKarade

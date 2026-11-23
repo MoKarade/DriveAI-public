@@ -1,0 +1,1134 @@
+/**
+ * google.ts — Auth Google (session durable /api) + accès Sheets/Drive avec le jeton de l'utilisateur.
+ *
+ * GARDE-FOU PAR CONSTRUCTION (§2, vérifié par test) : ce module n'expose AUCUNE méthode de
+ * suppression (ni définitive, ni corbeille, ni deleteRow — l'unique exception ADR-0014 vit
+ * dans corbeille.ts, jamais ici). Les seules mutations
+ * possibles : PATCH nom/parents d'un fichier (déplacement/renommage), écriture de cellules
+ * (statut d'entité) et append de lignes (Corrections). Tout déplacement passe par
+ * `reclasserFichier`, qui exige un verdict garde-fous VIDE avant d'appeler l'API.
+ *
+ * SESSION DURABLE (C28-14, révision de C28-01 — plan architecte validé par Marc 2026-07-09) :
+ * fini GIS et sa popup. L'app suit le flux « Authorization Code » via 4 fonctions serverless
+ * Vercel (/api/login → consentement Google, /api/callback → refresh token posé en cookie
+ * HttpOnly CHIFFRÉ, /api/refresh → access token frais, /api/logout). Le refresh token n'est
+ * JAMAIS accessible au JavaScript (HttpOnly) ; l'ACCESS token (~1 h) vit en **sessionStorage**
+ * comme avant (survit au F5, meurt avec l'onglet) et se RENOUVELLE en silence : restauration au
+ * chargement (`tenterRestaurationSession`) et rejeu automatique sur 401. localStorage reste
+ * INTERDIT pour tout jeton (verrou : app/test/session.test.ts). Les API Google restent appelées
+ * en DIRECT depuis le navigateur — le backend ne voit ni ne stocke aucune donnée (ADR-0007) :
+ * il ne fait que troquer des jetons.
+ */
+
+import {
+  Ascendance,
+  verdictReclassement,
+  ReperesGardes,
+} from './garde-fous';
+import {
+  ElementDrive,
+  Etape,
+  MIME_DOSSIER,
+  estDossier,
+  qEnfants,
+  qRecherche,
+  qSousDossiers,
+  decouperEnLots,
+  trierElements,
+  rechercherDansArbreMock,
+  resoudreArianeDansArbreMock,
+  estDossierATrier,
+} from './explorateur';
+import { lireConfig } from './config';
+import { plageMock, ENFANTS_MOCK } from './mockData';
+
+/* ---------- Mode E2E MOCK (captures d'écran CI) ---------- */
+
+// `VITE_E2E_MOCK` n'est posée QUE par playwright.config.ts (serveur de dev CI) — jamais dans un
+// build Vercel ni en local normal. Variable Vite figée au BUILD : en production la condition est
+// une constante `false` (branches mortes, aucune fuite possible). Sous ce mode : auth bouchonnée,
+// lectures Sheets/Drive servies par mockData.ts, et TOUT appel réseau résiduel
+// échoue BRUYAMMENT (api() lève) — un chemin non bouchonné se voit sur la capture au lieu de
+// taper les vraies API Google.
+const MODE_MOCK = import.meta.env.VITE_E2E_MOCK === 'true';
+
+/* ---------- Auth (flux Authorization Code via /api, C28-14) ---------- */
+
+// Le PÉRIMÈTRE OAuth (Sheets RW + Drive — JAMAIS Gmail, §2.3 ; Tasks/Calendar retirés le 05/11/2026) vit
+// désormais côté serveur : api/_lib.ts (SCOPES). Le client n'en connaît que le résultat.
+
+// Jeton d'ACCÈS en sessionStorage (P1/C28-01) : survit au reload de l'onglet, meurt à sa fermeture.
+// JAMAIS localStorage (persistance disque inter-sessions = surface XSS durable — verrouillé par test).
+// Repli MÉMOIRE si le stockage est indisponible (navigation privée stricte) : la session vaut alors
+// la durée de l'onglet sans reload — mais la connexion n'est jamais silencieusement perdue.
+const CLE_JETON = 'driveai.jeton';
+let jetonMemoire: string | null = null;
+function lireJeton(): string | null {
+  try { return sessionStorage.getItem(CLE_JETON) ?? jetonMemoire; } catch { return jetonMemoire; }
+}
+function ecrireJeton(jeton: string | null): void {
+  jetonMemoire = jeton;
+  try {
+    if (jeton === null) sessionStorage.removeItem(CLE_JETON);
+    else sessionStorage.setItem(CLE_JETON, jeton);
+  } catch { /* stockage indisponible : le repli mémoire ci-dessus porte la session */ }
+}
+
+/** Part au consentement Google via /api/login — la page NAVIGUE (pas de popup, plus de GIS). */
+export async function seConnecter(): Promise<void> {
+  if (MODE_MOCK) { ecrireJeton('jeton-mock-e2e'); return; } // jamais de redirection en CI
+  window.location.href = '/api/login';
+  // La navigation emporte la page : cette promesse ne « résout » jamais côté appelant réel.
+  return new Promise(() => {});
+}
+
+/**
+ * Restauration SILENCIEUSE au chargement (C28-14) : si le cookie HttpOnly de session existe,
+ * /api/refresh rend un access token frais — zéro clic, zéro popup. `false` = pas de session
+ * (première visite, déconnexion, ou session révoquée) → écran de connexion classique.
+ */
+export async function tenterRestaurationSession(): Promise<boolean> {
+  if (MODE_MOCK) return true; // aucun fetch en CI — l'app est déjà « connectée » (mock)
+  if (lireJeton() !== null) return true; // jeton d'onglet encore là (F5 dans l'heure)
+  const jeton = await rafraichirJeton();
+  return jeton !== null;
+}
+
+/** Demande un access token frais au backend. null = session absente/révoquée (401). */
+async function rafraichirJeton(): Promise<string | null> {
+  try {
+    const rep = await fetch('/api/refresh', { method: 'POST' });
+    if (!rep.ok) return null;
+    const corps = (await rep.json()) as { token?: string };
+    if (!corps.token) return null;
+    ecrireJeton(corps.token);
+    return corps.token;
+  } catch {
+    return null; // réseau coupé : traité comme « pas de session » (l'UI propose la connexion)
+  }
+}
+
+export function estConnecte(): boolean {
+  if (MODE_MOCK) return true; // l'app saute l'écran de connexion (les vues lisent mockData)
+  return lireJeton() !== null;
+}
+
+export function seDeconnecter(): void {
+  ecrireJeton(null); // le jeton n'est nulle part ailleurs (ni mémoire longue, ni localStorage)
+  // Détruit aussi le cookie HttpOnly côté serveur — sans quoi la session renaîtrait au reload.
+  if (!MODE_MOCK) void fetch('/api/logout', { method: 'POST' }).catch(() => {});
+}
+
+// Rappel global « session expirée » : l'UI s'y abonne pour rebasculer sur l'écran de connexion.
+// Depuis C28-14 il ne se déclenche QU'APRÈS un échec du rafraîchissement silencieux — un simple
+// jeton d'une heure périmé se renouvelle sans que l'utilisateur ne voie rien.
+let surSessionExpiree: (() => void) | null = null;
+export function abonnerSessionExpiree(cb: () => void): void {
+  surSessionExpiree = cb;
+}
+
+/* ---------- Appels HTTP (401 → rafraîchissement silencieux puis rejeu) ---------- */
+
+/**
+ * Marqueur CANONIQUE d'un refus de droits SUR UN ÉLÉMENT précis (403 `insufficientFilePermissions`).
+ * Posé par `api()` sur le corps ENTIER de la réponse ; c'est le SEUL signal que l'aval interprète —
+ * jamais le texte brut de Google, qui arrive tronqué. Une SEULE source de vérité, importée des deux
+ * côtés (`statutRefusCorbeille`, `messageCorbeille`) : la valeur littérale n'a donc pas à être
+ * verrouillée par un test, c'est l'import qui l'est. Ce qui EST verrouillé, c'est que chaque afficheur
+ * consulte ce marqueur, et que le statut produit existe dans `REORG_STATUTS` (`corbeille.test.ts`).
+ */
+export const MARQUEUR_DROITS_FICHIER = 'droits-insuffisants-sur-element';
+
+/**
+ * Le corps d'une réponse 403 dit-il « tu n'as pas les droits SUR CET ÉLÉMENT » ? PURE (testée).
+ *
+ * Deux signaux, et l'ordre compte pour la lecture : `reason: insufficientFilePermissions` est le
+ * champ MACHINE (le contrat) ; la phrase anglaise n'est qu'un filet, parce qu'un message destiné à
+ * un humain peut être reformulé par Google sans préavis — §9 : « améliorer un message d'erreur POUR
+ * L'HUMAIN est un changement de CONTRAT dès que du code le lit ».
+ *
+ * EXCLUS volontairement : `insufficientPermissions` (sans `File`), « Insufficient Permission » — la
+ * forme que Drive rend VRAIMENT quand le jeton perd le scope — et « insufficient authentication
+ * scopes ». Ce sont des pannes d'AUTORISATION GLOBALE : elles frappent toutes les lignes à la fois,
+ * et les classer une par une viderait la liste de Marc à tort alors qu'une reconnexion les répare.
+ * C'est la direction IRRÉVERSIBLE (un statut définitif n'est jamais re-proposé), donc celle que le
+ * corpus négatif de `corbeille.test.ts` verrouille en priorité.
+ *
+ * Deux formulations restent NON reconnues par le filet en prose, et c'est sans conséquence : elles
+ * dégradent du bon côté (panne ⇒ la ligne reste candidate). La forme moderne
+ * `{"status":"PERMISSION_DENIED","message":"The caller does not have permission"}` et la variante
+ * Drive partagé « …for this shared drive » — toutes deux rattrapées par le champ machine quand il
+ * est présent. Noté pour que le prochain diagnostic ne les re-dérive pas.
+ */
+export function estRefusDroitsFichier(corps: string): boolean {
+  if (/insufficientFilePermissions/i.test(corps)) return true;
+  return /sufficient permissions for this file/i.test(corps);
+}
+
+/**
+ * Message de saturation, NOMMANT l'API (C28-119). PURE, et EXPORTÉE exprès : `statutRefusCorbeille`
+ * lit ce texte pour décider si une ligne reste candidate. Tant que le test du consommateur recopiait
+ * la chaîne à la main, revenir au message générique laissait 297 tests verts — producteur et
+ * consommateur n'étaient reliés par rien (§9, « un verdict pris sur la donnée RICHE ne se re-dérive
+ * jamais depuis sa forme APPAUVRIE »). Le test alimente désormais le consommateur avec CETTE sortie.
+ *
+ * Pourquoi nommer l'API : les deux plafonds n'ont rien à voir — Drive ~12 000 requêtes/minute,
+ * Sheets 60 ÉCRITURES/minute — donc ni la même cause ni le même remède. Un message générique a
+ * coûté le diagnostic entier de l'incident « Tout corbeiller ».
+ */
+export function messageQuota(url: string): string {
+  const quoi = url.includes('sheets.googleapis.com') ? 'Sheets (la feuille d\'état)'
+    : url.includes('googleapis.com/drive') ? 'Drive' : 'Google';
+  return `${quoi} est momentanément saturé (quota par minute) — réessaie dans quelques secondes.`;
+}
+
+export async function api<T>(url: string, options?: RequestInit): Promise<T> {
+  // Filet du mode mock : AUCUN appel réseau ne doit atteindre les vraies API Google en CI.
+  // Un chemin oublié échoue bruyamment (visible sur la capture) au lieu de fuiter.
+  if (MODE_MOCK) throw new Error(`mode E2E mock : appel réseau interdit (${url.slice(0, 80)})`);
+  let jeton = lireJeton();
+  if (!jeton) throw new Error('Non connecté');
+  // 429 (quota par minute PARTAGÉ avec le moteur — il écrit dans la même Sheet, en tant que Marc) :
+  // réessai avec repli progressif au lieu d'une erreur brute. Un 429 = requête NON exécutée → le
+  // réessai est sûr, y compris pour les écritures.
+  let rafraichiUneFois = false;
+  for (let essai = 0; ; essai++) {
+    const rep = await fetch(url, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${jeton}`,
+        'Content-Type': 'application/json',
+        ...(options?.headers ?? {}),
+      },
+    });
+    if (rep.status === 401) {
+      // Jeton d'accès périmé (~1 h) : rafraîchissement SILENCIEUX puis rejeu de la requête —
+      // sûr, un 401 signifie que Google ne l'a PAS exécutée. Une seule tentative (anti-boucle).
+      if (!rafraichiUneFois) {
+        rafraichiUneFois = true;
+        const frais = await rafraichirJeton();
+        if (frais) { jeton = frais; continue; }
+      }
+      ecrireJeton(null); // session vraiment morte (cookie absent/révoqué) — purge propre
+      surSessionExpiree?.(); // l'UI rebascule sur l'écran de connexion
+      throw new Error('Session expirée — reconnecte-toi');
+    }
+    if (rep.status === 429 && essai < 3) {
+      const attente = Number(rep.headers.get('Retry-After')) * 1000 || 1500 * 2 ** essai;
+      await new Promise((r) => setTimeout(r, attente + Math.random() * 400));
+      continue;
+    }
+    if (rep.status === 429) throw new Error(messageQuota(url));
+    if (!rep.ok) {
+      const corps = await rep.text();
+      // ⚠️ DRIVE NE DIT PAS 429 (revue C28-119). Il signale ses throttles par un **403**
+      // `userRateLimitExceeded` / `rateLimitExceeded`. Sans cette branche, le correctif de message
+      // ne couvrait QUE Sheets : un vrai throttle Drive ressortait en « Google API 403 : … », ni
+      // nommé ni reconnaissable — donc le prochain diagnostic repartait de zéro, ce que ce lot
+      // existe précisément pour empêcher.
+      if (rep.status === 403 && /rateLimitExceeded|userRateLimitExceeded/i.test(corps)) {
+        throw new Error(messageQuota(url));
+      }
+      // ⚠️ TROISIÈME sens du 403, et le seul DÉFINITIF (C28-129, cause réelle du 15/09) : Google
+      // refuse parce que Marc n'a pas les droits SUR CET ÉLÉMENT — il n'en est pas propriétaire, ou
+      // il n'y a qu'un accès en lecture. Aucun réessai ne le rendra propriétaire : c'est un verdict
+      // sur UNE ligne, pas une panne de plateforme, et le confondre avec un throttle arrête un lot
+      // entier (53 dossiers jamais tentés, vécu).
+      // Le test vit ICI, sur le corps ENTIER, et surtout PAS chez l'appelant : `slice(0, 200)` coupe
+      // juste avant `errors[].reason` — le message que Marc a collé s'arrête au milieu du premier
+      // `errors[]`, sans jamais montrer `insufficientFilePermissions`. §9 : « un verdict pris sur la
+      // donnée RICHE ne se re-dérive jamais depuis sa forme APPAUVRIE » ; l'amont pose un MARQUEUR
+      // canonique, l'aval ne lit que lui.
+      // Ce que ce test NE capture PAS, volontairement : `insufficientPermissions` (sans `File`) et
+      // « insufficient authentication scopes », qui sont des pannes d'AUTORISATION globales — elles
+      // frapperaient les 58 lignes, et les classer une par une viderait la liste à tort.
+      if (rep.status === 403 && estRefusDroitsFichier(corps)) {
+        // Le préfixe `Google API 403` est CONSERVÉ (🟡 audit sécurité) : d'autres lecteurs de ce
+        // message peuvent le chercher (c'était le cas de la lecture des agendas, retirée le 05/11/2026,
+        // ADR-0074), et ajouter un marqueur ne doit pas retirer ce qu'un message portait déjà —
+        // c'est la règle « inventorier les lecteurs » appliquée dans les deux sens. Le marqueur
+        // s'ajoute, il ne remplace pas.
+        throw new Error(`Google API 403 : ${MARQUEUR_DROITS_FICHIER} : ${corps.slice(0, 200)}`);
+      }
+      throw new Error(`Google API ${rep.status} : ${corps.slice(0, 200)}`);
+    }
+    return rep.json() as Promise<T>;
+  }
+}
+
+/* ---------- Sheets (état DriveAI) ---------- */
+
+const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
+
+// Cache de LECTURE (60 s) : changer d'onglet ne recharge pas tout — les vues repartagent la même
+// photo de l'état (le moteur n'écrit que par ticks de 5 min ; les écritures de l'APP l'invalident).
+const cachePlages = new Map<string, { t: number; donnees: string[][] }>();
+const CACHE_MS = 60 * 1000;
+
+/**
+ * Invalide les caches de lecture. Sans argument : TOUT (rafraîchissement global ⟳, cycle 5 min).
+ * Avec un onglet : seules les plages de CET onglet (C28-08, plan P3 — une écriture Sheet ne doit
+ * plus jeter les listages Drive ni les autres onglets, c'était le gros du coût d'un drag-and-drop).
+ */
+export function viderCachePlages(onglet?: string): void {
+  if (onglet) {
+    for (const cle of [...cachePlages.keys()]) {
+      if (cle.startsWith(`${onglet}!`)) cachePlages.delete(cle);
+    }
+    return;
+  }
+  cachePlages.clear();
+  cacheDossiers.clear(); // les listages Drive suivent le même cycle de vie (C21-01)
+  cachePortee.clear();
+  cacheAscendanceDossier.clear(); // l'ascendance peut avoir changé (réorg moteur) — re-vérifiée
+  cacheDossiersMeta.clear();
+  dossiersCreesMock.clear();
+}
+
+/** Invalide les seuls caches DRIVE (déplacement/création : les listages changent, pas la Sheet). */
+export function viderCachesDrive(): void {
+  cacheDossiers.clear();
+  cachePortee.clear();
+  cacheDossiersMeta.clear();
+}
+
+/** Lit une plage (valeurs brutes, lignes de tableaux). */
+export async function lirePlage(onglet: string, plage: string): Promise<string[][]> {
+  const cle = `${onglet}!${plage}`;
+  const memo = cachePlages.get(cle);
+  if (memo && Date.now() - memo.t < CACHE_MS) return memo.donnees;
+  const donnees = await lirePlageDirecte(onglet, plage);
+  cachePlages.set(cle, { t: Date.now(), donnees });
+  return donnees;
+}
+
+async function lirePlageDirecte(onglet: string, plage: string): Promise<string[][]> {
+  if (MODE_MOCK) return plageMock(onglet, plage);
+  const { spreadsheetId } = lireConfig();
+  const r = await api<{ values?: string[][] }>(
+    `${SHEETS}/${spreadsheetId}/values/${encodeURIComponent(`${onglet}!${plage}`)}`,
+  );
+  return r.values ?? [];
+}
+
+/**
+ * Lecture LIVE de l'onglet Progression (C28-18) : CONTOURNE le cache 60 s — le poll dédié
+ * (useProgressionLive, 15 s) doit voir chaque tick du moteur. Le rendu est écrit par le moteur
+ * en fin de tick. Plage OUVERTE `A2:M` (C28-44 PR4, élargie en C28-45/47 : les colonnes `Type` (K),
+ * `Dernière passe` (L) et `Fin estimée` (M) sont VITALES, sans elle le compactage des routines est mort en silence, attrapé en
+ * revue) : le moteur publie ~34 opérations × 13 colonnes — l'ancienne borne `A2:G30` aurait fait
+ * disparaître EN SILENCE tout ce qui dépasse 29 lignes (leçon §7 « une borne haute sur une source
+ * qui croît fige l'UI »). L'API ne renvoie que les lignes non vides : coût inchangé (~4 req/min).
+ */
+export async function lireProgressionLive(): Promise<string[][]> {
+  return lirePlageDirecte('Progression', 'A2:M');
+}
+
+/** Écrit UNE cellule (ex. Statut d'une entité → « validée »). */
+export async function ecrireCellule(onglet: string, cellule: string, valeur: string): Promise<void> {
+  viderCachePlages(onglet); // l'onglet vient de changer — ses lecteurs doivent relire (les autres non)
+  const { spreadsheetId } = lireConfig();
+  await api(
+    `${SHEETS}/${spreadsheetId}/values/${encodeURIComponent(`${onglet}!${cellule}`)}?valueInputOption=RAW`,
+    { method: 'PUT', body: JSON.stringify({ values: [[valeur]] }) },
+  );
+}
+
+/**
+ * Écrit une PLAGE CONTIGUË d'une même colonne (ex. Statuts F3:F7) — UN PUT par plage, jamais de
+ * batchUpdate (motif interdit §2) ; l'appelant découpe via `plagesContigues` pour ne JAMAIS
+ * toucher une ligne non sélectionnée.
+ */
+export async function ecrireColonnePlage(
+  onglet: string,
+  colonne: string,
+  debut: number,
+  valeurs: string[],
+): Promise<void> {
+  if (valeurs.length === 0) return;
+  viderCachePlages(onglet);
+  const { spreadsheetId } = lireConfig();
+  const plage = `${onglet}!${colonne}${debut}:${colonne}${debut + valeurs.length - 1}`;
+  await api(
+    `${SHEETS}/${spreadsheetId}/values/${encodeURIComponent(plage)}?valueInputOption=RAW`,
+    { method: 'PUT', body: JSON.stringify({ values: valeurs.map((v) => [v]) }) },
+  );
+}
+
+/** Ajoute une ligne en fin d'onglet (ex. Corrections → few-shot du moteur). */
+export async function ajouterLigne(onglet: string, ligne: (string | number)[]): Promise<void> {
+  viderCachePlages(onglet);
+  const { spreadsheetId } = lireConfig();
+  await api(
+    `${SHEETS}/${spreadsheetId}/values/${encodeURIComponent(`${onglet}!A1`)}:append?valueInputOption=RAW`,
+    { method: 'POST', body: JSON.stringify({ values: [ligne] }) },
+  );
+}
+
+/* ---------- Drive (lecture + reclassement SOUS garde-fous) ---------- */
+
+export const DRIVE = 'https://www.googleapis.com/drive/v3/files';
+
+export interface FichierDrive {
+  id: string;
+  name: string;
+  mimeType?: string;
+  parents?: string[];
+  webViewLink?: string;
+  // Demandés pour la corbeille (🟠 audit sécurité C28-129) : « Marc peut-il corbeiller ceci ? » est
+  // une question à laquelle Drive répond AVANT toute mutation. Sans elle, la seule façon de
+  // l'apprendre était d'essayer et de lire le 403 — un verdict pris sur un ÉCHEC plutôt que sur une
+  // LECTURE, ce qu'ADR-0014 demande justement d'éviter. `undefined` = Drive n'a pas répondu ⇒ échec
+  // fermé côté verdict, jamais une autorisation par défaut.
+  ownedByMe?: boolean;
+  capabilities?: { canTrash?: boolean };
+}
+
+export async function lireFichier(fileId: string): Promise<FichierDrive> {
+  const f = await api<FichierDrive>(`${DRIVE}/${fileId}?fields=${encodeURIComponent('id,name,mimeType,parents,webViewLink,ownedByMe,capabilities(canTrash)')}`);
+  if (f.mimeType === MIME_DOSSIER) memoriserDossierMeta(f);
+  return f;
+}
+
+// L'alias `'root'` n'apparaît JAMAIS dans `parents` (l'API y met l'ID réel) : résolu une fois
+// pour que les comparaisons/PATCH de déplacement soient justes (sinon add+remove du même dossier).
+let idRacineReel: string | null = null;
+async function resoudreRacine(): Promise<string> {
+  if (idRacineReel) return idRacineReel;
+  const r = await api<{ id: string }>(`${DRIVE}/root?fields=id`);
+  idRacineReel = r.id;
+  return r.id;
+}
+
+
+// Cache SESSION des ascendances de DOSSIERS (C28-08, plan P3) : l'ascendance d'un dossier ne
+// bouge pas pendant une session de tri (l'app ne déplace jamais de dossier ; la réorg MOTEUR
+// peut en bouger un → le cache est purgé par `viderCachePlages()` global : ⟳ manuel et cycle
+// 5 min — fenêtre de staleté bornée). Ne mémorise JAMAIS une branche illisible (échec fermé).
+const cacheAscendanceDossier = new Map<string, Ascendance>();
+
+/** Ancêtres d'un DOSSIER (lui inclus), mémoïsés — le gros du coût d'un drag-and-drop répété. */
+async function ascendanceDossier(
+  id: string,
+  profondeur: number,
+  visites: Set<string> = new Set(),
+): Promise<Ascendance> {
+  if (profondeur <= 0) return { ids: [id], complete: false };
+  const memo = cacheAscendanceDossier.get(id);
+  if (memo) return memo;
+  if (visites.has(id)) return { ids: [id], complete: false };
+  visites.add(id);
+  const ids = new Set<string>([id]);
+  let complete = true;
+  let parents: string[] = [];
+  try {
+    const d = await api<{ parents?: string[] }>(`${DRIVE}/${id}?fields=parents`);
+    parents = d.parents ?? [];
+  } catch {
+    complete = false; // branche illisible → le verdict refusera le détachement
+  }
+  for (const p of parents) {
+    const asc = await ascendanceDossier(p, profondeur - 1, visites);
+    asc.ids.forEach((i) => ids.add(i));
+    if (!asc.complete) complete = false;
+  }
+  const resultat = { ids: Array.from(ids), complete };
+  if (complete) cacheAscendanceDossier.set(id, resultat);
+  return resultat;
+}
+
+/**
+ * Remonte TOUTE la chaîne d'ancêtres d'un fichier (multi-parents, borné) — miroir du walk du
+ * moteur. Une branche illisible ⇒ `complete: false` (le verdict refusera : échec fermé).
+ * Les ascendances de dossiers sont mémoïsées pour la session (le fichier, lui, est toujours relu).
+ */
+export async function remonterAscendance(fileId: string, profondeurMax = 50): Promise<Ascendance> {
+  let parents: string[] = [];
+  try {
+    const f = await lireFichier(fileId);
+    parents = f.parents ?? [];
+  } catch {
+    return { ids: [], complete: false };
+  }
+  const ids = new Set<string>();
+  const visites = new Set<string>();
+  let complete = true;
+  for (const p of parents) {
+    const asc = await ascendanceDossier(p, profondeurMax, visites);
+    asc.ids.forEach((i) => ids.add(i));
+    if (!asc.complete) complete = false;
+  }
+  return { ids: Array.from(ids), complete };
+}
+
+/* ---------- Explorateur Drive (C21-01) : navigation + recherche scopée — LECTURE SEULE ---------- */
+
+const CHAMPS_ELEMENT = 'id,name,mimeType,modifiedTime,size,webViewLink,parents';
+
+export interface PageDrive {
+  elements: ElementDrive[];
+  suivant?: string; // nextPageToken — présent s'il reste des éléments
+}
+
+interface MetaDossierCache {
+  id: string;
+  name: string;
+  parents?: string[];
+}
+
+// Cache 60 s des listages de dossiers (même logique que cachePlages : navigation fluide,
+// invalidé par toute écriture de l'app via viderCachePlages).
+const cacheDossiers = new Map<string, { t: number; page: PageDrive }>();
+// Cache 60 s des portées de sous-dossiers pour la recherche scopée (invalidé avec Drive et globalement).
+const cachePortee = new Map<string, { t: number; portee: { ids: string[]; tronque: boolean } }>();
+// Cache passif des métadonnées de dossiers connus (nom + parents) pour libellé parent et Ariane P1-2.
+const cacheDossiersMeta = new Map<string, MetaDossierCache>();
+// En MODE_MOCK uniquement : trace des dossiers créés dans la session sans muter l'objet ENFANTS_MOCK.
+const dossiersCreesMock = new Map<string, ElementDrive[]>();
+
+function memoriserDossierMeta(
+  dossier: { id?: string; name?: string; mimeType?: string; parents?: string[] },
+  parentConnu?: string,
+): void {
+  const id = dossier.id?.trim();
+  const nom = dossier.name?.trim();
+  if (!id || !nom) return;
+  if (dossier.mimeType && !estDossier({ mimeType: dossier.mimeType })) return;
+  const parents = dossier.parents && dossier.parents.length > 0
+    ? dossier.parents
+    : (parentConnu ? [parentConnu] : undefined);
+  cacheDossiersMeta.set(id, { id, name: dossier.name!, parents });
+}
+
+function arbreMock(): Record<string, ElementDrive[]> {
+  const base = ENFANTS_MOCK as Record<string, ElementDrive[]>;
+  if (dossiersCreesMock.size === 0) return base;
+  const fusion: Record<string, ElementDrive[]> = { ...base };
+  for (const [parentId, ajouts] of dossiersCreesMock.entries()) {
+    fusion[parentId] = [...(fusion[parentId] ?? []), ...ajouts];
+  }
+  return fusion;
+}
+
+/** Enfants directs d'un dossier (`'root'` = racine Mon Drive), triés dossiers d'abord côté API. */
+export async function listerEnfants(dossierId: string, pageToken?: string): Promise<PageDrive> {
+  if (MODE_MOCK) {
+    const base = (ENFANTS_MOCK[dossierId] ?? []) as ElementDrive[];
+    const ajouts = dossiersCreesMock.get(dossierId) ?? [];
+    return { elements: ajouts.length > 0 ? [...base, ...ajouts] : base };
+  }
+  const cle = `${dossierId}|${pageToken ?? ''}`;
+  const memo = cacheDossiers.get(cle);
+  if (memo && Date.now() - memo.t < CACHE_MS) return memo.page;
+  const params = new URLSearchParams({
+    q: qEnfants(dossierId),
+    orderBy: 'folder,name',
+    pageSize: '100',
+    fields: `nextPageToken,files(${CHAMPS_ELEMENT})`,
+  });
+  if (pageToken) params.set('pageToken', pageToken);
+  const r = await api<{ files?: ElementDrive[]; nextPageToken?: string }>(`${DRIVE}?${params.toString()}`);
+  const elements = r.files ?? [];
+  for (const el of elements) {
+    if (el.id && estDossier(el)) memoriserDossierMeta(el, dossierId);
+  }
+  const page = { elements, suivant: r.nextPageToken };
+  cacheDossiers.set(cle, { t: Date.now(), page });
+  return page;
+}
+
+export interface OptionsRechercheDrive {
+  dossierId?: string;       // si défini et !== 'root', recherche récursive dans ce sous-arbre
+  maxSousDossiers?: number; // plafond de sécurité pour la collecte BFS (défaut 80)
+}
+
+export interface ResultatRechercheDrive {
+  elements: ElementDrive[];
+  tronque: boolean;         // true si la collecte de sous-dossiers ou la page RECHERCHE_PAGE est bornée
+}
+
+const MAX_SOUS_DOSSIERS_DEFAUT = 80;
+const LOT_PARENTS_DRIVE = 10;
+
+async function collecterSousDossiers(
+  racineId: string,
+  plafond: number,
+): Promise<{ ids: string[]; tronque: boolean }> {
+  const cle = `${racineId}|${plafond}`;
+  const memo = cachePortee.get(cle);
+  if (memo && Date.now() - memo.t < CACHE_MS) return memo.portee;
+
+  const vus = new Set<string>([racineId]);
+  const ids: string[] = [racineId];
+  let front: string[] = [racineId];
+  let tronque = false;
+
+  while (front.length > 0 && !tronque) {
+    const decouverts: string[] = [];
+    for (const lot of decouperEnLots(front, LOT_PARENTS_DRIVE)) {
+      const params = new URLSearchParams({
+        q: qSousDossiers(lot),
+        fields: 'nextPageToken,files(id)',
+        pageSize: '100',
+      });
+      const r = await api<{ files?: { id: string }[]; nextPageToken?: string }>(`${DRIVE}?${params.toString()}`);
+      if (r.nextPageToken) tronque = true;
+      for (const f of r.files ?? []) {
+        if (f.id) decouverts.push(f.id);
+      }
+    }
+    const ajoutes: string[] = [];
+    for (const id of decouverts) {
+      if (vus.has(id)) continue;
+      if (ids.length >= plafond) {
+        tronque = true;
+        break;
+      }
+      vus.add(id);
+      ids.push(id);
+      ajoutes.push(id);
+    }
+    front = ajoutes;
+  }
+
+  const portee = { ids, tronque };
+  cachePortee.set(cle, { t: Date.now(), portee });
+  return portee;
+}
+
+/**
+ * Recherche façon barre Google Drive (nom OU plein texte natif), globale par défaut ou
+ * récursive dans un dossier (`options.dossierId`). Une page de `RECHERCHE_PAGE` résultats
+ * par lot ; `tronque` signale honnêtement une limite de page ou de collecte BFS.
+ */
+export const RECHERCHE_PAGE = 50;
+export async function rechercherDrive(
+  texte: string,
+  options?: OptionsRechercheDrive,
+): Promise<ResultatRechercheDrive> {
+  const propre = texte.trim();
+  if (!propre) return { elements: [], tronque: false };
+  if (MODE_MOCK) return rechercherDansArbreMock(arbreMock(), propre, options);
+
+  if (!options?.dossierId || options.dossierId === 'root') {
+    const params = new URLSearchParams({
+      q: qRecherche(propre),
+      fields: `nextPageToken,files(${CHAMPS_ELEMENT})`,
+      pageSize: String(RECHERCHE_PAGE),
+    });
+    const r = await api<{ files?: ElementDrive[]; nextPageToken?: string }>(`${DRIVE}?${params.toString()}`);
+    const elements = r.files ?? [];
+    for (const el of elements) {
+      if (el.id && estDossier(el)) memoriserDossierMeta(el);
+    }
+    return { elements, tronque: Boolean(r.nextPageToken) };
+  }
+
+  const brutPlafond = options.maxSousDossiers;
+  const plafond = typeof brutPlafond === 'number' && Number.isFinite(brutPlafond)
+    ? Math.max(1, Math.floor(brutPlafond))
+    : MAX_SOUS_DOSSIERS_DEFAUT;
+  const portee = await collecterSousDossiers(options.dossierId, plafond);
+  let tronque = portee.tronque;
+  const vus = new Map<string, ElementDrive>();
+
+  for (const lot of decouperEnLots(portee.ids, LOT_PARENTS_DRIVE)) {
+    const params = new URLSearchParams({
+      q: qRecherche(propre, lot),
+      fields: `nextPageToken,files(${CHAMPS_ELEMENT})`,
+      pageSize: String(RECHERCHE_PAGE),
+    });
+    const r = await api<{ files?: ElementDrive[]; nextPageToken?: string }>(`${DRIVE}?${params.toString()}`);
+    if (r.nextPageToken) tronque = true;
+    for (const f of r.files ?? []) {
+      if (f.id && estDossier(f)) memoriserDossierMeta(f);
+      if (!vus.has(f.id)) vus.set(f.id, f);
+    }
+  }
+
+  return { elements: trierElements(Array.from(vus.values())), tronque };
+}
+
+/**
+ * Résout le nom du dossier parent immédiat UNIQUEMENT depuis les caches locaux (0 requête
+ * réseau, jamais d'appel N+1 sur les résultats de recherche — P1-2).
+ */
+export function libelleParentEnCache(
+  element: Pick<ElementDrive, 'parents'>,
+  options?: { nomRacine?: string; nomsSupplementaires?: ReadonlyMap<string, string> },
+): string | null {
+  const parentId = element.parents?.[0];
+  if (!parentId) return null;
+  const nomRacine = options?.nomRacine ?? 'Mon Drive';
+  if (parentId === 'root' || (idRacineReel !== null && parentId === idRacineReel)) {
+    return nomRacine;
+  }
+  const sup = options?.nomsSupplementaires?.get(parentId);
+  if (sup) return sup;
+  const enCache = cacheDossiersMeta.get(parentId);
+  if (enCache && enCache.name.trim()) return enCache.name;
+  if (MODE_MOCK) {
+    const arbre = arbreMock();
+    for (const liste of Object.values(arbre)) {
+      for (const el of liste) {
+        if (el.id === parentId && estDossier(el)) return el.name;
+      }
+    }
+  }
+  return null;
+}
+
+const MAX_PROFONDEUR_ARIANE = 20;
+
+export interface CheminDossierResolu {
+  etapes: Etape[];
+  approximatif: boolean;
+}
+
+function dossierExisteDansArbreMock(arbre: Record<string, ElementDrive[]>, id: string): boolean {
+  for (const liste of Object.values(arbre)) {
+    for (const el of liste) {
+      if (el.id === id && estDossier(el)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Reconstruit le fil d'Ariane complet d'un dossier à la demande (P1-2, au clic uniquement) :
+ * consulte le cache passif d'abord, puis remonte l'ascendance avec garde anti-cycle, profondeur
+ * bornée et dégradation gracieuse sur 403/réseau (`approximatif: true` si incomplet). Compatible `MODE_MOCK`.
+ */
+export async function resoudreCheminDossier(
+  dossier: string | { id: string; nom?: string; name?: string; parents?: string[] },
+  options?: { nomRacine?: string; maxProfondeur?: number },
+): Promise<CheminDossierResolu> {
+  const nomRacine = options?.nomRacine ?? 'Mon Drive';
+  const racine: Etape = { id: 'root', nom: nomRacine };
+  const id = (typeof dossier === 'string' ? dossier : dossier.id).trim();
+  const nomBrut = typeof dossier === 'string' ? undefined : (dossier.nom ?? dossier.name);
+  const nomInitial = nomBrut !== undefined && nomBrut.trim() !== '' ? nomBrut : undefined;
+  const parentsInitiaux = typeof dossier === 'string' ? undefined : dossier.parents;
+
+  if (!id || id === 'root') return { etapes: [racine], approximatif: false };
+
+  if (MODE_MOCK) {
+    const arbre = arbreMock();
+    return {
+      etapes: resoudreArianeDansArbreMock(arbre, id, nomRacine, nomInitial),
+      approximatif: !dossierExisteDansArbreMock(arbre, id),
+    };
+  }
+
+  let racineReelle: string | null = idRacineReel;
+  if (!racineReelle) {
+    try {
+      racineReelle = await resoudreRacine();
+    } catch {
+      racineReelle = null;
+    }
+  }
+
+  if (racineReelle && id === racineReelle) return { etapes: [racine], approximatif: false };
+
+  const brutMax = options?.maxProfondeur;
+  const maxProfondeur = typeof brutMax === 'number' && Number.isFinite(brutMax)
+    ? Math.max(1, Math.floor(brutMax))
+    : MAX_PROFONDEUR_ARIANE;
+
+  const suffixe: Etape[] = [];
+  const vus = new Set<string>();
+  let courantId: string | undefined = id;
+  let courantNom: string | undefined = nomInitial;
+  let courantParents: string[] | undefined = parentsInitiaux;
+  let atteintRacine = false;
+
+  for (let profondeur = 0; profondeur < maxProfondeur && courantId; profondeur++) {
+    if (courantId === 'root' || (racineReelle && courantId === racineReelle)) {
+      atteintRacine = true;
+      break;
+    }
+    if (vus.has(courantId)) break;
+    vus.add(courantId);
+
+    const memo = cacheDossiersMeta.get(courantId);
+    const nomMemo = memo?.name && memo.name.trim() !== '' ? memo.name : undefined;
+    const nomConnu = courantNom !== undefined && courantNom.trim() !== '' ? courantNom : undefined;
+    const nom = nomConnu ?? nomMemo;
+    const parents = courantParents ?? memo?.parents;
+    let nomResolu: string;
+    let parentsResolus: string[];
+
+    if (nom === undefined || parents === undefined) {
+      try {
+        const reponse: { id: string; name?: string; mimeType?: string; parents?: string[] } = await api(
+          `${DRIVE}/${encodeURIComponent(courantId)}?fields=id,name,mimeType,parents`,
+        );
+        const nomApi = reponse.name && reponse.name.trim() !== '' ? reponse.name : undefined;
+        const nomValide = nom ?? nomApi;
+        nomResolu = nomValide ?? courantId;
+        parentsResolus = parents ?? reponse.parents ?? [];
+        if (nomValide) {
+          cacheDossiersMeta.set(courantId, { id: courantId, name: nomValide, parents: parentsResolus });
+        }
+      } catch {
+        if (nom) {
+          suffixe.unshift({ id: courantId, nom });
+        } else if (suffixe.length === 0) {
+          suffixe.unshift({ id: courantId, nom: courantId });
+        }
+        break;
+      }
+    } else {
+      nomResolu = nom;
+      parentsResolus = parents;
+      cacheDossiersMeta.set(courantId, { id: courantId, name: nomResolu, parents: parentsResolus });
+    }
+
+    suffixe.unshift({ id: courantId, nom: nomResolu });
+
+    if (parentsResolus.length === 0) {
+      atteintRacine = true;
+      break;
+    }
+
+    courantId = parentsResolus[0];
+    courantNom = undefined;
+    courantParents = undefined;
+  }
+
+  const etapes = !atteintRacine && suffixe.length === 0
+    ? [racine, { id, nom: nomInitial ?? id }]
+    : [racine, ...suffixe];
+  return { etapes, approximatif: !atteintRacine };
+}
+
+/* ---------- Explorateur (C21-02) : création de dossier + déplacement MANUEL ---------- */
+
+/**
+ * Crée un dossier (création seule — l'inverse, la suppression, n'existe pas dans cette app ;
+ * la corbeille des dossiers VIDES validée arrive en C21-07 sous ADR-0014). Nom libre : les
+ * dossiers (entités, sous-dossiers) ne suivent pas la convention datée des fichiers.
+ */
+export async function creerDossier(nom: string, parentId: string): Promise<ElementDrive> {
+  const propre = nom.trim();
+  if (!propre) throw new Error('Nom de dossier vide');
+  viderCachesDrive(); // seul le listage Drive change — les onglets Sheet n'ont pas bougé
+  if (MODE_MOCK) {
+    const existants = dossiersCreesMock.get(parentId) ?? [];
+    const cree: ElementDrive = {
+      id: `mock-dossier-${parentId}-${existants.length + 1}`,
+      name: propre,
+      mimeType: MIME_DOSSIER,
+      parents: [parentId],
+      modifiedTime: '2026-07-06T14:15:00Z',
+    };
+    dossiersCreesMock.set(parentId, [...existants, cree]);
+    memoriserDossierMeta(cree, parentId);
+    return cree;
+  }
+  const cree = await api<ElementDrive>(`${DRIVE}?fields=${encodeURIComponent(CHAMPS_ELEMENT)}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: propre,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: [parentId],
+    }),
+  });
+  memoriserDossierMeta({ ...cree, mimeType: cree.mimeType ?? MIME_DOSSIER }, parentId);
+  return cree;
+}
+
+/** L'Index (colonne Clé) contient-il cette clé ? Lecture d'une colonne, cache 60 s. */
+export async function indexContientCle(cle: string): Promise<boolean> {
+  // Fenêtre OUVERTE `A2:A` — JAMAIS `A2:A<N>` : l'Index est append-only et le reset y écrit 2-3 lignes
+  // par fichier ; au franchissement de la borne de tête, cette vérif (parade « re-déposer un fichier
+  // déjà traité ») devenait silencieusement inopérante et des doublons `drive|` s'ajoutaient (revue
+  // de fond 2026-07-31 ; même famille que le Journal/Index de etatGlobal).
+  const colonne = await lirePlage('Index', 'A2:A');
+  return colonne.some((l) => (l[0] ?? '') === cle);
+}
+
+/**
+ * Déplacement MANUEL d'un FICHIER (drag-and-drop de Marc, C21-02) : nom CONSERVÉ — le verdict
+ * garde-fous tourne en mode `deplacementSeul` (la règle de nom ne s'applique pas ; la zone
+ * protégée reste inconditionnelle : jamais détaché de 04 · Immigration, échec fermé si
+ * l'ascendance est illisible). Les DOSSIERS ne se déplacent JAMAIS ici (réorg de masse =
+ * moteur) — refus par mimeType, défense en profondeur contre un payload de drag forgé.
+ *
+ * Parades intake (revue file-checker) : REdéposer dans `00 · À trier` un fichier déjà traité
+ * est refusé (il s'y enliserait en silence — l'idempotence du moteur l'ignore) ; un placement
+ * manuel ailleurs est ENTÉRINÉ par une ligne Index `drive|fileId` statut `manuel` (le grand
+ * rangement ne re-collectera pas le fichier — même skip que pour un média sorti de `_Médias`).
+ *
+ * @param nomCible nom du dossier cible (détection « À trier » — l'app n'a pas son ID)
+ * @returns true si un déplacement a eu lieu, false si le fichier était déjà en place.
+ * @throws si le verdict n'est pas vide (l'appelant affiche les violations).
+ */
+export async function deplacerFichierManuel(args: {
+  fileId: string;
+  nouveauParent: string;
+  nomCible?: string;
+  racinesProtegees?: string[];
+}): Promise<boolean> {
+  const [f, gardes] = await Promise.all([lireFichier(args.fileId), chargerGardes()]);
+  const racinesProtegees = args.racinesProtegees ?? gardes.racinesProtegees;
+  if (f.mimeType === MIME_DOSSIER || racinesProtegees.includes(args.fileId)) {
+    throw new Error('Déplacement refusé : seuls les FICHIERS se déplacent ici (dossiers : réorg à venir)');
+  }
+  const ascendance = await remonterAscendance(args.fileId);
+  const violations = verdictReclassement({
+    ascendanceActuelle: ascendance,
+    deplacementSeul: true,
+    racinesProtegees,
+  });
+  if (violations.length > 0) {
+    throw new Error(`Déplacement refusé (garde-fous) : ${violations.join(', ')}`);
+  }
+  const cleIndex = `drive|${args.fileId}`;
+  const dejaIndexe = await indexContientCle(cleIndex).catch(() => false);
+  const cibleATrier = estDossierATrier(args.nomCible ?? '');
+  if (cibleATrier && dejaIndexe) {
+    throw new Error('Déjà traité par DriveAI — redéposer dans « À trier » n’aurait aucun effet. Déplace-le directement vers son dossier cible.');
+  }
+  // `'root'` est un alias : jamais présent dans f.parents — résolu avant toute comparaison.
+  const cible = args.nouveauParent === 'root' ? await resoudreRacine() : args.nouveauParent;
+  // Même logique anti-ambiguïté que reclasserFichier : cible retirée de removeParents.
+  const anciens = (f.parents ?? []).filter((p) => p !== cible).join(',');
+  const dejaEnPlace = (f.parents ?? []).includes(cible);
+  if (dejaEnPlace && !anciens) return false; // déjà exactement là — no-op
+  viderCachesDrive(); // les listages changent ; les onglets Sheet sont invalidés par leurs appends
+  const params = new URLSearchParams({ fields: 'id' });
+  if (!dejaEnPlace) params.set('addParents', cible);
+  if (anciens) params.set('removeParents', anciens);
+  await api(`${DRIVE}/${args.fileId}?${params.toString()}`, { method: 'PATCH', body: '{}' });
+  // Écritures Sheet en TÂCHE DE FOND (C28-08, plan P3) : le PATCH Drive (critique) est attendu,
+  // la trace ne bloque plus le geste (~2 allers-retours gagnés au drag). Si elle échoue, la
+  // réconciliation Index↔Drive du moteur (synchroniserIndex_) rattrape l'Index plus tard.
+  const traces: Promise<unknown>[] = [];
+  // Entérine le geste dans l'Index (sauf vers À trier : là, le fichier DOIT être traité).
+  if (!cibleATrier && !dejaIndexe) traces.push(ajouterLigneIndexManuelle_(cleIndex, f.name));
+  // Trace au Journal (le moteur y écrit pareil) — l'échec n'annule pas le geste.
+  traces.push(ajouterLigne('Journal', [
+    new Date().toISOString(),
+    'INFO',
+    'App',
+    `Déplacement manuel : « ${f.name} » (${args.fileId})`,
+  ]));
+  void Promise.all(traces.map((p) => p.catch((e) => console.error('trace de déplacement perdue', e))));
+  return true;
+}
+
+/** Ligne Index d'un placement manuel — EN SUIVANT LES EN-TÊTES RÉELS (miroir de Journal.gs). */
+let entetesIndexMemo: string[] | null = null; // mémoïsés pour la session (C28-08 — 1 lecture, pas 1/drag)
+async function ajouterLigneIndexManuelle_(cle: string, nom: string): Promise<void> {
+  const ORDRE_DEFAUT = ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance'];
+  let entetes: string[] = entetesIndexMemo ?? [];
+  if (entetes.length === 0) {
+    try {
+      entetes = (await lirePlage('Index', 'A1:H1'))[0] ?? [];
+    } catch { /* onglet illisible → ordre par défaut (celui que le moteur crée) */ }
+    if (entetes.length > 0) entetesIndexMemo = entetes;
+  }
+  if (entetes.length === 0) entetes = ORDRE_DEFAUT;
+  const valeurs: Record<string, string> = {
+    'Clé': cle,
+    'Traité le': new Date().toISOString(),
+    Fichier: nom,
+    Statut: 'manuel',
+  };
+  await ajouterLigne('Index', entetes.map((e) => valeurs[e] ?? ''));
+}
+
+/* ---------- POST vers la web app Apps Script : rejeu SÛR parce que le moteur mémorise (C28-133) ---------- */
+
+/**
+ * Attentes entre deux essais, en ms. La seule mesure prod de CETTE panne dans le dépôt est
+ * l'incident du 2026-07-08 (`sync-drive.yml`) : 3 tentatives espacées de 20 s, et ça passait.
+ * 1 s puis 4 s reste invisible dans un chat qui prend déjà 5 à 30 s, et couvre un vrai blip —
+ * là où 700 ms revenait à réessayer « la même seconde, trois fois ».
+ */
+export const WEBAPP_ATTENTES_MS = [1000, 4000];
+/** Essais = attentes + 1, DÉRIVÉ : une seule constante à régler, et aucun index à borner. */
+export const WEBAPP_ESSAIS = WEBAPP_ATTENTES_MS.length + 1;
+
+/**
+ * C28-140 : `fetch` n'a pas de timeout par défaut — un `/exec` qui ne répond jamais laissait
+ * l'UI pendue sans bouton d'annulation, et le rejeu ne s'engageait même pas (le code n'atteint
+ * jamais le `catch` qui le déclenche). Sûr à ajouter maintenant que le mémo du moteur existe
+ * (C28-133) : abandonner une requête ne la fait plus payer deux fois côté LLM.
+ *
+ * Valeur choisie sur MESURE, pas au jugé (comme demandé) : Apps Script borne dur l'exécution
+ * d'une web app à 6 min, plafond de PLATEFORME (comptes grand public), pas une constante à nous —
+ * le moteur gardait (chat à outils, retiré le 05/11/2026 par l'ADR-0074) un garde-temps
+ * INTERNE de 4 min pour ne pas démarrer un nouveau tour trop tard, avec marge pour que le
+ * tour final + le `finally` du doPost tiennent sous ce mur ; le mur, lui, reste. Le budget CLIENT doit donc rester AU-DESSUS du mur serveur, jamais
+ * en dessous (sans quoi une requête qui aurait fini à temps serait abandonnée pour rien) — le
+ * même raisonnement que `TIMEOUT_MS` dans `api/hub/_engineState.ts`, en miroir (marge AU-DESSUS
+ * du budget serveur ici, marge EN DESSOUS du budget hub là-bas : les deux protègent le budget de
+ * l'AUTRE bout de la chaîne, jamais le sien).
+ */
+export const WEBAPP_TIMEOUT_MS = 6.5 * 60 * 1000;
+
+/** Identifiant d'une requête LOGIQUE — le même sur tous les essais, c'est tout son intérêt. */
+function nouvelIdRequete(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export interface OptionsWebApp {
+  /**
+   * Cette action accepte-t-elle d'être rejouée ? **Aucun défaut : chaque appelant tranche.** Le
+   * défaut « ne pas rejouer » est la doctrine du dépôt (hier verrouillée côté MCP, retiré par
+   * l'ADR-0074) ; la rendre OBLIGATOIRE va plus loin — un oubli ne peut ni accorder
+   * ni retirer le rejeu en silence, il ne compile pas.
+   */
+  rejouable: boolean;
+  /** Injectée : un rejeu ne se teste pas en attendant vraiment cinq secondes. */
+  attendre?: (ms: number) => Promise<void>;
+}
+
+/**
+ * POST vers la web app du moteur, avec REJEU BORNÉ de tout ce qui n'est pas un JSON exploitable.
+ *
+ * POURQUOI — Marc, 15/09 : « erreur 404 quand je fais une demande à l'assistant », affiché
+ * « Web app 404 ». `CLAUDE.md` §9 décrit la panne et son remède (« le succès se juge au CONTENU,
+ * jamais au code HTTP ; rejouer, borné, tout ce qui n'est pas un JSON `ok:true` ») ; le remède
+ * était appliqué au miroir Drive et à personne d'autre.
+ *
+ * CE QUI REND LE REJEU SÛR, et ce n'est PAS le code HTTP. Un POST `/exec` a DEUX segments :
+ * `script.google.com` EXÉCUTE puis redirige (302) vers `googleusercontent.com`, qui ne fait que
+ * SERVIR la sortie. `fetch` suit la redirection : le statut observé est celui du SECOND segment.
+ * Un 404 peut donc vouloir dire « rien n'a tourné » AUTANT que « tout a tourné et Anthropic a été
+ * payé » — le client ne peut pas les distinguer (une première version de ce code l'a cru ; deux
+ * revues l'ont réfutée). La sûreté vient donc du MOTEUR : `doPost` mémorise la réponse d'une
+ * requête réussie sous son `requestId` (10 min) et la re-sert telle quelle à un rejeu, sans
+ * rappeler le modèle ni ré-écrire une ligne. L'identifiant est généré UNE fois ici et réutilisé
+ * à l'identique — c'est lui, et non le statut, qui porte la garantie.
+ *
+ * ⚠️ Le mémo vit dans le moteur : tant que la version déployée ne le connaît pas, un rejeu
+ * ré-exécute. C'est pourquoi ce changement se livre AVEC le sien, et jamais seul.
+ *
+ * NE SE REJOUE PAS : un JSON propre `ok:false` (secret, config, budget du jour) — permanent, et il
+ * remonte tel quel pour que l'UI distingue un budget atteint d'une panne.
+ */
+export async function postWebApp<T extends { ok: boolean; erreur?: string }>(
+  action: string,
+  corps: Record<string, unknown>,
+  opts: OptionsWebApp,
+): Promise<T> {
+  const { webappUrl, webappSecret } = lireConfig();
+  if (!webappUrl || !webappSecret) throw new Error('Variables Vercel WEBAPP_URL / WEBAPP_SECRET manquantes (Settings → Environment Variables)');
+  const attendre = opts.attendre ?? ((ms: number) => new Promise<void>((r) => {
+    setTimeout(r, ms + Math.floor(Math.random() * ms * 0.25)); // gigue : deux onglets ne repartent pas ensemble
+  }));
+  const essais = opts.rejouable ? WEBAPP_ESSAIS : 1;
+  const requestId = nouvelIdRequete();
+  const url = `${webappUrl}?secret=${encodeURIComponent(webappSecret)}&action=${encodeURIComponent(action)}`;
+  const causes: string[] = []; // ⚠️ on GARDE chaque cause : un verdict d'échec ne doit pas écraser
+  for (let essai = 0; essai < essais; essai++) {                     //   celles qu'il vient de traverser
+    if (essai > 0) await attendre(WEBAPP_ATTENTES_MS[essai - 1]);
+    let rep: Response;
+    try {
+      rep = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ ...corps, requestId }),
+        signal: AbortSignal.timeout(WEBAPP_TIMEOUT_MS),
+      });
+    } catch (e) {
+      causes.push(String(e));
+      if (essai === essais - 1) throw e instanceof Error ? e : new Error(String(e));
+      continue;
+    }
+    if (!rep.ok) { causes.push(`HTTP ${rep.status}`); continue; }
+    try {
+      const json = await rep.json() as unknown;
+      if (!json || typeof json !== 'object' || Array.isArray(json)) {
+        causes.push('réponse illisible');
+        continue;
+      }
+      return json as T; // `ok:true` ou `ok:false` : l'appelant tranche, on ne rejoue pas
+    } catch {
+      // Page HTML en 200 : servie en GET, donc `doPost` n'a PAS tourné (incident du 2026-07-08).
+      // Transitoire — mais si ça persiste, c'est le piège de VERSION, et le message le dit.
+      causes.push('réponse illisible');
+    }
+  }
+  if (causes.length === 1) throw causes[0] === 'réponse illisible'
+    ? new Error('Réponse illisible — la web app a-t-elle été redéployée en nouvelle version ?')
+    : new Error(`Web app ${causes[0].replace('HTTP ', '')}`);
+  // Le message DIT qu'on a insisté ET ce qu'on a vu à chaque fois : sans ça, Marc ne peut pas
+  // distinguer un hoquet d'une panne installée, et c'est la différence qui commande son geste.
+  throw new Error(`Web app injoignable après ${causes.length} essais (${causes.join(', ')}). Si ça se répète, c'est le déploiement /exec qu'il faut revoir.`);
+}
+
+/** Repères de la maquette E2E : fictifs, jamais ceux d'un vrai Drive. */
+const GARDES_MOCK: ReperesGardes = {
+  racinesProtegees: ['MOCK_RACINE_PROTEGEE'],
+  idsStructurels: ['MOCK_DOSSIER_LOGEMENT', 'MOCK_DOSSIER_VEHICULE'],
+};
+
+let gardesEnCours: Promise<ReperesGardes> | null = null;
+
+/**
+ * Repères de la zone protégée et des dossiers à ID fixe, demandés au moteur (action `gardes-app`,
+ * qui les lit dans le profil privé : le dépôt ne les porte plus, mission #497). Mémoïsés pour la
+ * session — mais JAMAIS un échec : la promesse rejetée est oubliée, le prochain geste retente.
+ * ECHEC FERMÉ : réponse `ok:false`, liste vide ou manquante → exception, donc aucune mutation Drive.
+ */
+export function chargerGardes(): Promise<ReperesGardes> {
+  if (MODE_MOCK) return Promise.resolve(GARDES_MOCK);
+  if (gardesEnCours) return gardesEnCours;
+  const p = (async () => {
+    const rep = await postWebApp<{ ok: boolean; erreur?: string; racinesProtegees?: string[]; idsStructurels?: string[] }>(
+      'gardes-app', {}, { rejouable: true });
+    const racines = rep.racinesProtegees;
+    const structurels = rep.idsStructurels;
+    if (!rep.ok || !Array.isArray(racines) || racines.length === 0 || !Array.isArray(structurels) || structurels.length === 0) {
+      throw new Error(`Garde-fous indisponibles (${rep.erreur ?? 'repères manquants'}) : aucune modification de Drive tant que le profil privé du moteur n'est pas appliqué`);
+    }
+    return { racinesProtegees: racines, idsStructurels: structurels };
+  })();
+  gardesEnCours = p;
+  p.catch(() => { if (gardesEnCours === p) gardesEnCours = null; });
+  return p;
+}
+
+/* ---------- Demandes ponctuelles vers la web app ---------- */
+
+/**
+ * POST générique vers la web app (mêmes canal et pièges que `postWebApp`). L'erreur du moteur
+ * remonte TELLE QUELLE — l'UI la traduit en message clair au lieu d'un texte technique.
+ */
+/**
+ * @param rejouable  OBLIGATOIRE, et c'est le but : cette porte est générique, et une action ajoutée
+ *   demain ne doit pas hériter du rejeu par défaut de configuration (§9).
+ */
+async function demandeWebApp(action: string, corps: Record<string, unknown>, rejouable: boolean): Promise<string> {
+  const data = await postWebApp<{ ok: boolean; erreur?: string; message?: string }>(action, corps, { rejouable });
+  if (!data.ok) throw new Error(data.erreur || `${action} refusé`);
+  return data.message ?? 'demande programmée';
+}
+
+/**
+ * « Pas suspect » 1-clic (C28-19) : l'expéditeur du fil devient DE CONFIANCE (onglet Confiance)
+ * et le fil est re-trié « sain » par le moteur dans la ~minute. Le libellé ⚠ Gmail existant
+ * n'est PAS retiré (garde-fou §2.3 — le moteur ne retire jamais un libellé), mais il est
+ * désormais ignoré : le fil suit le tri normal (archivé s'il est lu).
+ */
+export async function marquerPasSuspect(threadId: string): Promise<string> {
+  // Idempotente côté moteur (la confiance est dédupliquée par expéditeur, le tick ponctuel est
+  // borné à 1/min) — et le mémo la rend gratuite à rejouer.
+  return demandeWebApp('pas-suspect', { threadId }, true);
+}
+
+/**
+ * Demande un passage immédiat du moteur (WebApp.gs `actionTickPonctuel_`, anti-rafale 60 s).
+ * Idempotent et mémorisé côté moteur via `requestId` (`rejouable: true`). En MODE_MOCK : aucun appel réseau.
+ */
+export async function demanderPassageMoteur(): Promise<string> {
+  if (MODE_MOCK) return 'passage lancé';
+  return demandeWebApp('tick', {}, true);
+}

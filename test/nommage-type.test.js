@@ -1,0 +1,120 @@
+'use strict';
+/**
+ * Nommage PAR TYPE de document (ADR-0002 §6) — `nomParType_` / `schemaNommage_` / `tronquerDate_`.
+ * La granularité de date et le libellé s'adaptent au type ; un type inconnu retombe sur le format
+ * historique (jour). Logique pure, testée contre la table de l'ADR.
+ */
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { load } = require('./harness');
+
+const ctx = load(['Config.gs', 'Entites.gs', 'Router.gs']);
+const D = '2024-03-15'; // une date de référence complète
+
+test('relevé bancaire → mensuel, libellé « Relevé »', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Relevé bancaire', 'Bellerives', '.pdf'), '2024-03_Relevé_Bellerives.pdf');
+  assert.strictEqual(ctx.nomParType_(D, 'Relevé', 'CMF', ''), '2024-03_Relevé_CMF');
+});
+
+test('bulletin de paie → jour, libellé « Bulletin de paie » (ADR-0080)', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Bulletin de paie', 'Alphatek', '.pdf'), '2024-03-15_Bulletin de paie_Alphatek.pdf');
+  assert.strictEqual(ctx.nomParType_(D, 'Talon de paie', 'Betatek', '.pdf'), '2024-03-15_Bulletin de paie_Betatek.pdf');
+});
+
+test('diplôme → jour (ADR-0080) ; relevé de notes → annuel (ne tombe PAS dans « relevé » mensuel)', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Diplôme', 'IUT UNIVA', '.pdf'), '2024-03-15_Diplôme_IUT UNIVA.pdf');
+  assert.strictEqual(ctx.nomParType_(D, 'Relevé de notes', 'IUT UNIVA', '.pdf'), '2024_Relevé de notes_IUT UNIVA.pdf');
+});
+
+test('impôt / avis → annuel', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Avis d\'imposition', 'Revenu Québec', '.pdf'), '2024_Avis d\'imposition_Revenu Québec.pdf');
+});
+
+test('CV envoyé → jour, libellé « CV » (ADR-0080)', () => {
+  assert.strictEqual(ctx.nomParType_('2024-09-01', 'CV', 'Marc Exemple', '.pdf'), '2024-09-01_CV_Marc Exemple.pdf');
+});
+
+test('facture → jour (défaut historique)', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Facture', 'Hydro-Québec', '.pdf'), '2024-03-15_Facture_Hydro-Québec.pdf');
+});
+
+test('type inconnu → format historique jour, jamais un blocage', () => {
+  assert.strictEqual(ctx.nomParType_(D, 'Attestation', 'Ville de Montréal', '.pdf'), '2024-03-15_Attestation_Ville de Montréal.pdf');
+  // Défauts prudents conservés :
+  assert.strictEqual(ctx.nomParType_(D, '', '', '.pdf'), '2024-03-15_Document_Inconnu.pdf');
+});
+
+test('nommerDocument_ : un émetteur SENTINELLE (« Inconnu »/« N/A ») ne s\'écrit JAMAIS dans le nom (revue de fond 2026-07-31)', () => {
+  // Le fail-safe neutralisait « Inconnu » (estRenseigne_), mais le nommeur testait champ_ → produisait
+  // « …_Facture_Inconnu.pdf », précisément le nom que la campagne m2-inconnu éradique.
+  const nInconnu = ctx.nommerDocument_({ type_doc: 'Facture', emetteur: 'Inconnu' }, '2024-03-15', '.pdf');
+  assert.ok(!/Inconnu/i.test(nInconnu), 'jamais « Inconnu » dans le nom, vu : ' + nInconnu);
+  assert.ok(/Facture/.test(nInconnu), 'le type reste présent');
+  assert.ok(!/N-?A|N\/A/i.test(ctx.nommerDocument_({ type_doc: 'Facture', emetteur: 'N/A' }, '2024-03-15', '.pdf')));
+  // Émetteur RÉEL conservé ; descripteur réel utilisé en repli quand l'émetteur est une sentinelle.
+  assert.strictEqual(
+    ctx.nommerDocument_({ type_doc: 'Facture', emetteur: 'Hydro-Québec' }, '2024-03-15', '.pdf'),
+    '2024-03-15_Facture_Hydro-Québec.pdf');
+  assert.strictEqual(
+    ctx.nommerDocument_({ type_doc: 'Facture', emetteur: 'Inconnu', descripteur: 'Achat en ligne' }, '2024-03-15', '.pdf'),
+    '2024-03-15_Facture_Achat en ligne.pdf');
+});
+
+test('schemaNommage_ : priorité des règles (releve de notes AVANT releve)', () => {
+  assert.strictEqual(ctx.schemaNommage_('Relevé de notes').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('Relevé bancaire').gran, 'mois');
+  assert.strictEqual(ctx.schemaNommage_('Relevé bancaire').label, 'Relevé');
+  assert.strictEqual(ctx.schemaNommage_('Facture').gran, 'jour');
+  assert.strictEqual(ctx.schemaNommage_('truc inconnu').label, undefined);
+});
+
+test('tronquerDate_ : granularités', () => {
+  assert.strictEqual(ctx.tronquerDate_('2024-03-15', 'annee'), '2024');
+  assert.strictEqual(ctx.tronquerDate_('2024-03-15', 'mois'), '2024-03');
+  assert.strictEqual(ctx.tronquerDate_('2024-03-15', 'jour'), '2024-03-15');
+});
+
+/* --- Compléments demandés par la revue (naming-validator + code-reviewer) --- */
+
+test('« Relevé de compte » → mensuel (piège de priorité, pas annuel)', () => {
+  assert.strictEqual(ctx.schemaNommage_('Relevé de compte').gran, 'mois');
+  assert.strictEqual(ctx.schemaNommage_('Relevé de compte').label, 'Relevé');
+});
+
+test('casse / accents indifférents (normaliserCle_)', () => {
+  assert.strictEqual(ctx.schemaNommage_('RELEVÉ BANCAIRE').gran, 'mois');
+  assert.strictEqual(ctx.schemaNommage_('Relevé De Notes').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('DIPLÔME').gran, 'jour');
+});
+
+test('apostrophe typographique U+2019 : « Avis d’imposition » → annuel (bug OCR québécois)', () => {
+  // Le MATCHING normalise l'apostrophe (→ espace) donc le type est bien reconnu « impôt » = annuel ;
+  // le LIBELLÉ affiché, lui, garde l'orthographe réelle (apostrophe préservée — valide dans un nom Drive).
+  assert.strictEqual(ctx.schemaNommage_('Avis d’imposition').gran, 'annee');
+  assert.strictEqual(ctx.nomParType_('2024-05-02', 'Avis d’imposition', 'Revenu Québec', '.pdf'),
+    '2024_Avis d’imposition_Revenu Québec.pdf'); // granularité annuelle (2024), apostrophe réelle conservée
+});
+
+test('études : TP / TP4 / travaux pratiques → annuel', () => {
+  assert.strictEqual(ctx.schemaNommage_('TP').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('TP4').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('Travaux pratiques').gran, 'annee');
+});
+
+test('paie : synonymes salaire → Bulletin de paie (jour), MAIS « paiement » n\'est pas de la paie', () => {
+  assert.strictEqual(ctx.schemaNommage_('Bulletin de salaire').label, 'Bulletin de paie');
+  assert.strictEqual(ctx.schemaNommage_('salaire').gran, 'jour');
+  // Faux positif évité (motif ancré) : un reçu de paiement ≠ bulletin de paie.
+  assert.strictEqual(ctx.schemaNommage_('Reçu de paiement').gran, 'jour');
+  assert.strictEqual(ctx.schemaNommage_('Reçu de paiement').label, undefined);
+});
+
+test('impôt : feuillet / avis de cotisation / T5 / RL-3 / T183 / TP-1000 → annuel (et Relevé 30 reste mensuel)', () => {
+  assert.strictEqual(ctx.schemaNommage_('Feuillet T4').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('Avis de cotisation').gran, 'annee');
+  assert.strictEqual(ctx.schemaNommage_('Impôt').gran, 'annee');
+  for (const t of ['T5', 'Relevé 3', 'RL-3', 'T183', 'TP-1000']) {
+    assert.strictEqual(ctx.schemaNommage_(t).gran, 'annee', t + ' doit être annuel');
+  }
+  assert.strictEqual(ctx.schemaNommage_('Relevé 30').gran, 'mois', 'un relevé numéroté ordinaire reste mensuel');
+});

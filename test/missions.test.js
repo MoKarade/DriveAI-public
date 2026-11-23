@@ -1,0 +1,2122 @@
+'use strict';
+/**
+ * C28-49 (ADR-0039) — Missions de curation : fonctions PURES (jetons, appariement, fenêtres de
+ * dates) + sémantique du runner (idempotence versionnée, refus inscrits, garde par item,
+ * convergence sur passe vide, rouge seulement sur dossier vide, jamais de mutation d'un
+ * protégé/multi-parents).
+ */
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { load } = require('./harness');
+
+const plain = (x) => JSON.parse(JSON.stringify(x));
+
+/* ---------- PURES ---------- */
+
+// Reset.gs : STRUCTURE_CIBLE_RESET + resetBucketAnnee_ (une seule règle de buckets) ET
+// `cheminCibleReset_`, que le filet de sécurité du routeur véhicule interroge (C28-62).
+// Entites.gs/Consolidation.gs sont ses dépendances RÉELLES (normaliserCle_, analyserNomClasse_) :
+// pas de stub — c'est le contrat inter-module qu'on teste, comme dans reset.test.js.
+const pur = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+
+test('jetonsCible_ : nombres discriminants gardés, mots-outils d\'adresse exclus, accents neutralisés', () => {
+  assert.deepStrictEqual(plain(pur.jetonsCible_('1203 av. Exemple Lisiere, Québec')), ['1203', 'exemple', 'lisiere']);
+  assert.deepStrictEqual(plain(pur.jetonsCible_('1202 rte Fictive Rivage')), ['1202', 'fictive', 'rivage']);
+  assert.deepStrictEqual(plain(pur.jetonsCible_('VW Modelb')), ['modelb'], 'vw (2 lettres) exclu — l\'alias marquee vient d\'EXTRA');
+  assert.deepStrictEqual(plain(pur.jetonsCible_('1201 rue Exemple Alpha')), ['1201', 'exemple', 'alpha'], '« rue » ne discrimine rien');
+  assert.deepStrictEqual(plain(pur.jetonsCible_('1201 4e Ave')), ['1201'], '« 4e » et « avenue » ne discriminent rien');
+  assert.deepStrictEqual(plain(pur.jetonsCible_('Marquec Modelc')), ['marquec', 'modelc'], 'aucun mot de 2 lettres ici : les deux jetons restent');
+});
+
+test('apparierUnique_ : un seul match = trouvé ; deux cibles qui matchent = null (jamais deviné)', () => {
+  const cibles = [
+    { nom: 'Ford Modela', id: 'ff', jetons: ['ford', 'modela'] },
+    { nom: 'VW Modelb', id: 'vj', jetons: ['modelb', 'marquee'] },
+  ];
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Facture_Garage (Modela).pdf', cibles).id, 'ff');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Assurance_Marquee.pdf', cibles).id, 'vj');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Facture_Ford Modelb.pdf', cibles), null, 'ambigu');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Relevé_Hydro.pdf', cibles), null, 'aucun jeton');
+});
+
+test('apparierUnique_ : MOT ENTIER seulement — jamais une sous-chaîne enclavée (revues quotas + sécurité)', () => {
+  // Un faux appariement UNIQUE déplace au MAUVAIS endroit avec une clé de SUCCÈS : parti de la
+  // source, même un bump de version ne le ré-évaluerait jamais. Prouvé par mutation : rétablir la
+  // clause sous-chaîne (`n.indexOf(j) !== -1 && j.length >= 4`) fait échouer ce test.
+  const cibles = [
+    { nom: 'Mont-Tremblant', id: 'mt', jetons: ['mont', 'tremblant'] },
+    { nom: '1203 av. Exemple Lisiere', id: 'lm', jetons: ['1203', 'lisiere'] },
+  ];
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Facture_Hydro Montreal.pdf', cibles), null,
+    '« mont » enclavé dans « montreal » ne matche pas');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Recu_7834 stationnement.pdf', cibles), null,
+    '« 1203 » enclavé dans « 7834 » ne matche pas');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Lettre_Lisierex.pdf', cibles), null,
+    '« lisiere » enclavé dans « lisierex » ne matche pas');
+  assert.strictEqual(pur.apparierUnique_('2024-05-01_Avis_Mont Tremblant.pdf', cibles).id, 'mt',
+    'les mots ENTIERS matchent toujours (la normalisation fait de toute ponctuation un espace)');
+});
+
+test('dateDuNomMission_ + logementParDate_ : la date route vers EXACTEMENT une fenêtre, sinon null', () => {
+  const fenetres = [
+    { id: 'a', min: Date.UTC(2023, 0, 1), max: Date.UTC(2023, 11, 31) },
+    { id: 'b', min: Date.UTC(2024, 0, 1), max: Date.UTC(2024, 11, 31) },
+  ];
+  assert.strictEqual(pur.logementParDate_('2023-06-15_Lettre_Hydro.pdf', fenetres), 'a');
+  assert.strictEqual(pur.logementParDate_('2024-03_Avis_Ville.pdf', fenetres), 'b', 'AAAA-MM sans jour accepté');
+  assert.strictEqual(pur.logementParDate_('2025-01-01_X.pdf', fenetres), null, 'hors fenêtres');
+  assert.strictEqual(pur.logementParDate_('sans-date.pdf', fenetres), null);
+  // Chevauchement : deux fenêtres possibles → on ne devine PAS.
+  const chevauche = [
+    { id: 'a', min: Date.UTC(2023, 0, 1), max: Date.UTC(2023, 11, 31) },
+    { id: 'b', min: Date.UTC(2023, 5, 1), max: Date.UTC(2024, 5, 1) },
+  ];
+  assert.strictEqual(pur.logementParDate_('2023-08-01_X.pdf', chevauche), null, 'ambigu par dates');
+});
+
+test('routeur dispatch03 : véhicule prioritaire, puis adresse, puis BAILLEUR, puis date (Correspondance seulement)', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'dispatch03')[0];
+  const ctx = {
+    logements: [
+      { nom: '1203 av. Exemple Lisiere, Québec', id: 'lm', jetons: ['1203', 'lisiere'] },
+      { nom: '1202 rte Fictive Rivage', id: 'l3987', jetons: ['1202', 'rivage'] },
+    ],
+    fenetres: [{ id: 'lm', min: Date.UTC(2023, 0, 1), max: Date.UTC(2023, 11, 31) }],
+    themePar: (function () {
+      const m = {};
+      m[IDS.contrats03] = 'Contrats'; m[IDS.correspondance03] = 'Correspondance';
+      m[IDS.assuranceHab03] = 'Assurance habitation'; m[IDS.energieServices03] = 'Énergie & services';
+      return m;
+    })(),
+    // c49-2 : côté véhicule, le thème se traduit dans le vocabulaire des catégories de Marc.
+    themeVehiculePar: (function () {
+      const m = {};
+      m[IDS.contrats03] = 'Recherche & achat'; m[IDS.assuranceHab03] = 'Assurance auto';
+      return m;
+    })(),
+  };
+  // Un contrat qui nomme le véhicule part côté Véhicule/<X>/<catégorie de Marc> — le canon vient
+  // de la TABLE (c49-2 : une cible peut être créée), plus des dossiers existants.
+  const v = spec.router('2024-01-01_Contrat_Modelb.pdf', { sourceId: IDS.contrats03, sousChemin: '' }, ctx);
+  assert.strictEqual(v.cibleNom, 'VW Modelb');
+  assert.strictEqual(v.cibleParentId, IDS.vehiculeCible);
+  assert.strictEqual(v.sousDossier, 'Recherche & achat', 'thème traduit en catégorie véhicule');
+  // Une assurance qui nomme un véhicule de la TABLE est routée par find-or-create (le dossier
+  // cible peut ne pas exister encore — le canon est la table, pas les dossiers présents).
+  const modela = spec.router('2023-03-01_Contrat d\'assurance_Ford Modela.pdf', { sourceId: IDS.assuranceHab03, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(modela), { cibleParentId: IDS.vehiculeCible, cibleNom: 'Ford Modela', sousDossier: 'Assurance auto' });
+  // ADR-0044 : Marqued n'est PLUS un véhicule (décision Marc — c'était une recherche d'achat) : plus
+  // de « Véhicule/Marqued » créé, mais le document part au COMMUN « Recherche & achat » (décision 3,
+  // « Marqued compris »). Cette assertion attendait `null` — elle VERROUILLAIT le défaut trouvé par la
+  // revue : le document restait alors à plat, sans cible, dans `03` (revue C28-62).
+  assert.deepStrictEqual(plain(spec.router('2023-03-01_Contrat d\'assurance_Marqued.pdf',
+    { sourceId: IDS.assuranceHab03, sousChemin: '' }, ctx)),
+  { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' },
+  'Marqued hors canon ⇒ dossier COMMUN, jamais un refus qui le laisse à plat');
+  // Une facture d'énergie qui nomme l'adresse part vers Logement/<adresse>/Énergie & services.
+  const l = spec.router('2023-02-01_Facture_Hydro 1203 Lisiere.pdf', { sourceId: IDS.energieServices03, sousChemin: '' }, ctx);
+  assert.strictEqual(l.cibleId, 'lm');
+  assert.strictEqual(l.sousDossier, 'Énergie & services');
+  // c49-2 : un bail nommé par BAILLEUR (jamais l'adresse — ADR-0040 §2) part vers son logement.
+  const bail = spec.router('2025-09-01_Bail de logement_9333-4444 Québec inc.pdf', { sourceId: IDS.contrats03, sousChemin: '' }, ctx);
+  assert.strictEqual(bail.cibleId, 'l3987', 'bailleur 9333-4444 → 1202 (preuve ADR-0040)');
+  assert.strictEqual(bail.sousDossier, 'Contrats');
+  // Correspondance SANS indice : la date tranche (demande Marc) — pas les autres thèmes.
+  const parDate = spec.router('2023-05-01_Lettre_Ville.pdf', { sourceId: IDS.correspondance03, sousChemin: '' }, ctx);
+  assert.strictEqual(parDate.cibleId, 'lm');
+  // (2026-09-12) Le fichier d'origine de cette assertion nommait « Hydro » : il est désormais
+  // routé par le filet ÉMETTEUR. On garde l'invariant en le testant sur un nom SANS émetteur.
+  const pasParDate = spec.router('2023-05-01_Facture_Électricité.pdf', { sourceId: IDS.energieServices03, sousChemin: '' }, ctx);
+  assert.strictEqual(pasParDate, null, 'la date ne route QUE la correspondance');
+  // ADR-0044 : une LOCATION va dans « Véhicule/Locations » — elle n'est plus refusée, mais elle
+  // ne rejoint JAMAIS un véhicule de Marc (les 3 contrats Enterprise dormaient dans 03·Contrats).
+  assert.deepStrictEqual(plain(spec.router('2026-04-10_Contrat de location de véhicule_Enterprise.pdf',
+    { sourceId: IDS.contrats03, sousChemin: '' }, ctx)),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Locations', sousDossier: '' });
+  // …et le PIÈGE que ce prédicat doit éviter : « demande de location » est du LOGEMENT.
+  const corpiq = spec.router('2018-10-15_Formulaire de demande de location_CORPIQ.pdf',
+    { sourceId: IDS.contrats03, sousChemin: '' }, ctx);
+  assert.ok(!corpiq || corpiq.cibleNom !== 'Locations', 'un bail n\'est pas une location de voiture');
+});
+
+test('routeur dispatch03 (c50-1, décisions Marc 2026-09-12) : filet par ÉMETTEUR, APRÈS toutes les règles d\'entité', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'dispatch03')[0];
+  const ctx = {
+    logements: [{ nom: '1203 av. Exemple Lisiere, Québec', id: 'lm', jetons: ['1203', 'lisiere'] }],
+    fenetres: [],
+    themePar: (function () {
+      const m = {};
+      m[IDS.assuranceHab03] = 'Assurance habitation'; m[IDS.energieServices03] = 'Énergie & services';
+      return m;
+    })(),
+    themeVehiculePar: {},
+  };
+  const rte = (nom, sourceId) => plain(spec.router(nom, { sourceId: sourceId, sousChemin: '' }, ctx));
+
+  // Assurances : un bucket PAR ASSUREUR, créé SOUS le dossier filet lui-même.
+  assert.deepStrictEqual(rte('2026-02-26_Contrat d\'assurance habitation_Bellerives Assurances.pdf', IDS.assuranceHab03),
+    { cibleParentId: IDS.assuranceHab03, cibleNom: 'Bellerives', sousDossier: '' });
+  assert.deepStrictEqual(rte('2023-04_Relevé_MUTA_2.pdf', IDS.assuranceHab03),
+    { cibleParentId: IDS.assuranceHab03, cibleNom: 'MUTA', sousDossier: '' });
+  assert.deepStrictEqual(rte('2020-09-17_Attestation d\'assurance responsabilité civile_FIDELIA-MUTA_2.pdf', IDS.assuranceHab03),
+    { cibleParentId: IDS.assuranceHab03, cibleNom: 'MUTA', sousDossier: '' }, 'FIDELIA-MUTA est une graphie de MUTA');
+
+  // Énergie : un bucket PAR FOURNISSEUR.
+  assert.deepStrictEqual(rte('2024-12-06_Facture d\'électricité_Hydro-Québec.pdf', IDS.energieServices03),
+    { cibleParentId: IDS.energieServices03, cibleNom: 'Hydro-Québec', sousDossier: '' });
+  assert.deepStrictEqual(rte('2020-12-04_Attestation de contrat d\'énergie_Energie Aurore_2.pdf', IDS.energieServices03),
+    { cibleParentId: IDS.energieServices03, cibleNom: 'Energie Aurore', sousDossier: '' });
+
+  // ORDRE : l'ENTITÉ prime toujours. Une facture Hydro qui nomme l'adresse part au LOGEMENT,
+  // jamais dans le bucket du fournisseur — c'est la propriété que le filet ne doit pas casser.
+  const chezMarc = spec.router('2023-02-01_Facture_Hydro 1203 Lisiere.pdf', { sourceId: IDS.energieServices03, sousChemin: '' }, ctx);
+  assert.strictEqual(chezMarc.cibleId, 'lm', 'l\'adresse prime sur le fournisseur');
+  assert.strictEqual(chezMarc.sousDossier, 'Énergie & services');
+
+  // Le filet ne déborde JAMAIS sur les autres sources : un contrat « Bellerives » reste non apparié.
+  assert.strictEqual(spec.router('2026-02-26_Contrat_Bellerives.pdf', { sourceId: IDS.contrats03, sousChemin: '' }, ctx), null);
+  // Émetteur inconnu ⇒ refus RÉVISABLE (jamais un bucket deviné).
+  assert.strictEqual(rte('2021-05-05_Facture_Un fournisseur inconnu.pdf', IDS.energieServices03), null);
+});
+
+test('bucketEmetteur_ : MOT ENTIER, ambigu ⇒ null (aucun bucket deviné)', () => {
+  const table = [{ bucket: 'MUTA', jetons: ['muta'] }, { bucket: 'Bellerives', jetons: ['bellerives'] }];
+  assert.strictEqual(pur.bucketEmetteur_('2023-04_Relevé_MUTA.pdf', table), 'MUTA');
+  assert.strictEqual(pur.bucketEmetteur_('2023-04_Relevé_maifestation.pdf', table), null, 'sous-chaîne refusée');
+  assert.strictEqual(pur.bucketEmetteur_('2023-04_Relevé_MUTA et Bellerives.pdf', table), null, 'ambigu ⇒ refus');
+  assert.strictEqual(pur.bucketEmetteur_('2023-04_Relevé_.pdf', table), null);
+  assert.strictEqual(pur.bucketEmetteur_('x', null), null);
+});
+
+test('routeur vehicule (c49-3, ADR-0044) : communs > véhicule nommé > « À attribuer » — JAMAIS par date', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  const ctx = {}; // plus AUCUNE fenêtre : le repli par date est retiré
+  const rte = (nom, sousChemin, sourceId) =>
+    plain(spec.router(nom, { sourceId: sourceId || IDS.vehiculesPluriel, sousChemin: sousChemin }, ctx));
+
+  // 1. Le sous-dossier source « Marqued » n'est plus un véhicule → dossier COMMUN, à plat.
+  assert.deepStrictEqual(rte('2023-05-01_Facture_Garage.pdf', 'Marqued'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+
+  // 2. Le sous-dossier source « Recherche & achat » : du MAGASINAGE, sur des véhicules que Marc
+  //    n'a jamais possédés. Cas RÉEL du Drive (11 fichiers). Router ça par date l'aurait rangé
+  //    sous le véhicule possédé cette année-là — faux positif DÉFINITIF (revue C28-62).
+  assert.deepStrictEqual(
+    rte('2026-07-01_Annonce de vente_Annonce vente Marquex Modelx 2017 104 998 km Shawinigan 16 999 $.jpg', 'Recherche & achat'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+
+  // 3. Les 2 dossiers Marqued parasites sont dissous PAR IDENTITÉ, pas par le nommage : leurs
+  //    fichiers sont à la RACINE de la source (`sousChemin` = ''), donc `sources: ['Marqued']` ne les
+  //    voit pas. Le nom ci-dessous ne porte MÊME PAS le mot « marqued » — c'est ce qui prouve que la
+  //    dissolution ne dépend pas de la chance du nommage (revue C28-62).
+  assert.deepStrictEqual(rte('2026-07-31_Tableau comparatif_Comparatif prix véhicules d\'occasion.pdf', '', IDS.vehiculeRechercheB),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+  //    …et un document « Marqued » entré autrement reste reconnu par le NOM, MÊME table.
+  assert.deepStrictEqual(rte('2026-07-01_Reçu de service_Marqued Ste-Foy.jpg', '', IDS.vehiculeRechercheA),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+
+  // 4. 🔴 LE CŒUR DE LA DÉCISION DE MARC (2026-08-20) : aucun véhicule identifiable ⇒ « À
+  //    attribuer », JAMAIS une attribution par date. Cas réel : 16 assurances Bellerives + 19
+  //    factures de garage ne nomment aucun véhicule du canon. La CATÉGORIE est conservée pour que
+  //    la répartition manuelle reste faisable.
+  assert.deepStrictEqual(rte('2023-06-27_Constat d\'infraction_Ville de Québec.jpg', 'Contraventions'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'À attribuer', sousDossier: 'Contraventions' });
+  assert.deepStrictEqual(rte('2023-10-02_Facture de réparation automobile_Garage Charlesbourg Certi-Pro.jpg', 'Entretien & réparations'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'À attribuer', sousDossier: 'Entretien & réparations' });
+
+  // 5. Véhicule NOMMÉ : son dossier, avec la catégorie du sous-dossier source.
+  assert.deepStrictEqual(rte('2024-02-01_Facture_Garage VW Modelb.pdf', 'Entretien & réparations'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'VW Modelb', sousDossier: 'Entretien & réparations' });
+
+  // 6. LOCATION + véhicule du canon = AMBIGU (bail/LOA sur SON véhicule ?) ⇒ refus RÉVISABLE,
+  //    jamais un déplacement définitif. Preuve par contraste avec le cas 7.
+  assert.strictEqual(spec.router('2024-01-01_Contrat de location de véhicule_VW Modelb.pdf',
+    { sourceId: IDS.vehiculesPluriel, sousChemin: '' }, ctx), null,
+  'location + véhicule nommé : ambigu ⇒ refus (le déplacement serait définitif)');
+
+  // 7. LOCATION sans véhicule du canon → « Locations » (les 3 contrats Enterprise réels).
+  assert.deepStrictEqual(rte('2019-03-01_Contrat de location de véhicule_Enterprise.pdf', ''),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Locations', sousDossier: '' });
+  // …au PLURIEL aussi (« véhicules » manquait à la liste des mots — revue C28-62).
+  assert.deepStrictEqual(rte('2019-03-01_Contrat de location de véhicules_Enterprise.pdf', ''),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Locations', sousDossier: '' });
+});
+
+test('ADR-0044 : le repli par DATE est RETIRÉ de la mission véhicule (fenêtres inutilisables sur le Drive réel)', () => {
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  // `batirCtx` ne construit plus AUCUNE fenêtre : « Ford Modela » est vide (⇒ gate insatisfiable)
+  // et la fenêtre de la Modelb courait de 2019 à 2026. Un ctx vide ne doit RIEN changer au verdict.
+  assert.deepStrictEqual(Object.keys(plain(spec.batirCtx())), [], 'plus de fenêtres ni de gate de complétude');
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const avec = plain(spec.router('2023-06-27_Constat_Ville.jpg',
+    { sourceId: IDS.vehiculesPluriel, sousChemin: 'Contraventions' },
+    { fenetres: [{ id: 'vmodelb', min: Date.UTC(2023, 0, 1), max: Date.UTC(2023, 11, 31) }], fenetresCompletes: true }));
+  assert.strictEqual(avec.cibleNom, 'À attribuer',
+    'même avec un ctx de fenêtres COMPLET et une date qui tombe dedans, plus aucune attribution par date');
+});
+
+test('cibleBailleur_ : dossier RENOMMÉ/absent ⇒ refus — la table ne crée JAMAIS un doublon', () => {
+  // La promesse du canon (Config) : résolution PAR NOM parmi les cibles réelles — si le dossier
+  // Drive a été renommé, on REFUSE (révisable) au lieu de find-or-créer un doublon.
+  assert.strictEqual(pur.cibleBailleur_('2025-09-01_Bail_9333-4444 Québec inc.pdf',
+    [{ nom: '1202 route Fictive Rivage (RENOMMÉ)', id: 'x' }]), null);
+  const ok = pur.cibleBailleur_('2025-09-01_Bail_9333-4444 Québec inc.pdf',
+    [{ nom: '1202 rte Fictive Rivage', id: 'l3987' }]);
+  assert.strictEqual(ok.id, 'l3987');
+});
+
+test('routeur ecoles-archives06 : alias explicite = transfert ; source hors table = jamais une source', () => {
+  // SENS RE-INVERSÉ le 2026-09-14 (ADR-0055) : la source est le dossier d'école que le MOTEUR
+  // s'était créé à la racine de `06`, la cible le dossier de MARC sous `Archives scolaires`.
+  // Le tag a changé AVEC le sens — sinon les ~45 fichiers déjà déplacés dans l'autre sens
+  // portaient une clé de SUCCÈS et n'auraient jamais été repris.
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'ecoles-archives06c')[0];
+  const paires = pur.CONFIG.MISSIONS_IDS.ecoles06;
+  // 7 paires depuis ADR-0056 : les 6 dossiers d'école de la racine de `06`, plus l'ancien dossier
+  // d'archive de Marc que la fusion vide dans le dossier 2014-2018.
+  assert.strictEqual(paires.length, 7);
+  const ctx = spec.batirCtx();
+  const parId = paires.filter((x) => x.cible)[0];
+  const r = spec.router('2020-01-01_Relevé_UNIVA.pdf', { sourceId: parId.src, sousChemin: 'Semestre 1' }, ctx);
+  assert.strictEqual(r.cibleId, parId.cible);
+  assert.strictEqual(r.sousDossier, 'Semestre 1', 'un niveau de sous-dossier préservé');
+  // (ADR-0060) TOUTES les paires visent désormais un dossier de Marc PAR ID — Valdor compris,
+  // au caractère près du relevé Drive du 15/09.
+  assert.strictEqual(paires.filter((x) => !x.cible).length, 0, 'plus aucune cible sans ID');
+  const cegep = paires.filter((x) => x.cibleNom === 'CEGEP - Valdor (2020)')[0];
+  assert.ok(cegep && cegep.src && cegep.cible && cegep.src !== cegep.cible, 'Valdor : une source et une cible, distinctes');
+  // Le chemin « cible sans ID » du routeur reste vivant pour une école FUTURE : find-or-create PAR
+  // NOM au premier fichier déplacé — le seul chemin autorisé à créer un dossier.
+  const ctx2 = { parSource: { SRC_FUTURE: { src: 'SRC_FUTURE', cibleNom: 'École future (2030)' } }, archivesId: ctx.archivesId };
+  const r2 = spec.router('2030-01-01_TP_Future.pdf', { sourceId: 'SRC_FUTURE', sousChemin: '' }, ctx2);
+  assert.strictEqual(r2.cibleId, undefined);
+  assert.strictEqual(r2.cibleParentId, pur.CONFIG.MISSIONS_IDS.archivesScolaires);
+  assert.strictEqual(r2.cibleNom, 'École future (2030)');
+  // Une source hors table n'est jamais devinée.
+  assert.strictEqual(spec.router('x.pdf', { sourceId: 'inconnu', sousChemin: '' }, ctx), null);
+  // Les sources de la mission sont EXACTEMENT les alias.
+  assert.strictEqual(plain(spec.sources).join('|'), plain(paires.map((x) => x.src)).join('|'));
+  // AUCUNE n'est JETABLE (revue flotte) : peindre les 6 dossiers vidés « bon pour suppression »
+  // reposait sur « rien ne les recrée », qui est FAUX tant que `SEED_ENTITES` valide 6 écoles dans
+  // `06` (C28-106). Un signal destructeur ne se pose pas sur un invariant non démontré.
+  assert.strictEqual(plain(spec.sourcesJetables).length, 0);
+  assert.strictEqual(plain(spec.ciblesADepeindre).length, 0,
+    'les archives de Marc n\'ont jamais été peintes en rouge : rien à dé-peindre');
+});
+
+test('budgetJourMissions_ : jour courant compté, autre jour = 0 (patron conso)', () => {
+  const props = { getProperty: (k) => (k === 'DriveAI_MISSIONS_JOUR' ? '2026-08-17|120000' : null) };
+  assert.strictEqual(pur.budgetJourMissions_(props, '2026-08-17'), 120000);
+  assert.strictEqual(pur.budgetJourMissions_(props, '2026-08-18'), 0);
+});
+
+/* ---------- Runner (mocks I/O) ---------- */
+
+/**
+ * Contexte de runner : Drive mocké par une carte {folderId: {files:[], folders:{nom:sousId}}}.
+ * Chaque fichier factice lit ses variations dans SON PROPRE objet (leçon C28-33 — jamais la
+ * fermeture de construction).
+ */
+function ctxRunner(opts) {
+  opts = opts || {};
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs',
+    'Router.gs', 'Reorg.gs', 'Maintenance.gs']);
+  const store = Object.assign({}, opts.props);
+  const index = Object.assign({}, opts.index); // clés déjà présentes
+  const ajouts = [];
+  const moves = [];
+  const peints = [];
+  const depeints = [];
+  const infos = [];
+
+  c.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => (k in store ? store[k] : null),
+    setProperty: (k, v) => { store[k] = String(v); },
+    deleteProperty: (k) => { delete store[k]; },
+  }) };
+  c.journalInfo_ = (s, m) => infos.push(m);
+  c.journalErreur_ = (s, m) => infos.push('ERR ' + m);
+  c.indexContient_ = (cle) => index[cle] === true;
+  c.indexAjouter_ = (cle, meta) => { index[cle] = true; ajouts.push({ cle, statut: meta.statut }); };
+  c.ensembleDomainesProteges_ = () => ({ 'dom04': true });
+  c.aParentProtege_ = (f, proteges, strict) => !!f.__protege;
+  c.nbParentsBorne_ = (f) => f.__parents || 1;
+  c.dateGmail_ = () => '2026-08-17';
+  c.repointerEntites_ = (src, cible) => { moves.push({ repointe: src + '→' + cible }); };
+  c.peindreDossierRouge_ = (id) => peints.push(id);
+  c.depeindreDossier_ = (id) => {
+    // Rend son SUCCÈS (comme la vraie) : un PATCH refusé doit empêcher l'appelant de CONCLURE.
+    if ((opts.patchRefuse || []).indexOf(id) !== -1) return false;
+    depeints.push(id);
+    return true;
+  };
+  c.fetchDriveAvecRetry_ = () => ({ getResponseCode: () => 200, getContentText: () => '{}' });
+  c.jetonDrive_ = () => 'jeton';
+
+  const arbre = opts.arbre || {};
+  const dossierFactice = (id) => {
+    const noeud = arbre[id] || { files: [], folders: {} };
+    return {
+      getId: () => id,
+      getName: () => noeud.nom || id,
+      // §1.2 : le runner refuse de déposer dans un dossier CORBEILLÉ — le mock doit donc pouvoir
+      // en simuler un (`arbre[id].corbeille = true`), sinon la garde est intestable.
+      isTrashed: () => !!noeud.corbeille,
+      getFiles: () => iterFactice((noeud.files || []).filter((f) => !f.__deplace)),
+      getFolders: () => iterFactice(Object.keys(noeud.folders || {}).map((n) => dossierFactice(noeud.folders[n]))),
+    };
+  };
+  const iterFactice = (items) => {
+    let i = 0;
+    return { hasNext: () => i < items.length, next: () => items[i++] };
+  };
+  // Compteur d'ouvertures : ce qui distingue « la sonde a balayé » de « la sonde a dormi »,
+  // indépendamment de ce que le balayage trouve (leçon C28-62 : instrumenter le CHEMIN quand la
+  // propriété tient au chemin d'exécution et non à la valeur).
+  // Compteur d'ouvertures PAR ID : ce qui distingue « la sonde a balayé » de « la sonde a dormi »,
+  // indépendamment de ce que le balayage trouve (leçon C28-62 : instrumenter le CHEMIN quand la
+  // propriété tient au chemin d'exécution et non à la valeur). Par ID, parce que la collecte de la
+  // mission ouvre elle aussi des dossiers — compter le total mélangerait les deux.
+  const ouvertures = {};
+  c.DriveApp = { getFolderById: (id) => { ouvertures[id] = (ouvertures[id] || 0) + 1; return dossierFactice(id); } };
+  c.sousDossier_ = (parent, nom) => dossierFactice(parent.getId() + '/' + nom);
+
+  const fichier = (id, nom, extra) => Object.assign({
+    getId: () => id,
+    getName: () => nom,
+    moveTo: function (dossier) { this.__deplace = true; moves.push({ id, vers: dossier.getId() }); },
+  }, extra || {});
+
+  return { c, store, index, ajouts, moves, peints, depeints, infos, fichier, arbre, ouvertures };
+}
+
+test('runner : déplace, pose la clé VERSIONNÉE après, converge sur la passe vide, peint le vide en rouge', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const version = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  // `Marquec Modelc` isolé : 2 fichiers → tout part vers Véhicule/Marquec Modelc (en bloc).
+  h.arbre[IDS.vehiculeIsole] = { files: [h.fichier('f1', '2025-01-01_Facture_Garage.pdf'), h.fichier('f2', '2025-02-01_SAAQ.pdf')], folders: {} };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.moves.length, 2);
+  assert.ok(h.moves.every((m) => m.vers === IDS.vehiculeCible + '/Marquec Modelc'), 'cible = Véhicule/Marquec Modelc');
+  assert.ok(h.index['mission|vehicule|' + version + '|f1'], 'clé versionnée posée');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_vehicule'], 'passe PRODUCTIVE ≠ convergence');
+
+  // Passe suivante : plus rien à traiter (fichiers déplacés) → convergence + peinture du vide.
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_vehicule'], version, 'convergé sur passe vide');
+  assert.ok(h.peints.indexOf(IDS.vehiculeIsole) !== -1, 'source vidée peinte en rouge');
+  assert.ok(h.peints.indexOf(IDS.vehiculesPluriel) !== -1);
+
+  // Compteurs Progression : t=2, base EXACTE mesurée par la passe complète (t + na).
+  const etatM = JSON.parse(h.store['DriveAI_MISSIONS_ETAT']);
+  assert.strictEqual(etatM.vehicule.t, 2);
+  assert.strictEqual(etatM.vehicule.na, 0);
+  assert.strictEqual(etatM.vehicule.b, 2, 'base = t + na après une passe complète');
+});
+
+/**
+ * Contexte de runner portant une mission SYNTHÉTIQUE qui PEINT ses cibles.
+ *
+ * ⚠️ Pourquoi synthétique : depuis ADR-0055, AUCUNE mission réelle ne déclare `ciblesADepeindre`
+ * (les archives de Marc n'ont jamais été peintes en rouge). Le mécanisme, lui, reste câblé dans
+ * `executerMission_` pour TOUTES les missions — un dossier rouge qui se remplit doit perdre son
+ * rouge, et la prochaine mission qui peindra en aura besoin. Le driver est donc une fausse
+ * mission plutôt qu'une vraie configurée pour les besoins du test : un test qui prouverait une
+ * option qu'aucune mission ne porte prouverait moins qu'il n'annonce.
+ */
+function ctxSonde(opts) {
+  const h = ctxRunner(opts);
+  const cibles = (opts || {}).cibles || ['cib1', 'cib2', 'cib3', 'cib4'];
+  const sources = (opts || {}).sources || ['src1'];
+  h.cibles = cibles;
+  h.sources = sources;
+  h.c.tableMissions_ = () => [{
+    tag: 'sonde-test', cle: 'mission-sonde-test',
+    sources: sources,
+    batirCtx: () => ({}),
+    router: () => ({ cibleId: cibles[0], sousDossier: '' }),
+    ciblesADepeindre: cibles,
+    sourcesJetables: [],
+  }];
+  return h;
+}
+
+test('runner : DÉ-PEINTURE — sonde QUOTIDIENNE, indépendante de la convergence, qui se termine', () => {
+  // Troisième écriture de ce garde-fou, et les deux premières expliquent celle-ci :
+  //  1. one-shot au PREMIER run → les cibles sont encore VIDES (c'est pourquoi elles sont rouges) :
+  //     la passe ne faisait rien et le drapeau était consommé quand même ;
+  //  2. à la CONVERGENCE → la mission n'est pas la seule à remplir ces dossiers : la CONSOLIDATION
+  //     y enverra des fichiers pendant des semaines APRÈS, et le court-circuit terminal fait
+  //     qu'aucun run n'y revient. Mesuré par la revue : 20 ticks après remplissage, 0 dé-peint.
+  // D'où une sonde appelée AVANT le court-circuit terminal, bornée à 1 passe/jour.
+  const h = ctxSonde();
+  const version = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  let jour = '2026-09-13';
+  h.c.dateGmail_ = () => jour;
+  // Départ RÉEL : source pleine, cibles VIDES (donc rouges, et leur rouge est VRAI).
+  h.arbre[h.sources[0]] = { files: [h.fichier('a1', '2021-05-05_Cours_CORVIA.pdf')], folders: {} };
+  h.cibles.forEach((id) => { h.arbre[id] = { files: [], folders: {} }; });
+
+  h.c.executerMission_('sonde-test', () => false);
+  assert.deepStrictEqual(h.depeints, [], 'tout est vide : rien à dé-peindre, et le rouge y est VRAI');
+  assert.notStrictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], 'fait', 'donc surtout pas « terminé »');
+
+  // Même jour, 10 ticks : la sonde ne re-balaie pas Drive (budget partagé).
+  // ⚠️ Compter les DÉ-PEINTURES ne prouverait rien ici — les cibles sont vides, donc aucune n'est
+  // possible, que la sonde balaie 1 fois ou 11 (tautologie attrapée en revue quotas). Ce qui se
+  // mesure, c'est le BALAYAGE lui-même (appels Drive) et l'état persisté.
+  const balayages = () => h.cibles.reduce((n, id) => n + (h.ouvertures[id] || 0), 0);
+  const avant = balayages(); // (la mission ouvre aussi ses cibles pour y déposer : on mesure le DELTA)
+  for (let i = 0; i < 10; i++) h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(balayages(), avant, '1 passe par jour, pas 288 : aucun nouvel appel Drive');
+  assert.strictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], jour + '|1',
+    'une seule passe comptée ce jour-là (mutation : retirer le garde de jour ⇒ « |11 »)');
+
+  // La mission converge (la source est vide) ET pose son drapeau FINI…
+  h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_sonde-test'], version);
+
+  // …puis la CONSOLIDATION remplit les dossiers, des jours plus tard. La sonde doit encore agir,
+  // alors que la mission, elle, est court-circuitée depuis longtemps.
+  h.cibles.forEach((id) => { h.arbre[id] = { files: [h.fichier('c' + id, 'x.pdf')], folders: {} }; });
+  jour = '2026-09-20';
+  h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(h.depeints.length, 4, 'les 4 dossiers remplis perdent leur rouge, après le FINI');
+  assert.strictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], 'fait', 'plus rien de vide ⇒ terminé');
+
+  // …et une fois terminée, elle ne coûte plus rien.
+  jour = '2026-09-21';
+  h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(h.depeints.length, 4);
+});
+
+test('runner : le balayage de la sonde est BORNÉ par le garde-temps du tick', () => {
+  // §9 « garde-temps sur TOUT lot Drive » : le balayage coûte 16 + 12 × sous-dossiers appels, et
+  // l'étape peut démarrer à 4,4 min du mur DUR de 6 min — qu'aucun `try` ne capture. Un tick tué
+  // emporterait tout ce qui suit les missions (fusion, reset, historique Gmail).
+  // Mutation : repasser `null` au lieu de `estBudgetDepasse` ⇒ ce test tombe.
+  const h = ctxSonde();
+  h.c.dateGmail_ = () => '2026-09-13';
+  h.arbre[h.sources[0]] = { files: [], folders: {} };
+  h.cibles.forEach((id) => { h.arbre[id] = { files: [h.fichier('z' + id, 'x.pdf')], folders: {} }; });
+  const ouvertesCibles = () => h.cibles.reduce((n, id) => n + (h.ouvertures[id] || 0), 0);
+
+  h.c.executerMission_('sonde-test', () => true); // budget déjà épuisé à l'entrée
+  assert.strictEqual(ouvertesCibles(), 0, 'aucune cible ouverte : le balayage est coupé AVANT l\'appel Drive');
+  assert.deepStrictEqual(h.depeints, []);
+  assert.strictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], '2026-09-13|1',
+    'la passe est comptée (sinon on re-sonderait 288×) mais ne conclut pas');
+
+  // Le lendemain, avec du budget : la sonde reprend et termine.
+  h.c.dateGmail_ = () => '2026-09-14';
+  h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(h.depeints.length, 4);
+  assert.strictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], 'fait');
+});
+
+test('runner : la sonde de dé-peinture s\'arrête d\'elle-même, et un PATCH refusé ne conclut jamais', () => {
+  // Un « chemin de retour » sans fin est un coût sans fin : au bout de MISSIONS_DEPEINTURE_MAX_JOURS
+  // passes, un dossier encore vide l'est pour de bon et son rouge est VRAI. Valeur DÉRIVÉE de la
+  // constante, jamais écrite en dur (leçon §7).
+  const MAX = ctxRunner().c.CONFIG.MISSIONS_DEPEINTURE_MAX_JOURS;
+  const h = ctxSonde();
+  let n = 0;
+  h.c.dateGmail_ = () => '2026-10-' + String(1 + (n % 28)).padStart(2, '0');
+  h.arbre[h.sources[0]] = { files: [], folders: {} };
+  h.cibles.forEach((id) => { h.arbre[id] = { files: [], folders: {} }; });
+  for (n = 0; n < MAX - 1; n++) h.c.executerMission_('sonde-test', () => false);
+  assert.notStrictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], 'fait', 'avant le plafond : on sonde encore');
+  h.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(h.store['DriveAI_DEPEINTURE_sonde-test'], 'fait', 'au plafond : on arrête');
+  assert.ok(h.infos.some((m) => m.indexOf('ARRÊTÉE') !== -1), 'et on le DIT, avec le nombre de dossiers vides');
+
+  // PATCH refusé (403 quota, permission) : la passe n'est pas complète ⇒ jamais « terminé », même
+  // si plus rien n'est vide. Mutation : ignorer `complet` dans `assurerDepeintureCibles_`.
+  const refus = ctxSonde({ patchRefuse: ['cib1'] });
+  refus.arbre[refus.sources[0]] = { files: [], folders: {} };
+  refus.cibles.forEach((id) => { refus.arbre[id] = { files: [refus.fichier('y' + id, 'x.pdf')], folders: {} }; });
+  refus.c.executerMission_('sonde-test', () => false);
+  assert.strictEqual(refus.depeints.length, 3, '3 dé-peints sur 4');
+  assert.notStrictEqual(refus.store['DriveAI_DEPEINTURE_sonde-test'], 'fait', 'un PATCH refusé ne conclut pas');
+});
+
+test('runner : NON APPARIÉ inscrit sous la version (re-collecté JAMAIS, ré-évaluable par bump)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const version = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  h.arbre[IDS.logementsPluriel] = { files: [h.fichier('fx', '2024-01-01_Relevé_Sans indice.pdf')], folders: {} };
+  h.arbre[IDS.logementCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('logement', () => false);
+  assert.strictEqual(h.moves.length, 0, 'rien déplacé (aucun jeton ne matche)');
+  assert.strictEqual(h.ajouts.filter((a) => a.statut === 'mission-non-apparie').length, 1);
+  assert.ok(h.index['mission|logement|' + version + '|fx']);
+
+  // 2e passe : le refus est KEYÉ → passe VIDE → convergence avec na=1 (statut « à jour (1 non apparié) »).
+  h.c.executerMission_('logement', () => false);
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_logement'], version);
+  const etatM = JSON.parse(h.store['DriveAI_MISSIONS_ETAT']);
+  assert.strictEqual(etatM.logement.na, 1);
+
+  // BUMP de version : la clé ancienne ne masque plus le fichier — ré-évalué sous les nouvelles
+  // règles. Valeur DÉRIVÉE de la constante (leçon §7 : « c49-2 » en dur a menti au premier bump réel).
+  h.c.CONFIG.MISSIONS_REGLES_VERSION = version + '-bump';
+  assert.ok(!h.c.indexContient_('mission|logement|' + version + '-bump|fx'), 'nouvelle version = nouvelle chance');
+});
+
+test('runner : un fichier PROTÉGÉ ou MULTI-PARENTS n\'est JAMAIS déplacé (refus inscrit)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.arbre[IDS.vehiculeIsole] = { files: [
+    h.fichier('fp', '2025-01-01_X.pdf', { __protege: true }),
+    h.fichier('fm', '2025-01-01_Facture_Garage.pdf', { __parents: 2 }),
+  ], folders: {} };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.moves.length, 0, 'aucune mutation');
+  // Le protégé est écarté À LA COLLECTE (non strict) — s'il passait, la re-vérif stricte le bloque.
+  assert.strictEqual(h.ajouts.filter((a) => a.statut === 'mission-multi-parents').length, 1);
+});
+
+test('runner : budget du jour épuisé → aucune I/O ; garde-temps → passe INCOMPLÈTE (pas de convergence)', () => {
+  const epuise = ctxRunner({ props: { DriveAI_MISSIONS_JOUR: '2026-08-17|' + (10 * 60 * 1000) } });
+  const IDS = epuise.c.CONFIG.MISSIONS_IDS;
+  epuise.arbre[IDS.vehiculeIsole] = { files: [epuise.fichier('f1', '2025-01-01_A.pdf')], folders: {} };
+  epuise.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(epuise.moves.length, 0, 'repris demain');
+  assert.strictEqual(epuise.c.gMissionsJour_(), 'budget du jour épuisé', 'la gate donne la raison au suivi');
+
+  // Garde qui coupe IMMÉDIATEMENT : rien n'est traité ET la mission ne « converge » pas à tort.
+  const coupe = ctxRunner();
+  coupe.arbre[IDS.vehiculeIsole] = { files: [coupe.fichier('f1', '2025-01-01_A.pdf')], folders: {} };
+  coupe.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  coupe.c.executerMission_('vehicule', () => true); // estBudgetDepasse = true dès l'entrée
+  assert.strictEqual(coupe.moves.length, 0);
+  assert.ok(!coupe.store['DriveAI_MISSION_FINI_vehicule'], 'passe coupée ≠ passe vide');
+});
+
+/**
+ * Contexte de runner pour `ecoles-archives06` : le référentiel d'entités est mocké au niveau du
+ * LOT (`repointerEntitesLot_`), parce que la vraie implémentation lit l'onglet `Entités` via
+ * `feuille_`, absent de ce harnais ; et la résolution find-ONLY d'une cible sans ID
+ * (`sousDossierExistant_`, ADR-0060) est mockée par `opts.existants` — la vraie fonction, elle, est
+ * exercée dans `test/routage-unifie.test.js` (corbeillés ignorés, jamais de création).
+ */
+function ctxSchool(opts) {
+  opts = opts || {};
+  const h = ctxRunner(opts);
+  h.lots = [];
+  h.c.repointerEntitesLot_ = (carte) => { h.lots.push(carte); };
+  // (ADR-0060) find-ONLY : rend un dossier seulement si le test dit qu'il existe ; JAMAIS de création.
+  h.creations = [];
+  h.c.sousDossierExistant_ = (parent, nom) => (opts.existants && opts.existants[nom]) ? { getId: () => opts.existants[nom] } : null;
+  h.c.sousDossier_ = (parent, nom) => { h.creations.push(nom); return { getId: () => 'CREE-' + nom }; };
+  // Une paire SANS ID injectée dans la config (aucune en prod depuis ADR-0060) pour prouver le chemin.
+  if (opts.paireSansId) h.c.CONFIG.MISSIONS_IDS.ecoles06 = h.c.CONFIG.MISSIONS_IDS.ecoles06.concat([opts.paireSansId]);
+  return h;
+}
+
+test('runner ecoles-archives06 : transfert par alias + RE-POINTAGE des entités à la convergence', () => {
+  const h = ctxSchool();
+  const paires = h.c.CONFIG.MISSIONS_IDS.ecoles06;
+  paires.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  h.arbre[paires[0].src].files = [h.fichier('fd', '2019-05-01_Relevé_UNIVA.pdf')];
+
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.deepStrictEqual(plain(h.moves.filter((m) => m.vers)), [{ id: 'fd', vers: paires[0].cible }]);
+
+  h.c.executerMission_('ecoles-archives06c', () => false); // passe vide → convergence
+  // UNE seule lecture/écriture en LOT (revue quotas : 6 lectures intégrales de l'onglet `Entités`
+  // juste avant l'unique fenêtre d'écriture consommaient le garde-temps qu'elles partagent).
+  assert.strictEqual(h.lots.length, 1, 'un seul appel en lot, pas un par paire');
+  const avecId = paires.filter((p) => p.cible);
+  assert.strictEqual(Object.keys(h.lots[0]).sort().join('|'),
+    avecId.map((p) => p.src).sort().join('|'), 'chaque entité re-pointée vers son archive');
+  assert.strictEqual(h.creations.length, 0, 'la convergence ne crée jamais un dossier');
+});
+
+test('ADR-0060 — à la convergence, une cible SANS ID n\'est JAMAIS créée, seulement trouvée', () => {
+  // Le 15/09, `Cégep de Valdor (2019)` a été créé À VIDE par ce chemin : sa garde (« une ligne du
+  // référentiel vise la source ») était vraie par CONFIGURATION — `SEED_ENTITES` y écrit le dossier
+  // source — et le test précédent la mockait à `false`. Un mock du prédicat prouve le gate, jamais sa
+  // valeur réelle. Désormais la propriété est STRUCTURELLE : find-only, aucune création possible.
+  const paire = { src: 'SRC_SANS_ID', cibleNom: 'École future (2030)' };
+  // (a) le dossier n'existe pas ⇒ rien n'est créé, la source n'est pas re-pointée
+  let h = ctxSchool({ paireSansId: paire });
+  h.c.CONFIG.MISSIONS_IDS.ecoles06.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.strictEqual(h.creations.length, 0, 'JAMAIS créé à vide — mutation : remettre `sousDossier_` ici fait tomber ce test');
+  assert.ok(!Object.prototype.hasOwnProperty.call(h.lots[0], 'SRC_SANS_ID'), 'pas de dossier ⇒ rien à viser');
+  // (b) le dossier existe (un fichier y est parti par le routeur) ⇒ re-pointé vers SON id, sans création
+  h = ctxSchool({ paireSansId: paire, existants: { 'École future (2030)': 'ID-EXISTANT' } });
+  h.c.CONFIG.MISSIONS_IDS.ecoles06.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.strictEqual(h.creations.length, 0);
+  assert.strictEqual(h.lots[0].SRC_SANS_ID, 'ID-EXISTANT', 'un gate se teste par sa LIBÉRATION');
+});
+
+test('ADR-0060 (revue structure) — l\'entité qui vise l\'ANCIEN dossier vide `(2019)` est ramenée au dossier de Marc', () => {
+  // Le 15/09 à 04:38, l'ancien `repointerEcoles06_` a créé `(2019)` à vide ET re-pointé la ligne
+  // `Cégep De Valdor` dessus (elle ne porte plus la source). Une carte { src → cible } ne la
+  // matche donc plus : sans `anciensNoms`, la passe `c` écrit FINI en laissant l'entité viser un
+  // dossier hors table — et le flux vivant, par son repli d'entité, le remplirait.
+  const h = ctxSchool({ existants: { 'Cégep de Valdor (2019)': 'ID-ORPHELIN-2019' } });
+  const paires = h.c.CONFIG.MISSIONS_IDS.ecoles06;
+  paires.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  const cegep = paires.filter((x) => x.cibleNom === 'CEGEP - Valdor (2020)')[0];
+  assert.strictEqual(h.lots[0]['ID-ORPHELIN-2019'], cegep.cible,
+    'mutation : retirer `anciensNoms` de la paire Valdor ⇒ cette clé disparaît');
+  assert.strictEqual(h.lots[0][cegep.src], cegep.cible, 'la source aussi');
+  assert.strictEqual(h.creations.length, 0, 'et toujours aucune création');
+  // La fonction PURE, sans harnais — c'est elle qui porte la règle. (`{ ...x }` ramène l'objet du
+  // contexte `vm` dans ce realm : `deepStrictEqual` compare aussi les prototypes.)
+  const pure = (paires, fn) => ({ ...h.c.carteRepointageEcoles06_(paires, fn) });
+  assert.deepStrictEqual(
+    pure([{ src: 'S', cible: 'C', cibleNom: 'N', anciensNoms: ['V', 'ABSENT'] }], (nom) => (nom === 'V' ? 'IDV' : null)),
+    { S: 'C', IDV: 'C' });
+  assert.deepStrictEqual(pure([{ src: 'S', cibleNom: 'N' }], () => null), {},
+    'sans ID ni dossier existant : rien — et rien n\'est créé');
+  assert.deepStrictEqual(pure([{ src: 'S', cibleNom: 'N', anciensNoms: ['N'] }], () => 'IDN'),
+    { S: 'IDN' }, 'un ancien nom qui résout sur la cible elle-même ne crée pas de boucle');
+});
+
+test('un re-pointage qui LÈVE empêche le drapeau FINI — re-tenté à la passe suivante (🟠 revue sécurité)', () => {
+  // FINI posé AVANT `apresConvergence` + court-circuit terminal = échec JAMAIS re-tenté : le flux
+  // vivant re-remplirait le dossier vidé/peint en rouge que Marc s'apprête à corbeiller. Prouvé
+  // par mutation : remonter le setProperty au-dessus de l'appel fait échouer ce test.
+  const h = ctxSchool();
+  const paires = h.c.CONFIG.MISSIONS_IDS.ecoles06;
+  paires.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  let rate = true;
+  h.c.repointerEntitesLot_ = (carte) => { if (rate) throw new Error('Sheet indisponible'); h.lots.push(carte); };
+
+  assert.throws(() => h.c.executerMission_('ecoles-archives06c', () => false), /Sheet indisponible/,
+    'l\'échec REMONTE (etapeSuivie_ le journalise) au lieu d\'être avalé');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_ecoles-archives06c'], 'pas de FINI sur un re-pointage raté');
+  assert.ok(h.store['DriveAI_MISSIONS_JOUR'], 'le budget consommé est écrit malgré le throw (finally)');
+
+  // La Sheet revient : la passe suivante (vide, quasi gratuite) re-tente et conclut.
+  rate = false;
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_ecoles-archives06c'], h.c.CONFIG.MISSIONS_REGLES_VERSION);
+  assert.strictEqual(h.lots.length, 1);
+  // LIBÉRATION du compteur (revue finale PR2 — « un gate se teste par sa libération », leçon §7) :
+  // l'échec a incrémenté errC ; le succès doit l'effacer, sinon un errC ≥ MAX survivrait au FINI
+  // et re-bloquerait une journée entière au PREMIER échec après un futur bump de version.
+  const etatApres = JSON.parse(h.store['DriveAI_MISSIONS_ETAT'])['ecoles-archives06c'];
+  assert.strictEqual(etatApres.errC, undefined, 'errC effacé par la convergence réussie');
+  assert.strictEqual(etatApres.errJour, undefined, 'errJour effacé avec lui');
+});
+
+test('ordre des écritures : un moveTo qui LÈVE ne pose PAS la clé (rejouer, jamais perdre)', () => {
+  // Prouvé nécessaire par mutation : inverser move/clé laissait la suite verte — ce test attrape
+  // désormais l'inversion (clé posée avant un move qui échoue = fichier « traité » jamais déplacé).
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const casse = h.fichier('fk', '2025-01-01_Facture_Garage.pdf');
+  casse.moveTo = () => { throw new Error('Drive 500'); };
+  h.arbre[IDS.vehiculeIsole] = { files: [casse], folders: {} };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  const version = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  assert.ok(!h.index['mission|vehicule|' + version + '|fk'],
+    'échec TRANSITOIRE ⇒ aucune clé — le fichier sera re-tenté au prochain run');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_vehicule'], 'et la passe reste incomplète');
+});
+
+test('la RE-VÉRIF STRICTE avant mutation bloque un protégé que la collecte n\'a pas vu', () => {
+  // Prouvé nécessaire par mutation : retirer la re-vérif stricte laissait la suite verte. Ici la
+  // protection n'apparaît QU'EN mode strict (le cas réel : getParents illisible à la collecte,
+  // échec-fermé à la mutation) — sans la re-vérif, le fichier serait déplacé.
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.c.aParentProtege_ = (f, proteges, strict) => !!(strict && f.__protegeStrict);
+  h.arbre[IDS.vehiculeIsole] = { files: [h.fichier('fs', '2025-01-01_X.pdf', { __protegeStrict: true })], folders: {} };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.moves.length, 0, 'JAMAIS déplacé (échec fermé §1)');
+  assert.strictEqual(h.ajouts.filter((a) => a.statut === 'mission-protege').length, 1,
+    'refus inscrit (sinon re-collecté à vie)');
+});
+
+test('🔴 revue code : un fichier POISON n\'affame NI les autres items NI les autres sources, et finit ABANDONNÉ', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const MAX = h.c.CONFIG.QUARANTAINE_MAX;
+  const essais = {};
+  h.c.incrementerEchec_ = (cle) => { essais[cle] = (essais[cle] || 0) + 1; return essais[cle]; };
+  // Le poison vit dans la PREMIÈRE source (Véhicules) — c'est le cas qui affamait : avec un seul
+  // drapeau `coupe`, la boucle des sources s'arrêtait là et Marquec Modelc (2e source) n'était JAMAIS
+  // traité. Prouvé par mutation : re-fusionner les drapeaux fait échouer ce test.
+  const poison = h.fichier('fp', '2025-01-01_Facture_Modelb.pdf');
+  poison.moveTo = () => { throw new Error('Access denied'); };
+  h.arbre[IDS.vehiculesPluriel] = { files: [poison, h.fichier('fs', '2025-02-01_Assurance_Modelb.pdf')], folders: {} };
+  // Source SUIVANTE (Marquec Modelc isolé) : un fichier parfaitement traitable — jamais affamé.
+  h.arbre[IDS.vehiculeIsole] = { files: [h.fichier('fbz', '2025-03-01_SAAQ.pdf')], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: { 'VW Modelb': 'vj' } };
+  h.arbre['vj'] = { nom: 'VW Modelb', files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.deepStrictEqual(plain(h.moves.map((m) => m.id).sort()), ['fbz', 'fs'],
+    'le poison ne bloque ni le fichier suivant de SA source, ni la source SUIVANTE');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_vehicule'], 'passe incomplète tant que le poison vit');
+  // BASE HONNÊTE (revue code) : passe INCOMPLÈTE ⇒ pas de base — jamais un « 98 % · reste 1 »
+  // fabriqué. Prouvé par mutation : rétablir `max(b, t+na+1)` fait échouer cette assertion.
+  assert.ok(!JSON.parse(h.store['DriveAI_MISSIONS_ETAT']).vehicule.b,
+    'aucune base tant qu\'aucune passe COMPLÈTE n\'a mesuré le périmètre');
+
+  // Runs suivants : essais bornés, puis ABANDON tracé (refus keyé) → la convergence redevient possible.
+  for (let i = 1; i < MAX; i++) h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.ajouts.filter((a) => a.statut === 'mission-echec').length, 1,
+    'après ' + MAX + ' essais : abandon inscrit sous la clé versionnée (ré-évaluable par bump)');
+  h.c.executerMission_('vehicule', () => false); // poison keyé → passe vide → convergence
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_vehicule'], h.c.CONFIG.MISSIONS_REGLES_VERSION);
+});
+
+test('peinture : un dossier NON vide n\'est JAMAIS peint (le rouge = « supprimable », pas « traité »)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  // Source avec un sous-dossier resté NON vide (un non-apparié y demeure) : refusé (keyé) → la
+  // mission converge quand même, mais NI la source NI ce sous-dossier ne doivent passer au rouge.
+  h.arbre['sousplein'] = { nom: 'Reste', files: [h.fichier('fr', 'sans-date-ni-indice.bin')], folders: {} };
+  h.arbre[IDS.logementsPluriel] = { files: [], folders: { 'Reste': 'sousplein' } };
+  // c49-2 : le double ALPHAIMMO est aussi une source — son contenu part TOUT vers 1201 (drainage
+  // inconditionnel), donc lui devient VIDE et peint — c'est le comportement VOULU ; la source
+  // « Logements », elle, garde son non-apparié et ne doit JAMAIS passer au rouge.
+  h.arbre[IDS.logementADouble] = { nom: 'Groupe Immobilier Alphaimmo', files: [h.fichier('flcp', 'sans-indice.bin')], folders: {} };
+  h.arbre[IDS.logementA] = { nom: '1201 rue Exemple Alpha', files: [], folders: {} };
+  h.arbre[IDS.logementCible] = { files: [], folders: { '1201 rue Exemple Alpha': IDS.logementA } };
+
+  h.c.executerMission_('logement', () => false); // le refus est inscrit ; le ALPHAIMMO est drainé
+  h.c.executerMission_('logement', () => false); // passe vide → convergence
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_logement'], h.c.CONFIG.MISSIONS_REGLES_VERSION);
+  assert.deepStrictEqual(plain(h.peints), [IDS.logementADouble],
+    'seul le double VIDÉ est peint — jamais la source qui garde un non-apparié');
+});
+
+test('drainage ALPHAIMMO (c49-2) : le double part vers « 1201 rue Exemple Alpha », segment préservé — et n\'est JAMAIS une cible', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.arbre['alphaimmobail'] = { nom: 'Bail & contrat', files: [h.fichier('fb', '2024-01-28_Avis de reconduction de bail_Groupe Immobilier Alphaimmo.pdf')], folders: {} };
+  h.arbre[IDS.logementADouble] = { nom: 'Groupe Immobilier Alphaimmo', files: [h.fichier('fa', '2026-07-06_Échange de courriels_Groupe Immobilier Alphaimmo.jpg')], folders: { 'Bail & contrat': 'alphaimmobail' } };
+  h.arbre[IDS.logementsPluriel] = { files: [h.fichier('fq', '2025-07_Quittance_Groupe Immobilier Alphaimmo.pdf')], folders: {} };
+  // La cible « Logement » contient l'adresse GAGNANTE **ET** le double — si `ciblesLogement_` ne
+  // filtrait pas, les jetons du double (« groupe », « immobilier ») capteraient la quittance et
+  // le split se RE-créerait pendant qu'on le vide.
+  h.arbre[IDS.logementA] = { nom: '1201 rue Exemple Alpha', files: [], folders: {} };
+  h.arbre[IDS.logementCible] = { files: [], folders: { '1201 rue Exemple Alpha': IDS.logementA, 'Groupe Immobilier Alphaimmo': IDS.logementADouble } };
+
+  h.c.executerMission_('logement', () => false);
+  const vers = plain(h.moves.filter((m) => m.vers).map((m) => m.vers)).sort();
+  // Contenu du double : à la MÊME place dans 1201 (racine → racine, Bail & contrat → Bail & contrat).
+  assert.deepStrictEqual(vers, [IDS.logementA, IDS.logementA, IDS.logementA + '/Bail & contrat'].sort());
+  // Et le fichier de la SOURCE « Logements » nommé par le bailleur va AUSSI au 1201 (table
+  // bailleur, ADR-0040 §2) — jamais dans le dossier double (exclu des cibles par ciblesLogement_).
+  assert.strictEqual(h.moves.filter((m) => String(m.vers).indexOf(IDS.logementADouble) !== -1).length, 0,
+    'AUCUN mouvement vers le double — le split ne se re-crée pas');
+});
+
+test('cleMission_ contient la VERSION elle-même (verrou direct, pas via le mock d\'index)', () => {
+  // La revue a pointé que l'assertion du bump interrogeait le mock (tautologique) : ici on
+  // verrouille la PROPRIÉTÉ — la clé change quand la version change, à fileId constant.
+  const avant = pur.cleMission_('logement', 'fx');
+  assert.ok(avant.indexOf('|' + pur.CONFIG.MISSIONS_REGLES_VERSION + '|') !== -1);
+  const sauvegarde = pur.CONFIG.MISSIONS_REGLES_VERSION;
+  pur.CONFIG.MISSIONS_REGLES_VERSION = 'vX';
+  try {
+    assert.notStrictEqual(pur.cleMission_('logement', 'fx'), avant, 'bump ⇒ nouvelle clé ⇒ ré-évaluation');
+  } finally { pur.CONFIG.MISSIONS_REGLES_VERSION = sauvegarde; }
+});
+
+test('collecte RÉCURSIVE : un fichier à profondeur 3 est vu, sousChemin = PREMIER segment', () => {
+  // Revue code : à profondeur ≤ 2, `Véhicules/<X>/<thème>/f.pdf` était INVISIBLE et la mission se
+  // déclarait « terminée » en l'ignorant.
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.arbre['profond'] = { nom: 'Entretien', files: [h.fichier('fp3', '2024-01-01_Facture.pdf')], folders: {} };
+  h.arbre['sousmodelb'] = { nom: 'VW Modelb', files: [], folders: { 'Entretien': 'profond' } };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: { 'VW Modelb': 'sousmodelb' } };
+  h.arbre[IDS.vehiculeIsole] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: { 'VW Modelb': 'vj' } };
+  h.arbre['vj'] = { nom: 'VW Modelb', files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.moves.length, 1, 'le fichier à profondeur 3 est collecté');
+  assert.strictEqual(h.moves[0].vers, IDS.vehiculeCible + '/VW Modelb',
+    'sousChemin = premier segment (« VW Modelb ») apparié au véhicule → contenu à plat');
+});
+
+test('convergence honnête : une source ILLISIBLE ne fait jamais conclure « passe complète »', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.c.DriveApp = { getFolderById: (id) => {
+    if (id === IDS.vehiculeIsole) throw new Error('Drive indisponible');
+    return { getId: () => id, getName: () => id, getFiles: () => ({ hasNext: () => false }), getFolders: () => ({ hasNext: () => false }) };
+  } };
+  h.c.executerMission_('vehicule', () => false);
+  assert.ok(!h.store['DriveAI_MISSION_FINI_vehicule'],
+    'une erreur de collecte laisse la mission OUVERTE (jamais un faux « terminé »)');
+});
+
+test('filet anti-brûlage : une source en erreur PERMANENTE finit à 1 tentative/jour, une passe saine ré-arme', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const MAX = h.c.CONFIG.MISSIONS_ERREURS_MAX;
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  let appels = 0;
+  const casse = (id) => {
+    if (id === IDS.vehiculeIsole) { appels++; throw new Error('404 dossier supprimé'); }
+    return { getId: () => id, getName: () => id, getFiles: () => ({ hasNext: () => false }), getFolders: () => ({ hasNext: () => false }) };
+  };
+  h.c.DriveApp = { getFolderById: casse };
+  for (let i = 0; i < MAX; i++) h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(appels, MAX, 'jusqu\'au seuil, chaque run réessaie');
+  h.c.executerMission_('vehicule', () => false); // au-delà du seuil, MÊME jour → sauté
+  assert.strictEqual(appels, MAX, 'au-delà du seuil : plus qu\'une tentative par jour');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_vehicule'], 'et toujours pas un faux « terminé »');
+
+  // Le lendemain : UNE tentative — et si la source est revenue, la passe saine ré-arme tout.
+  h.c.dateGmail_ = () => '2026-08-18';
+  h.c.DriveApp = { getFolderById: (id) => ({ getId: () => id, getName: () => id, getFiles: () => ({ hasNext: () => false }), getFolders: () => ({ hasNext: () => false }) }) };
+  h.c.executerMission_('vehicule', () => false);
+  const m = JSON.parse(h.store['DriveAI_MISSIONS_ETAT']).vehicule;
+  assert.ok(!m.err, 'passe saine ⇒ compteur d\'erreurs remis à zéro');
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_vehicule'], h.c.CONFIG.MISSIONS_REGLES_VERSION,
+    'et la convergence redevient possible');
+});
+
+test('mémoïsation à portée RUN : la même cible n\'est résolue qu\'UNE fois pour N items (revue quotas)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  let resolutions = 0;
+  const vraiSous = h.c.sousDossier_;
+  h.c.sousDossier_ = (parent, nom) => { resolutions++; return vraiSous(parent, nom); };
+  h.arbre[IDS.vehiculeIsole] = { files: [
+    h.fichier('f1', '2025-01-01_A.pdf'), h.fichier('f2', '2025-02-01_B.pdf'), h.fichier('f3', '2025-03-01_C.pdf'),
+  ], folders: {} };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+
+  h.c.executerMission_('vehicule', () => false);
+  assert.strictEqual(h.moves.length, 3);
+  assert.strictEqual(resolutions, 1, '3 items, même cible « Marquec Modelc » ⇒ UNE résolution find-or-create');
+});
+
+/* ================= PR2 : Carrière + Finances ================= */
+
+test('employeurDuNom_ : canonisation par MOT ENTIER, ambigu/hors table = null', () => {
+  assert.strictEqual(pur.employeurDuNom_('2025-11_Paie_Alphatek Inc..pdf'), 'Alphatek');
+  assert.strictEqual(pur.employeurDuNom_('2025-01-31_Bulletin de paie_BETATEK ROBOTEK INC..pdf'), 'Betatek');
+  assert.strictEqual(pur.employeurDuNom_('2026-01_Paie_Hopitalex de la Capitale-Nationale.pdf'), 'Hopitalex');
+  assert.strictEqual(pur.employeurDuNom_('2026-01_Paie_Inconnu Corp.pdf'), null, 'hors table = jamais deviné');
+  assert.strictEqual(pur.employeurDuNom_('2026-01_Attestation_Alphatek et Betatek.pdf'), null, 'deux employeurs = ambigu');
+});
+
+test('typeDuNomMission_ + anneeDuNomMission_ : segment TYPE et année de tête, robustes aux variantes', () => {
+  assert.strictEqual(pur.typeDuNomMission_('2025-06-16_Contrat de travail_Alphatek Inc..pdf'), 'contrat de travail');
+  assert.strictEqual(pur.typeDuNomMission_('2026_Feuillet T4 – État de la rémunération payée_Alphatek Inc..pdf'),
+    'feuillet t4 etat de la remuneration payee');
+  assert.strictEqual(pur.typeDuNomMission_('sans-date.pdf'), '', 'hors convention = pas de type');
+  assert.strictEqual(pur.anneeDuNomMission_('2026_Feuillet T4_X.pdf'), '2026');
+  assert.strictEqual(pur.anneeDuNomMission_('2025-12-12_Acte_X.pdf'), '2025');
+  assert.strictEqual(pur.anneeDuNomMission_('0123_Bidon.pdf'), null, 'année implausible rejetée');
+  assert.strictEqual(pur.anneeDuNomMission_('rapport 2024.pdf'), null, 'année pas en tête = pas un préfixe');
+});
+
+// Cible d'un routage 02, exprimée en CHEMIN — c'est la DESTINATION qui compte, pas la forme du
+// descripteur. Depuis ADR-0044 §7 le flux fait autorité dans 02 et rend « racine 02 + chemin » ;
+// les règles LOCALES de repli rendent encore « parent + nom ». Les deux désignent le même dossier.
+function chemin02(r) {
+  if (!r) return null;
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  if (r.cibleId === pur.CONFIG.DOMAINES['02 · Finances']) return r.sousDossier;
+  if (r.cibleParentId === IDS.revenusPaie) return 'Revenus & paie/' + r.cibleNom + (r.sousDossier ? '/' + r.sousDossier : '');
+  if (r.cibleParentId === IDS.impotsDeclarations) return 'Impôts & déclarations/' + r.cibleNom + (r.sousDossier ? '/' + r.sousDossier : '');
+  if (r.cibleId === IDS.releves02) return 'Relevés/' + r.sousDossier;
+  if (r.cibleId === IDS.recusFactures02) return 'Reçus & factures/' + r.sousDossier;
+  if (r.cibleId === IDS.assurances02) return 'Assurances & prévoyance';
+  return 'HORS 02';
+}
+
+test('routerFinance02_ : paie→employeur, fiscal→Impôts/<année> (AVANT relevé générique), table stricte', () => {
+  assert.strictEqual(chemin02(pur.routerFinance02_('2025-11_Paie_Alphatek Inc..pdf')), 'Revenus & paie/Alphatek');
+  const t4 = pur.routerFinance02_('2026_Feuillet T4 – État de la rémunération payée_Alphatek Inc..pdf');
+  assert.strictEqual(chemin02(t4), 'Impôts & déclarations/2026', 'année du NOM prioritaire sur celle du dossier source');
+  assert.strictEqual(chemin02(pur.routerFinance02_('2024-03_Relevé d\'impôt_Revenu Québec.pdf')),
+    'Impôts & déclarations/2024', 'relevé D\'IMPÔT est fiscal, pas bancaire');
+  assert.strictEqual(chemin02(pur.routerFinance02_('2024-03_Relevé de compte_Banque CMF.pdf')),
+    'Relevés/2024', 'bucket d\'année — LA MÊME règle que le flux (resetBucketAnnee_)');
+  assert.strictEqual(chemin02(pur.routerFinance02_('2019-05-01_Facture_Hydro.pdf')),
+    'Reçus & factures/Autres', '2019 hors buckets Reçus (2021-2026) → Autres, comme le flux');
+  assert.strictEqual(pur.routerFinance02_('2023-05-01_Diplôme_UNIVA.pdf'), null, 'type hors table = laissé');
+  assert.strictEqual(pur.routerFinance02_('photo de vacances.jpg'), null, 'hors convention = laissé');
+  // ⚠️ RÉVISÉ par ADR-0044 §7 (revue PR4). Avant le repli, la mission REFUSAIT une paie dont
+  // l'employeur est hors table ; le FLUX, lui, savait la ranger à la racine de « Revenus & paie ».
+  // Deux verdicts pour un fichier : la consolidation déplaçait ensuite ce que la mission avait
+  // déclaré non apparié. Ce n'est PAS un assouplissement du « jamais deviné » — la cible n'est pas
+  // devinée, elle est CALCULÉE par le flux, qui fait autorité.
+  assert.strictEqual(chemin02(pur.routerFinance02_('2025-11_Paie_Employeur Mystère.pdf')),
+    'Revenus & paie', 'employeur hors table : la RACINE, jamais un employeur deviné');
+  // …et un employeur OCCASIONNEL (D11) atteint son commun — la promesse « les paies partent en 02
+  // quel que soit l'employeur » n'était pas tenue côté mission avant que le flux fasse autorité.
+  assert.strictEqual(chemin02(pur.routerFinance02_('2015-06_Paie_Algopaie.pdf')),
+    'Revenus & paie/Autres employeurs');
+});
+
+test('routerFinance02_ : prédicats PARTAGÉS avec le flux — RL-1/31 fiscal, RIB refusé, « salaire » = paie (revue finale PR2)', () => {
+  // Trois divergences flux ↔ mission attrapées par la passe finale (déplacements à clé de SUCCÈS,
+  // donc DÉFINITIFS) — verrouillées ici sur les prédicats partagés de Reset.gs.
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  // RL-1/RL-31 : feuillets FISCAUX québécois, jamais des relevés bancaires (motif ANCRÉ — le flux
+  // a la même règle AVANT son « relevé » générique, test/reset.test.js).
+  assert.strictEqual(chemin02(pur.routerFinance02_('2025-02_Relevé 1_Alphatek.pdf')), 'Impôts & déclarations/2025');
+  assert.strictEqual(chemin02(pur.routerFinance02_('2025-02_Relevé 31_Groupe Immobilier Alphaimmo.pdf')),
+    'Impôts & déclarations/2025');
+  // « Relevé 10 » n'est PAS capturé par le motif ancré : relevé ordinaire → bucket.
+  assert.strictEqual(chemin02(pur.routerFinance02_('2025-02_Relevé 10_Bellerives.pdf')), 'Relevés/2025');
+  // RIB : des COORDONNÉES bancaires, pas un relevé de compte. L'invariant qui compte est qu'il ne
+  // parte JAMAIS dans « Relevés » — c'est ce qui est verrouillé ici. ⚠️ RÉVISÉ par ADR-0044 §7 :
+  // la mission ne le REFUSE plus, elle adopte la cible du flux (`Banques/Coordonnées & chèques`)
+  // au lieu de laisser la consolidation l'y déplacer après coup.
+  assert.strictEqual(chemin02(pur.routerFinance02_('2024-05_Relevé d\'identité bancaire_CMF.pdf')),
+    'Banques/CMF', 'un RIB n\'est JAMAIS un relevé de compte');
+  // « salaire » : même mot que le flux (bulletin/attestation de salaire = paie).
+  assert.strictEqual(chemin02(pur.routerFinance02_('2024-02_Attestation de salaire_Hopitalex.pdf')),
+    'Revenus & paie/Hopitalex');
+  // « paiement » reste exclu par construction (mot entier — piège #228).
+  assert.strictEqual(pur.routerFinance02_('2026-07_Confirmation de paiement_Crédit Mutuel.pdf'), null);
+});
+
+test('routerCarriere_ : recrutement, paie→02, types en table, dump racine par émetteur', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const ctx = { employeurParSource: (function () {
+    const m = {}; m[IDS.employeurA] = 'Alphatek'; m[IDS.employeurB] = 'Betatek'; return m;
+  })(), techniqueId: 'TECH' };
+  // Une paie dans Employeurs/Alphatek part vers 02 (domicile unique), SANS lire l'émetteur du nom.
+  const paie = pur.routerCarriere_('2025-11_Paie_Alphatek Inc..pdf', { sourceId: IDS.employeurA, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(paie), { cibleParentId: IDS.revenusPaie, cibleNom: 'Alphatek' });
+  // Un contrat dans Employeurs/Alphatek → sous-dossier Contrats.
+  const contrat = pur.routerCarriere_('2025-06-16_Contrat de travail_Alphatek Inc..pdf', { sourceId: IDS.employeurA, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(contrat), { cibleId: IDS.employeurA, sousDossier: 'Contrats' });
+  // Type inconnu DANS Employeurs/<X> : laissé (le déplacer « à plat » serait un no-op déguisé).
+  assert.strictEqual(pur.routerCarriere_('2025-01-01_Badge_Alphatek.pdf', { sourceId: IDS.employeurA, sousChemin: '' }, ctx), null);
+  // Racine 05 (ex-dump Betatek) : émetteur SÛR + type inconnu → au moins Employeurs/<X> à plat.
+  const dump = pur.routerCarriere_('2025-01-01_Badge_Betatek robotek.pdf', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(dump), { cibleId: IDS.employeurB, sousDossier: '' });
+  // Racine 05 : un CV part vers CV & lettres même sans employeur.
+  const cv = pur.routerCarriere_('2026-01-01_CV_Marc Exemple.pdf', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx);
+  assert.strictEqual(cv.cibleId, IDS.cvLettres);
+  // Racine 05 : aucun indice → laissé.
+  assert.strictEqual(pur.routerCarriere_('notes perso.txt', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx), null);
+  // Hopitalex (paie) depuis la racine : paie → 02 ; autre type Hopitalex → null (pas de dossier sous 05, on ne crée pas).
+  const paieHopitalex = pur.routerCarriere_('2026-01_Paie_Hopitalex de la Capitale-Nationale.pdf', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(paieHopitalex), { cibleParentId: IDS.revenusPaie, cibleNom: 'Hopitalex' });
+  assert.strictEqual(pur.routerCarriere_('2026-01_Attestation_Hopitalex de la Capitale-Nationale.pdf', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx), null);
+  // « Bulletin de salaire » = une PAIE (prédicat partagé, revue finale PR2) : domicile unique 02,
+  // JAMAIS Employeurs/<X> à plat (l'ancienne liste ['paie','paye'] l'y aurait égaré à clé de succès).
+  const salaire = pur.routerCarriere_('2025-03_Bulletin de salaire_Alphatek.pdf', { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx);
+  assert.deepStrictEqual(plain(salaire), { cibleParentId: IDS.revenusPaie, cibleNom: 'Alphatek' });
+});
+
+test('moisManquantsPaies_ : trous ENTRE premier et dernier mois observés, jamais au-delà des bornes', () => {
+  const r = pur.moisManquantsPaies_({
+    Alphatek: ['2025-06', '2025-07', '2025-09', '2025-12', '2026-01'],
+    Hopitalex: ['2026-01'],
+  });
+  const alphatek = r.filter((x) => x.employeur === 'Alphatek')[0];
+  assert.deepStrictEqual(plain(alphatek.manquants), ['2025-08', '2025-10', '2025-11'],
+    'trous internes seulement — rien avant 2025-06 ni après 2026-01');
+  assert.strictEqual(alphatek.presents, 5);
+  const hopitalex = r.filter((x) => x.employeur === 'Hopitalex')[0];
+  assert.deepStrictEqual(plain(hopitalex.manquants), [], 'un seul mois = aucune borne à combler');
+  // Passage d'année : 2025-12 → 2026-01 est CONSÉCUTIF.
+  const cheval = pur.moisManquantsPaies_({ X: ['2025-11', '2026-02'] });
+  assert.deepStrictEqual(plain(cheval[0].manquants), ['2025-12', '2026-01']);
+});
+
+test('profondeurPar = 0 : les sous-dossiers de la source sont HORS périmètre, sans fausse alerte', () => {
+  const h = ctxRunner();
+  // `convergenceApres` : la conclusion de paies attend carriere + annees02 — on les pose FINI.
+  h.store['DriveAI_MISSION_FINI_carriere'] = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  h.store['DriveAI_MISSION_FINI_annees02'] = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  // Racine de Revenus & paie : 1 paie à plat + un sous-dossier Alphatek déjà rempli (la SORTIE de
+  // la mission) — celui-ci ne doit JAMAIS être recollecté, et la mission doit pouvoir CONVERGER.
+  h.arbre['sousrob'] = { nom: 'Alphatek', files: [h.fichier('deja', '2025-06_Paie_Alphatek Inc..pdf')], folders: {} };
+  h.arbre[IDS.revenusPaie] = { files: [h.fichier('fp', '2025-11_Paie_Alphatek Inc..pdf')], folders: { 'Alphatek': 'sousrob' } };
+  h.c.ecrireRapportPaies_ = () => { h.moves.push({ rapport: true }); };
+
+  h.c.executerMission_('paies', () => false);
+  assert.deepStrictEqual(plain(h.moves.filter((m) => m.id).map((m) => m.id)), ['fp'],
+    'seul le fichier À PLAT est traité — la sortie de la mission n\'est jamais re-collectée');
+  assert.strictEqual(h.moves[0].vers, IDS.revenusPaie + '/Alphatek');
+
+  h.c.executerMission_('paies', () => false); // passe vide → convergence + rapport
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_paies'], h.c.CONFIG.MISSIONS_REGLES_VERSION,
+    'la profondeur 0 VOULUE ne bloque pas la convergence (pas de fausse alerte « trop profond »)');
+  assert.strictEqual(h.moves.filter((m) => m.rapport).length, 1, 'RapportPaies écrit à la convergence');
+});
+
+test('ecrireRapportPaies_ qui LÈVE empêche le FINI de la mission paies (rapport garanti)', () => {
+  const h = ctxRunner();
+  h.store['DriveAI_MISSION_FINI_carriere'] = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  h.store['DriveAI_MISSION_FINI_annees02'] = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  h.arbre[IDS.revenusPaie] = { files: [], folders: {} };
+  let rate = true;
+  h.c.ecrireRapportPaies_ = () => { if (rate) throw new Error('Sheet indisponible'); };
+  assert.throws(() => h.c.executerMission_('paies', () => false), /Sheet indisponible/);
+  assert.ok(!h.store['DriveAI_MISSION_FINI_paies']);
+  rate = false;
+  h.c.executerMission_('paies', () => false);
+  assert.strictEqual(h.store['DriveAI_MISSION_FINI_paies'], h.c.CONFIG.MISSIONS_REGLES_VERSION);
+});
+
+/* ---------- Régression C28-53 : l'onglet RapportPaies doit être créé par feuille_ ----------
+ * Bug révélé par le MCP le 19/08 : `RapportPaies` manquait de `initialiserSheet_`, donc
+ * `feuille_('RapportPaies')` rendait null et `ecrireRapportPaies_` plantait à CHAQUE tick
+ * (`getRange of null`). Les tests existants MOCKENT `ecrireRapportPaies_` → ne voyaient pas ce
+ * chemin. Ici on exerce le VRAI chemin sur un classeur où l'onglet est ABSENT au départ.
+ */
+const fs = require('node:fs');
+const path = require('node:path');
+const TOUS_GS = fs.readdirSync(path.join(__dirname, '..', 'src')).filter((f) => f.endsWith('.gs'));
+
+test('ecrireRapportPaies_ : onglet RapportPaies ABSENT → créé par feuille_, aucun crash (régression MCP 19/08)', () => {
+  function fauxOnglet() {
+    const cells = {};
+    const rangees = []; // lignes écrites par setValues (pour vérifier le CONTENU, pas juste l'absence de crash)
+    let dernLigne = 1;
+    const o = {
+      rangees,
+      getRange: (a, b, h, w) => {
+        // getRange('A1') OU getRange(ligne, col, h, w)
+        const cle = typeof a === 'string' ? a : a + ',' + b;
+        return {
+          getValue: () => cells[cle] || '',
+          setValues: (v) => { v.forEach((ligne, i) => { rangees[(a || 1) + i] = ligne; }); dernLigne = Math.max(dernLigne, (a || 1) + (v.length - 1)); },
+          setValue: (x) => { cells[cle] = x; },
+          clearContent: () => {},
+        };
+      },
+      setFrozenRows: () => {},
+      getLastRow: () => dernLigne,
+      appendRow: () => { dernLigne++; },
+    };
+    return o;
+  }
+  const onglets = {};
+  const ss = {
+    getSheetByName: (nom) => onglets[nom] || null,
+    insertSheet: (nom) => { onglets[nom] = fauxOnglet(); return onglets[nom]; },
+    getSheets: () => Object.keys(onglets).map((k) => onglets[k]),
+    deleteSheet: () => {},
+  };
+  const c = load(TOUS_GS);
+  c.getSheetEtat_ = () => ss;
+  c.SpreadsheetApp = { getActiveSpreadsheet: () => ss };
+  const infos = [];
+  c.journalInfo_ = (s, m) => infos.push(m);
+  c.journalErreur_ = () => {};
+  // Un dossier employeur avec deux mois présents (2026-01, 2026-03).
+  c.DriveApp = { getFolderById: () => ({
+    getFolders: () => {
+      let servi = false;
+      return { hasNext: () => !servi, next: () => { servi = true; return {
+        getName: () => 'Alphatek Inc.',
+        getFiles: () => {
+          const noms = ['2026-01_Paie_Alphatek.pdf', '2026-03_Paie_Alphatek.pdf']; let i = 0;
+          return { hasNext: () => i < noms.length, next: () => ({ getName: () => noms[i++] }) };
+        },
+      }; } };
+    },
+  }) };
+
+  assert.strictEqual(onglets.RapportPaies, undefined, 'onglet absent au départ (le cas prod)');
+  assert.doesNotThrow(() => c.ecrireRapportPaies_(),
+    'feuille_ doit CRÉER RapportPaies via initialiserSheet_ — jamais un getRange sur null');
+  assert.ok(onglets.RapportPaies, 'l\'onglet a bien été créé');
+  assert.strictEqual(infos.filter((m) => m.indexOf('RapportPaies écrit') === 0).length, 1, 'le rapport est écrit');
+  // Contenu : la ligne 2 porte l'employeur et sa couverture (2 mois présents, mois manquants comptés).
+  const ligne2 = onglets.RapportPaies.rangees[2];
+  assert.ok(ligne2 && ligne2[0] === 'Alphatek Inc.', 'la ligne employeur est écrite (pas juste l\'en-tête)');
+  assert.strictEqual(ligne2[1], 2, '2 mois présents (2026-01, 2026-03)');
+});
+
+/* ---------- ADR-0044 : dossiers communs sous « Véhicule » + détection de location ---------- */
+
+test('communVehiculeDepuisSource_ (PURE) : le dossier SOURCE décide, jamais la date', () => {
+  const f = pur.communVehiculeDepuisSource_;
+  assert.strictEqual(f('Marqued'), 'Recherche & achat');
+  assert.strictEqual(f('marqued/Entretien & réparations'), 'Recherche & achat', 'insensible à la casse et au sous-chemin');
+  assert.strictEqual(f('Contraventions'), '', 'une CATÉGORIE n\'est pas un commun');
+  assert.strictEqual(f(''), '');
+  assert.strictEqual(f('Ford Modela'), '', 'un vrai véhicule reste un véhicule');
+});
+
+test('estLocationVehicule_ (PURE) : strict — « location » SEUL ne suffit jamais', () => {
+  const f = pur.estLocationVehicule_;
+  // Vrai : les 3 contrats réellement présents dans le Drive de Marc.
+  assert.strictEqual(f('2026-07-02_Contrat de location de véhicule_Enterprise (Location d\'autos).pdf'), true);
+  assert.strictEqual(f('2026-04-10_Contrat de location de véhicule_Location d\'autos Enterprise.pdf'), true);
+  assert.strictEqual(f('2026-04-13_Contrat de location de véhicule_Enterprise.pdf'), true);
+
+  // FAUX — les pièges. Le 1er jet du prédicat (liste de marques de loueurs) cassait les deux
+  // premiers : « Avis » est un loueur mais surtout un mot français des plus courants, et
+  // « demande de location » désigne un LOGEMENT.
+  assert.strictEqual(f('2022-11_Avis de séjour_Camping.pdf'), false);
+  assert.strictEqual(f('2018-10-15_Formulaire de demande de location_CORPIQ.pdf'), false);
+  assert.strictEqual(f('2024-03-01_Avis de paiement_Ville de Québec.pdf'), false);
+  assert.strictEqual(f('2023-05-01_Bail de logement_Tribunal administratif du logement.pdf'), false);
+  assert.strictEqual(f('2025-01-01_Budget mensuel.pdf'), false, '« budget » est aussi un loueur — et un mot courant');
+  assert.strictEqual(f(''), false);
+});
+
+test('ADR-0044 : Marqued a bien quitté le canon des véhicules (sinon rien n\'est débloqué)', () => {
+  // ⚠️ Ce test a longtemps porté la mention « c'est LE correctif à fort levier : `fenetresCompletes`
+  // était faux à vie ». L'ADR-0044 §4.1 démontre que c'était FAUX (`Ford Modela` étant vide, la
+  // gate restait insatisfiable même sans Marqued) — et `fenetresCompletes` n'existe plus. Ce qui reste
+  // vrai, et que ce test verrouille : Marqued n'est plus un véhicule, donc plus aucun document ne peut
+  // lui être attribué ni faire re-créer son dossier.
+  const noms = (pur.CONFIG.MISSIONS_VEHICULES || []).map((v) => v.nom);
+  assert.ok(noms.indexOf('Marqued') === -1, 'Marqued ne doit plus être un véhicule (décision Marc)');
+  assert.ok(noms.length >= 3, 'les vrais véhicules restent');
+  assert.strictEqual(pur.vehiculeDuNom_('2023-05-01_Facture_Marqued Modeled.pdf'), null);
+  assert.strictEqual(pur.vehiculeDuNom_('2023-05-01_Facture_VW Modelb.pdf'), 'VW Modelb');
+});
+
+test('MISSIONS_MOTS_VEHICULE : jetons ALPHABÉTIQUES seulement — invariant tacite verrouillé', () => {
+  // `estLocationVehicule_` n'ôte PAS le préfixe de date (contrairement à `apparierUnique_`) :
+  // normalisé, « 2024-05-12_ » devient « 2024 05 12 ». Ajouter un millésime ou un code modèle
+  // NUMÉRIQUE à cette liste matcherait instantanément un composant de date sur TOUS les documents
+  // classés. L'invariant tenait par chance ; il tient maintenant par test (revue C28-62).
+  pur.MISSIONS_MOTS_VEHICULE.forEach((m) => assert.match(m, /^[a-z]+$/,
+    'jeton non alphabétique = faux positif garanti sur les dates : ' + m));
+  // Contre-épreuve : la date seule ne fait jamais une location.
+  assert.strictEqual(pur.estLocationVehicule_('2024-05-12_Avis de cotisation_Revenu Québec.pdf'), false);
+});
+
+test('dispatch03 : le 3e consommateur applique EXACTEMENT les mêmes règles véhicule (ADR-0044)', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const d03 = pur.tableMissions_().filter((m) => m.tag === 'dispatch03')[0];
+  const veh = pur.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  const ctx = { themePar: {}, themeVehiculePar: {}, logements: [], fenetres: [] };
+  const infoC = { sourceId: IDS.contrats03, sousChemin: '' };
+
+  // 1. COMMUN par le NOM : « mutualiser UNE dimension d'une règle ne couvre pas les autres ».
+  //    L'employeur et les buckets étaient partagés, la reconnaissance des communs ne l'était pas :
+  //    un « Marqued » égaré dans `03 · Contrats` n'était routé par AUCUNE des 3 règles.
+  assert.deepStrictEqual(plain(d03.router('2023-01_Facture_Marqued Québec.pdf', infoC, ctx)),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+
+  // 2. AMBIGUÏTÉ location + véhicule du canon ⇒ refus, comme les 2 autres consommateurs.
+  //    Avant : `Locations` inconditionnel — un déplacement DÉFINITIF au mauvais endroit.
+  const ambigu = '2024-01-01_Contrat de location de véhicule_VW Modelb.pdf';
+  assert.strictEqual(d03.router(ambigu, infoC, ctx), null, 'dispatch03 refuse l\'ambigu');
+  assert.strictEqual(veh.router(ambigu, { sourceId: IDS.vehiculesPluriel, sousChemin: '' }, {}), null,
+    'mission véhicule : MÊME verdict');
+
+  // 3. Sans véhicule du canon, la location part bien en « Locations » (les 3 Enterprise réels).
+  const enterprise = '2019-03-01_Contrat de location de véhicule_Enterprise.pdf';
+  assert.deepStrictEqual(plain(d03.router(enterprise, infoC, ctx)),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Locations', sousDossier: '' });
+  assert.deepStrictEqual(plain(veh.router(enterprise, { sourceId: IDS.vehiculesPluriel, sousChemin: '' }, {})),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Locations', sousDossier: '' });
+});
+
+test('routeur vehicule : le filet « À attribuer » n\'avale JAMAIS un document non-véhicule égaré', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  const rte = (nom, sousChemin) =>
+    spec.router(nom, { sourceId: IDS.vehiculesPluriel, sousChemin: sousChemin }, {});
+  // « Véhicules » n'est pas un dossier pur : Marc y a rangé lui-même des conversations de
+  // propriétaire/plombier (constaté dans le Drive). « À attribuer » étant un DÉPLACEMENT (donc
+  // définitif), on interroge la règle PARTAGÉE du flux : si elle sait placer ailleurs, on REFUSE.
+  assert.strictEqual(rte('2025-01-01_Assurance habitation 1204 avenue Fictive Prairie_Bellerives.pdf', 'Assurance auto'), null,
+    'le flux sait que c\'est de l\'habitation ⇒ refus révisable, jamais avalé');
+  assert.strictEqual(rte('2024-03-01_Contrat_Immeubles XA8.pdf', 'Entretien & réparations'), null,
+    'Logement : le flux sait ⇒ refus');
+  // …mais un vrai document de véhicule sans véhicule identifiable est bien pris en charge : les
+  // 2 filets FAIBLES du flux (Contrats/Correspondance) attrapent par SOUS-CHAÎNE et ne comptent
+  // donc pas comme un savoir — sinon le filet ne capterait plus rien.
+  assert.deepStrictEqual(plain(rte('2023-11-13_Soumission d\'assurance automobile_Bellerives Assurances.pdf', 'Assurance auto')),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'À attribuer', sousDossier: 'Assurance auto' });
+  assert.deepStrictEqual(plain(rte('2023-10-02_Facture de réparation_Garage Charlesbourg Certi-Pro.jpg', 'Entretien & réparations')),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'À attribuer', sousDossier: 'Entretien & réparations' });
+});
+
+test('routeur vehicule : le véhicule NOMMÉ bat le sous-dossier source homonyme d\'un commun (ORDRE)', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const spec = pur.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  const rte = (nom, sousChemin) =>
+    plain(spec.router(nom, { sourceId: IDS.vehiculesPluriel, sousChemin: sousChemin }, {}));
+  // Décision 1 : les thèmes vivent SOUS chaque véhicule. Un magasinage qui NOMME un véhicule du
+  // propriétaire va donc sous CE véhicule, pas au commun — c'est pour ça que la reconnaissance du
+  // sous-dossier source homonyme (`avecNom`) est évaluée APRÈS `vehiculeDuNom_`.
+  // ⚠️ Sans cet ordre, la mutation `communVehiculeDepuisSource_(sousChemin, true)` en tête du
+  // routeur passait TOUS les tests (trou prouvé par la revue C28-62).
+  assert.deepStrictEqual(rte('2023-06-20_Contrat de vente_VW Modelb.pdf', 'Recherche & achat'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'VW Modelb', sousDossier: 'Recherche & achat' });
+  // …et sans véhicule nommé, le même dossier source mène bien au COMMUN.
+  assert.deepStrictEqual(rte('2026-07-07_Annonce de vente_Mazda 3.png', 'Recherche & achat'),
+    { cibleParentId: IDS.vehiculeCible, cibleNom: 'Recherche & achat', sousDossier: '' });
+});
+
+test('MISSIONS_VEHICULE_COMMUNS : identités et jetons — invariants verrouillés', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  // Jetons ALPHABÉTIQUES : `apparierUnique_` retire le préfixe de date, mais `communVehiculeDuNom_`
+  // reçoit du texte BRUT côté flux — un jeton numérique matcherait un composant de date.
+  JSON.parse(JSON.stringify(pur.CONFIG.MISSIONS_VEHICULE_COMMUNS)).forEach((c) =>
+    (c.jetons || []).forEach((j) => assert.match(j, /^[a-z]+$/, 'jeton de commun non alphabétique : ' + j)));
+  // Les 2 dossiers Marqued parasites sont des SOURCES : une coquille qui les confondrait avec la CIBLE
+  // ferait de « Véhicule » sa propre source (redistribution massive de tout son contenu).
+  const ids = [IDS.vehiculeRechercheA, IDS.vehiculeRechercheB, IDS.vehiculeCible, IDS.vehiculesPluriel, IDS.vehiculeIsole];
+  assert.strictEqual(new Set(ids).size, ids.length, 'les IDs source/cible du véhicule sont tous distincts');
+  ids.forEach((id) => assert.match(String(id), /^[A-Za-z0-9_-]{20,}$/, 'ID Drive plausible : ' + id));
+});
+
+test('routerCarriere_ (ADR-0044) : les 4 familles réelles des 39 de « employeurs & CV »', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const ctx = { employeurParSource: (function () {
+    const m = {}; m[IDS.employeurA] = 'Alphatek'; m[IDS.employeurB] = 'Betatek'; return m;
+  })(), techniqueId: 'TECH' };
+  const rte = (nom, src) => plain(pur.routerCarriere_(nom, { sourceId: src || IDS.carriereRacine, sousChemin: '' }, ctx));
+
+  // D9 — « Relevé_<employeur> » SANS numéro = paie MENSUELLE (cadence 2023-04/05/07/08, 2025-01).
+  assert.deepStrictEqual(rte('2023-04_Relevé_Betatek.pdf', IDS.employeurB),
+    { cibleParentId: IDS.revenusPaie, cibleNom: 'Betatek' });
+  // …et le prédicat reste ÉTROIT : un RL-1 est ANNUEL (fiscal), un RIB n'est pas un relevé de compte.
+  assert.strictEqual(pur.estReleveDePaie_('releve 1'), false, 'RL-1 = feuillet FISCAL, jamais une paie');
+  assert.strictEqual(pur.estReleveDePaie_('releve d identite bancaire'), false, 'RIB = coordonnées');
+  assert.strictEqual(pur.estReleveDePaie_('releve'), true);
+
+  // D10 — RECRUTEMENT → « Recherche d'emploi », y compris quand l'émetteur est un employeur connu.
+  ['2023-01-09_Offre d\'emploi_Betatek robotek Inc..pdf',
+    '2022-12-19_Invitation d\'entretien_Betatek robotek.ics',
+    '2023-02-08_Description de rôle_Betatek robotek.docx',
+    '2021-05-21_Liste d\'entreprises cibles_Hauts-de-France.xlsx',
+    '2026-06-29_Répertoire d\'entreprises industrielles_Nord-Pas-de-Calais.xlsx',
+    '2024-07-08_Liste de prospection_Claude Exemple.docx',
+    '2026-07-06_Formulaire de reclassement_Agence emploi S.png',
+    '2026-07-06_Fiche comparative_Comparatif grilles salariales SPVQ et SQ police.jpg',
+  ].forEach((n) => assert.deepStrictEqual(rte(n), { cibleId: IDS.rechercheEmploi }, n));
+
+  // D12 — DOCUMENTATION MÉTIER → `_Technique` (résolu par batirCtx, le routeur reste PUR).
+  ['2025-08-20_Bon de livraison_FABRICANT-Q Co. of Canada Ltd..jpg',
+    '2018-11-17_Plaque signalétique_Rockwell Automation.jpg',
+    '2026-06-15_Rapport de maintenance_robot convoyeur job 111796.jpg',
+    '2020_Support de cours_Romain Debuyser.pdf',
+  ].forEach((n) => assert.deepStrictEqual(rte(n), { cibleId: 'TECH' }, n));
+  assert.deepStrictEqual(rte('2026-01-28_Rapport de service_Alphatek.pdf', IDS.employeurA), { cibleId: 'TECH' });
+  // `_Technique` irrésolu ⇒ LÈVE, jamais un refus keyé ni une cible vide. Le throw est traduit en
+  // 'transitoire' PAR ITEM par `traiterItemMission_` : borné, aucune clé posée, et les ~33 autres
+  // documents de la passe continuent d'être traités. Un `null` aurait figé ces 6 fichiers jusqu'au
+  // prochain bump de version pour une panne Drive TRANSITOIRE (revues C28-62 PR2, les 2 passes).
+  assert.throws(() => pur.routerCarriere_('2025-08-20_Bon de livraison_SEW.jpg',
+    { sourceId: IDS.carriereRacine, sousChemin: '' }, { employeurParSource: {}, techniqueId: '' }),
+  /_Technique indisponible/);
+
+  // D11 — employeur OCCASIONNEL → le commun, des DEUX côtés.
+  assert.deepStrictEqual(rte('2025-02-12_Attestation employeur_Algopaie.pdf'),
+    { cibleParentId: IDS.employeurs05, cibleNom: 'Autres employeurs', sousDossier: 'Attestations & lettres' });
+  assert.deepStrictEqual(rte('2026-07-01_Attestation_Delta crest.jpg'),
+    { cibleParentId: IDS.employeurs05, cibleNom: 'Autres employeurs', sousDossier: 'Attestations & lettres' });
+  assert.deepStrictEqual(rte('2026-01_Paie_Orbite-Emploi.PDF'),
+    { cibleParentId: IDS.revenusPaie, cibleNom: 'Autres employeurs' }, 'la PAIE part en 02, quel que soit l\'employeur');
+
+  // §5.2 — les 2 exceptions ASSUMÉES restent REFUSÉES (révisables), et c'est voulu.
+  assert.strictEqual(rte('2016-04-16_Évaluation de performance_migration taxonomie 2016.odt'), null,
+    'router « évaluation » vers _Technique enverrait une vraie évaluation RH au fourre-tout');
+  assert.strictEqual(rte('2026-02-02_Attestation_conformité algorithme calcul de paie.pdf'), null,
+    'aucun employeur ⇒ jamais deviné');
+});
+
+test('estTypeRecrutement_ : prédicat ÉTROIT — les pièges du Drive de Marc ne matchent PAS', () => {
+  const t = (nom) => pur.estTypeRecrutement_(pur.typeDuNomMission_(nom), nom);
+  // « entretien » SEUL est une catégorie VÉHICULE : sans « invitation », jamais du recrutement.
+  assert.strictEqual(t('2023-10-02_Entretien & réparations_Garage Charlesbourg.pdf'), false);
+  assert.strictEqual(pur.estTypeRecrutement_('entretien', 'x'), false);
+  // « offre » SEUL ne suffit pas.
+  assert.strictEqual(pur.estTypeRecrutement_('offre de service', 'x'), false);
+  // « fiche comparative » sans mot de SALAIRE : trop générique pour un déplacement définitif.
+  assert.strictEqual(t('2024-01-01_Fiche comparative_Comparatif forfaits Boreale.jpg'), false);
+  assert.strictEqual(t('2026-07-06_Fiche comparative_Comparatif grilles salariales SPVQ.jpg'), true);
+});
+
+test('TRIPWIRE de convergence : pour chaque cas de routerCarriere_, le FLUX calcule la MÊME cible', () => {
+  // C'est LE test qui rend le geste symétrique par CONSTRUCTION plutôt que par relecture.
+  // Pourquoi il existe : `ConsolidationExec` recalcule la cible d'un fichier au moment du move,
+  // via `cheminCibleReset_`. Si le flux ne sait pas reproduire ce que la mission a décidé, il
+  // DÉFAIT le rangement — et sans bruit. La revue structure C28-62 PR2 a prouvé 3 divergences de
+  // cette famille (relevé de paie → « Relevés/AAAA » bancaires ; « Autres employeurs » → racine de
+  // 05 ; employeur occasionnel en 02 → racine). Un test par cas les aurait toutes attrapées.
+  const IDS = pur.CONFIG.MISSIONS_EMPLOYEURS_COMMUN ? pur.CONFIG.MISSIONS_IDS : pur.CONFIG.MISSIONS_IDS;
+  const ctx = { employeurParSource: (function () {
+    const m = {}; m[IDS.employeurA] = 'Alphatek'; m[IDS.employeurB] = 'Betatek'; return m;
+  })(), techniqueId: 'TECH' };
+  // [nom, source, domaine où le fichier ATTERRIT, attenduMission, attenduFlux = attenduMission]
+  const CAS = [
+    ['2023-04_Relevé_Betatek.pdf', IDS.employeurB, '02 · Finances', 'Revenus & paie/Betatek'],
+    ['2025-11_Paie_Alphatek Inc..pdf', IDS.employeurA, '02 · Finances', 'Revenus & paie/Alphatek'],
+    ['2026-01_Paie_Orbite-Emploi.PDF', IDS.carriereRacine, '02 · Finances', 'Revenus & paie/Autres employeurs'],
+    ['2026-01_Relevé_Orbite-Emploi.pdf', IDS.carriereRacine, '02 · Finances', 'Revenus & paie/Autres employeurs'],
+    // ADR-0080 : 05/Employeurs est à plat par employeur canonique (sans Autres employeurs ni sous-dossiers).
+    ['2026-07-01_Attestation_Delta crest.jpg', IDS.carriereRacine, '05 · Carrière', 'Employeurs/Autres employeurs/Attestations & lettres', null],
+    ['2025-02-12_Attestation employeur_Algopaie.pdf', IDS.carriereRacine, '05 · Carrière', 'Employeurs/Autres employeurs/Attestations & lettres', null],
+    ['2025-06-16_Contrat de travail_Alphatek Inc..pdf', IDS.employeurA, '05 · Carrière', 'Employeurs/Alphatek/Contrats', 'Employeurs/Alphatek'],
+    ['2026-07-06_Offre d\'emploi_Cégep Garneau.jpg', IDS.carriereRacine, '05 · Carrière', 'Recherche d\'emploi'],
+    ['2022-12-19_Invitation d\'entretien_Betatek robotek.ics', IDS.employeurB, '05 · Carrière', 'Recherche d\'emploi'],
+    ['2021-05-21_Liste d\'entreprises cibles_Hauts-de-France.xlsx', IDS.carriereRacine, '05 · Carrière', 'Recherche d\'emploi'],
+    ['2021-05-21_Liste d\'entreprises-cibles_Hauts-de-France.xlsx', IDS.carriereRacine, '05 · Carrière', 'Recherche d\'emploi'],
+  ];
+  CAS.forEach(([nom, src, domaine, attendu, attenduFlux]) => {
+    const r = plain(pur.routerCarriere_(nom, { sourceId: src, sousChemin: '' }, ctx));
+    assert.ok(r, 'la mission doit router : ' + nom);
+    // Sous-chemin tel que la MISSION le produit, dans le vocabulaire des chemins du flux.
+    const parNom = {};
+    parNom[IDS.revenusPaie] = 'Revenus & paie';
+    parNom[IDS.employeurs05] = 'Employeurs';
+    parNom[IDS.rechercheEmploi] = 'Recherche d\'emploi';
+    parNom[IDS.cvLettres] = 'CV & lettres';
+    parNom[IDS.employeurA] = 'Employeurs/Alphatek';
+    parNom[IDS.employeurB] = 'Employeurs/Betatek';
+    const base = r.cibleParentId ? parNom[r.cibleParentId] + '/' + r.cibleNom : parNom[r.cibleId];
+    const cheminMission = base + (r.sousDossier ? '/' + r.sousDossier : '');
+    assert.strictEqual(cheminMission, attendu, 'MISSION — ' + nom);
+    const cibleFlux = attenduFlux === undefined ? attendu : attenduFlux;
+    assert.strictEqual(pur.cheminCibleReset_(domaine, nom), cibleFlux, 'FLUX — ' + nom);
+  });
+
+  // EXCEPTION documentée : `_Technique` est HORS domaines. La consolidation ne parcourt que les
+  // domaines, donc elle ne verra jamais ces fichiers — aucune divergence possible, et c'est
+  // pourquoi le flux n'a pas à savoir router vers `_Technique`.
+  const metier = '2025-08-20_Bon de livraison_FABRICANT-Q Co. of Canada Ltd..jpg';
+  assert.deepStrictEqual(plain(pur.routerCarriere_(metier, { sourceId: IDS.carriereRacine, sousChemin: '' }, ctx)),
+    { cibleId: 'TECH' });
+  assert.strictEqual(pur.cheminCibleReset_('05 · Carrière', metier), null,
+    '_Technique est hors domaines : le flux n\'y route pas, et la conso n\'y passe jamais');
+});
+
+test('estReleveDePaie_ : un relevé QUALIFIÉ n\'est PAS une paie (revue code C28-62 PR2)', () => {
+  // Le défaut : `typeContient_(['releve'])` matchait le mot entier n'importe où dans le segment.
+  // « Relevé d'emploi » (le ROE, remis par TOUT employeur québécois en fin de contrat) partait en
+  // `02/Revenus & paie` — alors que Reset.gs porte la décision INVERSE en toutes lettres :
+  // « c'est un document de CARRIÈRE (05) ». Le code contredisait son propre commentaire.
+  // Déplacement à clé de SUCCÈS ⇒ dans le doute, on REFUSE.
+  ['releve d emploi', 'releve de notes', 'releve de compte', 'releve des gains',
+    'releve 1', 'releve 31', 'releve d identite bancaire',
+  ].forEach((t) => assert.strictEqual(pur.estReleveDePaie_(t), false, 'jamais une paie : ' + t));
+  // …mais le cas RÉEL des 7 fichiers (type exactement « Relevé ») reste couvert.
+  assert.strictEqual(pur.estReleveDePaie_('releve'), true);
+  assert.strictEqual(pur.estReleveDePaie_('releves'), true);
+  // Bout en bout : le ROE n'est plus routé, ni par la mission ni par le flux.
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  const ctx = { employeurParSource: (function () { const m = {}; m[IDS.employeurB] = 'Betatek'; return m; })(), techniqueId: 'TECH' };
+  const roe = '2023-05_Relevé d\'emploi_Betatek.pdf';
+  const r = pur.routerCarriere_(roe, { sourceId: IDS.employeurB, sousChemin: '' }, ctx);
+  assert.ok(!r || r.cibleParentId !== IDS.revenusPaie, 'le ROE ne part pas en 02 : ' + JSON.stringify(plain(r)));
+  assert.notStrictEqual(pur.cheminCibleReset_('02 · Finances', roe), 'Revenus & paie/Betatek');
+});
+
+test('sousDossierEmployeur_ : normalise LUI-MÊME (2 consommateurs, 2 normalisations amont)', () => {
+  // Le flux passe par `normaliserCle_`, qui GARDE les traits d'union ; la mission par
+  // `normaliserMission_`, qui les ramène à un espace. Sans normalisation interne, le même
+  // document recevait deux sous-dossiers différents ⇒ la consolidation « Déplacerait » ce que la
+  // mission vient de ranger. C'est le prédicat VOISIN de celui qu'on venait de mutualiser.
+  assert.strictEqual(pur.sousDossierEmployeur_('attestation employeur'), 'Attestations & lettres');
+  assert.strictEqual(pur.sousDossierEmployeur_('attestation-employeur'), 'Attestations & lettres');
+  assert.strictEqual(pur.sousDossierEmployeur_('contrat-de-travail'), 'Contrats');
+  assert.strictEqual(pur.sousDossierEmployeur_('badge'), '');
+});
+
+test('ADR-0044 §6 (cible révisée ADR-0052 D7) : formulaires GÉNÉRIQUES → « Contrats », APRÈS les règles par entité', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const D = '03 · Logement & véhicule';
+  const d03 = c.tableMissions_().filter((m) => m.tag === 'dispatch03')[0];
+  const ctx = { themePar: {}, themeVehiculePar: {}, logements: [
+    { nom: '1202 rte Fictive Rivage', id: 'l3987', jetons: ['1202', 'rivage'] },
+  ], fenetres: [] };
+  const infoC = { sourceId: c.CONFIG.MISSIONS_IDS.contrats03, sousChemin: '' };
+  // D7 : le nœud « Modèles & formulaires » a cédé sa place à « Travaux & équipements » ; ce qui
+  // compte reste que la mission et le FLUX visent la MÊME cible — c'est l'objet de ce test.
+  const attendu = { cibleParentId: c.CONFIG.DOMAINES[D], cibleNom: 'Contrats', sousDossier: '' };
+
+  // Les 8 fichiers RÉELS de `03 · Contrats` (4 CORPIQ, 2 XA8, 2 Gestionnaire R).
+  // ⚠️ « Immeubles XA8 » ne figure PLUS ici : Marc a donné son adresse le 2026-08-20, il est entré
+  // dans `MISSIONS_BAILLEURS`, et ses formulaires partent donc chez le BAILLEUR. C'est très
+  // exactement la propriété « le spécifique gagne » que ce test vérifie plus bas — le scénario
+  // hypothétique de l'ADR §6.2 s'est réalisé le jour même.
+  ['2018-10-15_Formulaire de demande de location_CORPIQ.pdf',
+    '2026-06-29_Formulaire de consentement communication électronique_Gestionnaire R.pdf',
+  ].forEach((nom) => {
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(d03.router(nom, infoC, ctx))), attendu, 'MISSION — ' + nom);
+    // ADR-0080 : `03/Contrats` retiré côté flux (`null` en absence d'adresse/bailleur).
+    assert.strictEqual(c.cheminCibleReset_(D, nom), null, 'FLUX (sans Contrats racine) — ' + nom);
+  });
+
+  // 🔴 LE SPÉCIFIQUE GAGNE : un formulaire ATTRIBUABLE part chez son entité, jamais dans les
+  // modèles. C'est ce qui rend la règle sûre — sinon elle volerait des documents identifiables.
+  const attribuable = '2024-05-01_Formulaire de demande de location_9333-4444 Québec inc.pdf';
+  assert.strictEqual(c.cheminCibleReset_(D, attribuable), 'Logement/1202 rte Fictive Rivage',
+    'le bailleur connu gagne sur le filet « modèles »');
+  const rA = d03.router(attribuable, infoC, ctx);
+  assert.strictEqual(rA && rA.cibleId, 'l3987', 'idem côté mission');
+
+  // Le prédicat est ancré sur le MOT et normalise lui-même (2 consommateurs, 2 normalisations).
+  assert.strictEqual(c.estModeleOuFormulaire_('formulaire de consentement'), true);
+  assert.strictEqual(c.estModeleOuFormulaire_('formulaire-de-consentement'), true);
+  assert.strictEqual(c.estModeleOuFormulaire_('contrat de bail'), false);
+  assert.ok(c.estModeleOuFormulaire_('Formulaire de dépôt de garantie'));
+  assert.strictEqual(c.cheminCibleReset_(D, '2023-05-27_Formulaire de dépôt de garantie_CORPIQ.pdf'),
+    null, 'FLUX — 03 sans Contrats racine');
+});
+
+test('ADR-0044 §7 : les dossiers-années de 02 sortent vers leur VRAI domaine, cible calculée par LE FLUX', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const D = JSON.parse(JSON.stringify(c.CONFIG.DOMAINES));
+  const ids = {}; Object.keys(D).forEach((k) => { ids[k] = D[k]; });
+  ids['07 · Santé'] = 'ID07';  // domaine AUTO : ID en Property, simulé PRÉSENT ici
+  const inv = {}; Object.keys(ids).forEach((k) => { inv[ids[k]] = k; });
+
+  // 12 des 22 noms RÉELS des 12 dossiers-années (lus dans le Drive, jamais un échantillon) :
+  // choisis pour traverser CHAQUE domaine de sortie et chaque famille, pas pour faire du nombre.
+  const cas = [
+    ['01 · Administratif & identité', '2025-09-04_Contrat d\'adhésion et financement appareil_Mobile Boreale.pdf'],
+    ['01 · Administratif & identité', '2023-11-01_Accusé de réclamation_Boreale.png'],
+    ['01 · Administratif & identité', '2022-12-14_Conditions générales de vente_Fournisseury GmbH.pdf'],
+    ['05 · Carrière', '2026-03-09_Statuts de société civile_PRIGRIS.pdf'],
+    ['05 · Carrière', '2026-03-09_Statuts de société civile_Statuts constitutifs SCI famille Exemple.pdf'],
+    ['05 · Carrière', '2026-06-29_Statuts de constitution_Statuts de constitution société civile familiale MRic.pdf'],
+    ['07 · Santé', '2025-11-15_Attestation de versement_Régime de santé étranger.pdf'],
+    ['02 · Finances', '2026-01-01_Budget prévisionnel_Budget prévisionnel annuel Marc Anna prorata'],
+    ['02 · Finances', '2026-07-06_Suivi de livraison_DoorDash.jpg'],
+    ['02 · Finances', '2025-06-01_Avenant aux conditions générales_CourtierX S.A..pdf'],
+    ['02 · Finances', '2026-07-01_Confirmation de virement_Crédit Mutuel.jpg'],
+    ['02 · Finances', '2025-12-31_Formulaire T9999 — Bilan de vérification du revenu étranger_Agence du revenu du Canada.pdf'],
+  ];
+  cas.forEach(([domaineAttendu, nom]) => {
+    const r = c.routerFinance02_(nom, ids);
+    assert.ok(r, 'doit être rangé : ' + nom);
+    assert.strictEqual(inv[r.cibleId], domaineAttendu, 'domaine de ' + nom);
+    assert.strictEqual(c.cheminCibleReset_(domaineAttendu, nom), r.sousDossier, 'cible = celle du flux : ' + nom);
+  });
+
+  // Ambigu ⇒ REFUS keyé (révisable), jamais un mouvement inter-domaines deviné.
+  assert.strictEqual(c.routerFinance02_('2021-07-21_Note de frais_Roque Rodriguez.ods', ids), null);
+
+  // 🔴 ÉCHEC FERMÉ : un domaine AUTO dont l'ID est ABSENT (domaine jamais né) ne doit produire
+  // AUCUN déplacement — `CONFIG.DOMAINES` ne contient que les 7 domaines FIXES, lire la CONFIG
+  // seule rendait `undefined` et aurait planté au `moveTo`.
+  const sans07 = {}; Object.keys(D).forEach((k) => { sans07[k] = D[k]; });
+  assert.strictEqual(
+    c.routerFinance02_('2025-11-15_Attestation de versement_Régime de santé étranger.pdf', sans07),
+    null, 'domaine AUTO sans ID ⇒ refus, jamais un cibleId vide');
+
+  // Le domaine ne se devine pas non plus quand deux règles se contredisent.
+  assert.strictEqual(c.domaineHors02DuNom_('2024-01-01_Contrat_Mobile Boreale et MRic.pdf'), '');
+  // …et le préfixe de date n'est jamais apparié (jetons alphabétiques uniquement).
+  (JSON.parse(JSON.stringify(c.CONFIG.MISSIONS_ANNEES02_DOMAINES))).forEach((r) => {
+    (r.jetons || []).forEach((j) => assert.match(j, /^[a-z]+$/, 'jeton alphabétique : ' + j));
+  });
+});
+
+test('ADR-0044 §7 : un sous-chemin MULTI-SEGMENTS crée un dossier PAR segment (jamais un nom à barre oblique)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  // Mock qui ENREGISTRE chaque résolution : le mock d'origine concatène parent + '/' + nom, donc
+  // un chemin non découpé produirait la MÊME chaîne finale qu'un découpage correct — l'identifiant
+  // ne prouve rien, seul le NOMBRE d'appels distingue les deux (la mutation le montre).
+  const segments = [];
+  const vraiSous = h.c.sousDossier_;
+  h.c.sousDossier_ = (parent, nom) => { segments.push(nom); return vraiSous(parent, nom); };
+
+  const annee = (IDS.annees02 || [])[0];
+  h.arbre[annee.id] = { files: [h.fichier('fv', '2026-06-05_Facture_OpenAI.pdf')], folders: {} };
+  h.c.executerMission_('annees02', () => false);
+
+  assert.strictEqual(h.moves.length, 1, 'le document sort de son dossier-année');
+  assert.deepStrictEqual(segments, ['Reçus & factures', '2026', 'Abonnements SaaS & API'],
+    'un appel PAR segment — jamais un seul nom de dossier avec barre oblique');
+  assert.strictEqual(h.moves[0].vers,
+    h.c.CONFIG.DOMAINES['02 · Finances'] + '/Reçus & factures/2026/Abonnements SaaS & API');
+});
+
+test('ADR-0044 §7 : « courtierx » est apparié en MOT ENTIER (une banque nommée NCourtierxBank n\'est pas du courtage)', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const D = '02 · Finances';
+  assert.strictEqual(c.cheminCibleReset_(D, '2025-06-01_Avenant aux conditions générales_CourtierX S.A..pdf'),
+    'Placements & crypto', 'le vrai courtier est reconnu');
+  // Contre-épreuve : en SOUS-CHAÎNE, « ncourtierxbank » contient « courtierx » — un relevé bancaire partirait
+  // dans les placements, à clé de SUCCÈS, donc définitivement.
+  assert.notStrictEqual(c.cheminCibleReset_(D, '2025-06-01_Relevé de compte_NCourtierxBank.pdf'),
+    'Placements & crypto', 'un mot CONTENANT courtierx ne doit pas matcher');
+  assert.strictEqual(c.resetMotEntier_('releve de compte ncourtierxbank', 'courtierx'), false);
+  assert.strictEqual(c.resetMotEntier_('conditions generales de courtage courtierx s a', 'courtierx'), true);
+});
+
+test('ADR-0044 §7 : dans 02, LE FLUX FAIT AUTORITÉ — les règles locales ne passent jamais avant', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const D = JSON.parse(JSON.stringify(c.CONFIG.DOMAINES));
+  const ids = {}; Object.keys(D).forEach((k) => { ids[k] = D[k]; });
+  const IDS = c.CONFIG.MISSIONS_IDS;
+  const dest = (r) => {
+    if (!r) return null;
+    if (r.cibleId === ids['02 · Finances']) return r.sousDossier;
+    if (r.cibleParentId === IDS.revenusPaie) return 'Revenus & paie/' + r.cibleNom + (r.sousDossier ? '/' + r.sousDossier : '');
+    if (r.cibleParentId === IDS.impotsDeclarations) return 'Impôts & déclarations/' + r.cibleNom + (r.sousDossier ? '/' + r.sousDossier : '');
+    if (r.cibleId === IDS.releves02) return 'Relevés/' + r.sousDossier;
+    if (r.cibleId === IDS.recusFactures02) return 'Reçus & factures/' + r.sousDossier;
+    if (r.cibleId === IDS.assurances02) return 'Assurances & prévoyance';
+    return 'HORS 02';
+  };
+  // ⚠️ Ce test verrouille l'ORDRE, pas une égalité de façade. Le premier tripwire écrit pour PR4
+  // était TAUTOLOGIQUE (il comparait `cheminCibleReset_(X,n)` avec lui-même) et restait vert sous
+  // mutation — la revue l'a prouvé. Ici les cas traversent les 5 branches LOCALES : si elles
+  // repassent devant le flux, elles imposent leur propre arbitrage et ces égalités tombent.
+  [
+    '2023-04_Relevé_Betatek.pdf',                        // D9 : relevé de PAIE, pas bancaire
+    '2024-03_Relevé d\'impôt_Revenu Québec.pdf',             // fiscal, pas un relevé de compte
+    '2024-06_Assurance_Bellerives.pdf',                     // assurance émise par une BANQUE
+    '2023-11_Facture_Bellerives Assurance.pdf',             // facture d'un ASSUREUR
+    '2025-06-01_Facture_CourtierX S.A..pdf',                      // facture d'un COURTIER = dépense
+    '2025-11_Paie_Alphatek Inc..pdf',
+    '2025-02_Relevé 1_Alphatek.pdf',
+    '2024-03_Relevé de compte_Banque CMF.pdf',
+    '2023-05-01_Facture_Hydro.pdf',
+    '2024-05_Relevé d\'identité bancaire_CMF.pdf',
+  ].forEach((nom) => {
+    assert.strictEqual(dest(c.routerFinance02_(nom, ids)),
+      c.cheminCibleReset_('02 · Finances', nom), 'le flux fait autorité : ' + nom);
+  });
+
+  // 🔴 GARDE (a) — ce que 02 sait placer ne SORT JAMAIS. Une première version listait les types
+  // réservés (paie/fiscal/RIB) et laissait filer « Avis d'imposition_SCI MRic » vers 05 sur le
+  // seul jeton « mric » : un avis d'imposition dans les documents de société, à clé de SUCCÈS.
+  [['2024-09_Avis d\'imposition_SCI MRic.pdf', 'Impôts & déclarations/2024'],
+    ['2025-02_Relevé 1_MRic.pdf', 'Impôts & déclarations/2025'],
+    ['2025-11_Paie_MRic.pdf', 'Revenus & paie'],
+    ['2015-05-12_Déclaration de revenus fonciers_PRIGRIS.pdf', 'Impôts & déclarations/2015'],
+    ['2025-04_Relevé d\'identité bancaire_Mobile Boreale.pdf', 'Banques/Autres'],
+    // 🔴 Vocabulaire fiscal, désormais porté par UNE règle partagée (`estTypeFiscalReset_`). Ces
+    // trois noms partaient chez les relevés BANCAIRES tant que l'exclusion ne portait que sur
+    // « impôt » — verdict POSITIF donc définitif. La garde par CAPACITÉ n'est complète que si la
+    // règle partagée est juste : elle hérite de ses fautes en silence.
+    ['2024-03_Relevé fiscal_Bellerives.pdf', 'Impôts & déclarations/2024'],
+    ['2024-03_Relevé annuel fiscal_MUTA.pdf', 'Impôts & déclarations/2024'],
+    ['2024-03_Relevé de cotisation_URSSAF.pdf', 'Impôts & déclarations/2024'],
+    // …sans SUR-capture : « déclaration » seul n'est pas fiscal (sinistre), et un relevé de compte
+    // reste un relevé de compte.
+    ['2024-01_Relevé de déclaration de sinistre_MUTA.pdf', 'Relevés/2024'],
+    ['2024-03_Relevé de compte_Banque CMF.pdf', 'Relevés/2024'],
+    // Noms HORS CONVENTION : la matière même du reset. Restreindre les motifs bancaires au seul
+    // segment TYPE les perdait tous — la POSITION du bloc suffisait à empêcher le vol.
+    ['Confirmation de virement CMF.pdf', 'Banques/Autres'],
+    ['2024-01_Contrat_Simulation de prêt Banque X.pdf', 'Banques/Autres'],
+  ].forEach(([nom, attendu]) => {
+    assert.strictEqual(dest(c.routerFinance02_(nom, ids)), attendu, 'reste en 02 : ' + nom);
+  });
+
+  // 🔴 GARDE (b) — un domaine PROTÉGÉ (§2.1b) n'est JAMAIS une cible, dans les DEUX sens.
+  assert.ok((c.CONFIG.DOMAINES_PROTEGES || []).indexOf('04 · Immigration') !== -1);
+  const spec = c.tableMissions_().filter((m) => m.tag === 'annees02')[0];
+  c.PropertiesService = { getScriptProperties: () => ({ getProperty: () => null }) };
+  c.DriveApp = { getFolderById: () => ({ getId: () => 'x', getFolders: () => ({ hasNext: () => false }) }) };
+  const ctx = spec.batirCtx();
+  assert.ok(!ctx.domainesId['04 · Immigration'], '04 absent de la carte des cibles');
+  assert.ok(ctx.domainesId['02 · Finances'], '…mais les domaines ordinaires y sont');
+  // …et le routeur refuse même si un appelant lui passait 04 de force.
+  const table = JSON.parse(JSON.stringify(c.CONFIG.MISSIONS_ANNEES02_DOMAINES));
+  assert.ok(table.every((r) => (c.CONFIG.DOMAINES_PROTEGES || []).indexOf(r.domaine) === -1),
+    'aucune entrée de la table ne vise un domaine protégé');
+  // La table ne nomme PAS 04 aujourd'hui — donc pour EXERCER la garde il faut l'y mettre. Sans ça
+  // le test ne prouve rien : la mutation qui retire la garde reste verte (constaté).
+  const vraieTable = c.CONFIG.MISSIONS_ANNEES02_DOMAINES;
+  try {
+    c.CONFIG.MISSIONS_ANNEES02_DOMAINES = [{ domaine: '04 · Immigration', jetons: ['ircc'], motifs: [] }];
+    assert.strictEqual(c.domaineHors02DuNom_('2020-01-01_Correspondance_IRCC.pdf'), '04 · Immigration',
+      'la table nomme bien 04 dans ce contexte de test');
+    assert.strictEqual(dest(c.routerFinance02_('2020-01-01_Correspondance_IRCC.pdf',
+      { '02 · Finances': ids['02 · Finances'], '04 · Immigration': 'ID04' })), null,
+      '§2.1b : un domaine PROTÉGÉ n\'est JAMAIS une cible, même si la CONFIG le nomme');
+  } finally { c.CONFIG.MISSIONS_ANNEES02_DOMAINES = vraieTable; }
+
+  // 🔴 GARDE — « boreale » est une marque OMBRELLE : le billet d'avion ne part pas chez le télécom.
+  assert.strictEqual(c.domaineHors02DuNom_('2019-08-12_Billet_Boreale Atlantic.pdf'), '');
+  // 🔴 Deux correctifs livrés SANS verrou au premier jet — leurs mutations restaient vertes.
+  // `resetMotEntier_` construit une RegExp depuis son argument : sans échappement « a.c » apparie
+  // « abc ». Et « m ric » en sous-chaîne apparie « Wilhelm Ricard ».
+  assert.strictEqual(c.resetMotEntier_('abc', 'a.c'), false, 'métacaractère ÉCHAPPÉ');
+  assert.strictEqual(c.resetMotEntier_('mandat de courtage', 'courtage'), true);
+  assert.strictEqual(c.cheminCibleReset_('05 · Carrière', '2024-01_Lettre_Wilhelm Ricard.pdf'), null,
+    '« m ric » n\'apparie plus « wilhelm ricard » : jeton ANCRÉ');
+  assert.strictEqual(c.cheminCibleReset_('05 · Carrière', '2024-01_Lettre_MRic.pdf'), 'Entreprise — MRic (SCI)');
+  assert.strictEqual(c.domaineHors02DuNom_('2019-08-12_Contrat_Mobile Boreale.pdf'), '01 · Administratif & identité');
+  // Les motifs aussi sont alphabétiques (sinon un motif numérique apparierait un résidu de date).
+  table.forEach((r) => {
+    (r.jetons || []).forEach((j) => assert.match(j, /^[a-z]+$/, 'jeton : ' + j));
+    (r.motifs || []).concat(r.exclusions || []).forEach((m) => assert.match(m, /^[a-z ]+$/, 'motif : ' + m));
+  });
+});
+
+test('ADR-0044 §7 : batirCtx lit VRAIMENT la Property des domaines AUTO (échec fermé si absente)', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const spec = c.tableMissions_().filter((m) => m.tag === 'annees02')[0];
+  c.DriveApp = { getFolderById: () => ({ getId: () => 'x', getFolders: () => ({ hasNext: () => false }) }) };
+  // ⚠️ La vraie fonction est EXERCÉE ici : les autres tests injectent `domainesId` à la main, donc
+  // ils ne verraient jamais une faute de frappe dans la clé — la RSE serait refusée EN SILENCE
+  // (patron `RapportPaies`, §9 : « un test qui mocke la fonction sous test ne voit pas son bug »).
+  const lues = [];
+  c.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => { lues.push(k); return k === 'DriveAI_DOM_07 · Santé' ? 'ID07' : null; },
+  }) };
+  const ctx = spec.batirCtx();
+  assert.ok(lues.indexOf('DriveAI_DOM_07 · Santé') !== -1, 'clé exacte, préfixe compris');
+  assert.strictEqual(ctx.domainesId['07 · Santé'], 'ID07');
+  const rse = '2025-11-15_Attestation de versement_Régime de santé étranger.pdf';
+  assert.strictEqual(c.routerFinance02_(rse, ctx.domainesId).cibleId, 'ID07');
+
+  // Property ABSENTE (domaine jamais né) ⇒ refus, JAMAIS un cibleId vide qui planterait au moveTo.
+  c.PropertiesService = { getScriptProperties: () => ({ getProperty: () => null }) };
+  assert.ok(!spec.batirCtx().domainesId['07 · Santé']);
+  assert.strictEqual(c.routerFinance02_(rse, spec.batirCtx().domainesId), null);
+
+  // Properties EN PANNE ⇒ on dégrade aux domaines fixes, sans lever (l'intake ne doit pas mourir).
+  c.PropertiesService = { getScriptProperties: () => { throw new Error('panne'); } };
+  const degrade = spec.batirCtx();
+  assert.ok(degrade.domainesId['02 · Finances'] && !degrade.domainesId['07 · Santé']);
+});
+
+test('ADR-0044 §7 : il n\'y a PAS de repli local dans 02 — le flux couvre tout ce qu\'il couvrait', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  // Le repli local (paie, fiscal, relevés, reçus, assurances, année du dossier SOURCE) a été
+  // RETIRÉ : mesuré après la restructuration, il était productif sur 0 cas sur 11 — ses règles
+  // sont un sous-ensemble STRICT de celles du flux, qui passe désormais en premier. Ce test
+  // verrouille la propriété qui rend ce retrait sûr : si quelqu'un rouvre un trou dans le flux,
+  // il l'apprend ici plutôt que par un fichier laissé en plan.
+  ['2024-01_Paie_X.pdf', '2024-01_Relevé_X.pdf', '2024-01_Reçu_X.pdf', '2024-01_Facture_X.pdf',
+    '2024-01_Assurance_X.pdf', '2024-01_Relevé d\'identité bancaire_X.pdf',
+    '2024-01_Avis de cotisation_ARC.pdf', '2024-01_Feuillet T4_Alphatek.pdf',
+  ].forEach((nom) => {
+    assert.ok(c.cheminCibleReset_('02 · Finances', nom),
+      'le flux DOIT couvrir ce que le repli couvrait : ' + nom);
+  });
+  // …et la RSE reste de la SANTÉ : 02 ne la revendique pas, sinon l'étage 1 la garderait.
+  assert.strictEqual(c.cheminCibleReset_('02 · Finances',
+    '2025-11-15_Attestation d\'assurance_Régime de santé étranger.pdf'), null);
+  assert.strictEqual(c.cheminCibleReset_('07 · Santé',
+    '2025-11-15_Attestation d\'assurance_Régime de santé étranger.pdf'), 'Assurances santé');
+  // « Boreale » : la deny-list vaut pour le FLUX aussi, et « Boreale Mobile » EST du télécom.
+  assert.strictEqual(c.cheminCibleReset_('01 · Administratif & identité', '2019-08_Billet_Boreale Atlantic.pdf'), null);
+  assert.strictEqual(c.cheminCibleReset_('01 · Administratif & identité', '2019-08_Contrat_Boreale Mobile.pdf'),
+    'Attestations & contrats');
+});
+
+test('ADR-0044 §7 (revue finale) : le vocabulaire fiscal par LOCUTIONS, et la RSE hors de 02', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const f = (n) => c.cheminCibleReset_('02 · Finances', n);
+  // 🔴 Le PLURIEL manquait : « relevé de cotisationS » est la forme la plus courante (URSSAF,
+  // mutuelles) et partait chez les relevés BANCAIRES, à clé de SUCCÈS.
+  assert.strictEqual(f('2024-03_Relevé de cotisations_URSSAF.pdf'), 'Impôts & déclarations/2024');
+  assert.strictEqual(f('2024-03_Relevé de cotisation_URSSAF.pdf'), 'Impôts & déclarations/2024');
+  assert.strictEqual(f('2024-01_Avis de cotisation_ARC.pdf'), 'Impôts & déclarations/2024');
+  // …et « déclaration DES revenus » (la graphie de la DGFiP) rendait null, donc du vrac.
+  assert.strictEqual(f('2024-04-25_Déclaration des revenus 2023_DGFiP.pdf'), 'Impôts & déclarations/2024');
+  // 🔴 « cotisation » NU est banni : il volait les appels de prime d'ASSURANCE.
+  assert.notStrictEqual(f('2025-06_Appel de cotisation_Fidelia-MUTA.pdf'), 'Impôts & déclarations/2025');
+  // …et « déclaration » nu reste banni : un sinistre n'est pas fiscal.
+  assert.strictEqual(f('2024-01_Relevé de déclaration de sinistre_MUTA.pdf'), 'Relevés/2024');
+  // 🔴 La RSE est écartée EN TÊTE : conditionner « 02 ne la revendique pas » à sept règles amont
+  // faisait partir un « Appel de cotisation » chez les impôts et un « Bordereau de cotisations »
+  // vers 07 — deux destins pour la même caisse, à un pluriel près.
+  ['2026-01-12_Appel de cotisation_Régime de santé étranger.pdf',
+    '2026-01-12_Bordereau de cotisations_Régime de santé étranger.pdf',
+    '2025-11-15_Attestation de versement_Régime de santé étranger.pdf',
+  ].forEach((n) => {
+    assert.strictEqual(f(n), null, '02 ne revendique JAMAIS la RSE : ' + n);
+    assert.ok(c.cheminCibleReset_('07 · Santé', n), 'et 07 sait la placer : ' + n);
+  });
+  // Deny-list « Boreale » : UNE table, lue par les deux consommateurs (jamais recopiée).
+  // (comparaison par VALEUR : les tableaux viennent de deux realms VM différents)
+  assert.strictEqual(JSON.stringify(c.exclusionsSortie02_('boreale')),
+    JSON.stringify(JSON.parse(JSON.stringify(c.CONFIG.MISSIONS_ANNEES02_DOMAINES))
+      .filter((r) => (r.jetons || []).indexOf('boreale') !== -1)[0].exclusions),
+    'la deny-list du flux est LUE dans la table, jamais recopiée');
+  assert.strictEqual(c.cheminCibleReset_('01 · Administratif & identité', '2019-08_Billet_Boreale Atlantic.pdf'), null);
+});
+
+test('C28-64 : la mission des dossiers-années est PERPÉTUELLE (le flux les re-remplit)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  const annee = (IDS.annees02 || [])[0];
+  h.arbre[annee.id] = { files: [h.fichier('fv', '2025-09-04_Contrat d\'adhésion_Mobile Boreale.pdf')], folders: {} };
+
+  // Un drapeau FINI RÉSIDUEL (écrit sous une version antérieure, ou par un aller-retour du flag
+  // `perpetuelle`) ne doit pas la geler : la garde d'entrée l'ignore explicitement.
+  h.store['DriveAI_MISSION_FINI_annees02'] = h.c.CONFIG.MISSIONS_REGLES_VERSION;
+  h.c.executerMission_('annees02', () => false);
+  assert.strictEqual(h.moves.length, 1, 'elle draine MALGRÉ un drapeau FINI résiduel');
+  delete h.store['DriveAI_MISSION_FINI_annees02'];
+
+  // Passe suivante : plus rien à traiter. Une mission ORDINAIRE poserait son drapeau et
+  // s'arrêterait — celle-ci ne DOIT pas, sinon le nettoyage se défait en silence quand le flux
+  // recrée `02 · Finances/AAAA` (`DOMAINES_PAR_ANNEE`).
+  h.c.executerMission_('annees02', () => false);
+  assert.ok(!h.store['DriveAI_MISSION_FINI_annees02'], 'JAMAIS de drapeau de convergence');
+  assert.strictEqual(h.peints.length, 0, 'JAMAIS peinte en rouge : les sources vont se re-remplir');
+
+  // …et elle repart : un fichier déposé après la passe à vide est bien traité.
+  h.arbre[annee.id] = { files: [h.fichier('fw', '2025-06-01_Avenant_CourtierX S.A..pdf')], folders: {} };
+  h.c.executerMission_('annees02', () => false);
+  assert.strictEqual(h.moves.length, 2, 'une passe à vide ne l\'arrête pas');
+
+  // 🔴 Corollaire NON négociable : aucune mission ne doit être gatée sur elle — elle n'écrira
+  // jamais son drapeau, donc l'aval serait bloqué À VIE (« un statut terminal ne peut pas servir
+  // de signal d'occupation », leçon C28-32, vue par l'autre bout).
+  h.c.tableMissions_().forEach((spec) => {
+    assert.ok((spec.convergenceApres || []).indexOf('annees02') === -1,
+      'aucune mission ne peut attendre la convergence d\'une PERPÉTUELLE (ici : ' + spec.tag + ')');
+  });
+});
+
+test('ADR-0044 : contrat de vente sans véhicule nommé → le commun ; XA8 = 1201 rue Exemple Alpha', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const D = '03 · Logement & véhicule';
+  // Décision Marc : le contrat « Concessionnaire X » est un achat NON abouti.
+  assert.strictEqual(c.cheminCibleReset_(D, '2023-06-20_Contrat de vente véhicule d\'occasion_Concessionnaire X.jpg'),
+    'Véhicule/Recherche & achat');
+  // …mais un véhicule NOMMÉ garde la priorité, et un contrat de vente IMMOBILIER n'est pas volé.
+  assert.strictEqual(c.cheminCibleReset_(D, '2023-06-20_Contrat de vente véhicule d\'occasion_VW Modelb.jpg'),
+    'Véhicule/VW Modelb/Achat, immatriculation & entretien');
+  // (un contrat de vente d'`Immeubles XA8` part chez le BAILLEUR depuis que Marc a donné son
+  // adresse — c'est bien un document de son logement, pas un contrat générique.)
+  assert.strictEqual(c.cheminCibleReset_(D, '2024-01_Contrat de vente_Immeubles XA8.pdf'),
+    'Logement/1201 rue Exemple Alpha');
+  // Un contrat de vente immobilier d'un TIERS, lui, n'est pas volé par la règle véhicule (aucun Contrats racine en 03).
+  assert.strictEqual(c.cheminCibleReset_(D, '2024-01_Contrat de vente_Notaire Tremblay.pdf'), null);
+  // Réponse de Marc : `Immeubles XA8` est le bailleur du 1201 — son DPA et ses formulaires suivent.
+  assert.strictEqual(c.cheminCibleReset_(D, '2025-06-03_Formulaire d\'adhésion au débit préautorisé (DPA)_Immeubles XA8.pdf'),
+    'Logement/1201 rue Exemple Alpha');
+  assert.strictEqual(c.cheminCibleReset_(D, '2018-10-15_Formulaire de demande de location_Immeubles XA8_2.pdf'),
+    'Logement/1201 rue Exemple Alpha', 'le SPÉCIFIQUE gagne : chez le bailleur, plus dans les modèles');
+});
+
+test('C28-65 : le dossier SOURCE ne fait plus foi contre le DOCUMENT (véto logement)', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  const IDS = c.CONFIG.MISSIONS_IDS;
+  const spec = c.tableMissions_().filter((m) => m.tag === 'vehicule')[0];
+  const ctx = { fenetres: [], fenetresCompletes: true };
+  // Ces deux-là dormaient dans `Véhicules/Recherche & achat` : le raccourci « le sous-dossier
+  // source porte le nom d'un commun » les a emportées vers `Véhicule/Recherche & achat`, à clé de
+  // SUCCÈS donc définitivement. Une règle qui route PAR DOSSIER SOURCE hérite des erreurs de
+  // rangement de la source — elle doit céder devant un indice tiré du document.
+  const info = { sourceId: IDS.vehiculesPluriel, sousChemin: 'Recherche & achat' };
+  ['2026-07-06_Capture d\'écran échange SMS_Échange SMS proprio fuite bec de bain plombier visite appartement.jpg',
+    '2024-08-31_Capture d\'écran de conversation SMS_Messages propriétaire visite appartement et coupure internet.jpg',
+  ].forEach((nom) => assert.strictEqual(spec.router(nom, info, ctx), null, 'véto logement : ' + nom));
+
+  // …sans jamais gêner un vrai document de véhicule venu du MÊME dossier source.
+  ['2026-07-01_Annonce de vente_Annonce vente Marquex Modelx 2014 Shawinigan.jpg',
+    '2026-07-01_Reçu de service_Marqued Ste-Foy.jpg',
+    '2026-07-31_Tableau comparatif_Comparatif prix véhicules d\'occasion Mazda Marqued Marquex.xlsx',
+  ].forEach((nom) => assert.ok(spec.router(nom, info, ctx), 'reste rangé : ' + nom));
+
+  // MOT ENTIER, préfixe de date retiré : pas de faux positif par sous-chaîne.
+  assert.strictEqual(c.estDocumentLogement_('2024-01-01_Facture_Garage'), false);
+  assert.strictEqual(c.estDocumentLogement_('2024-01-01_Bail_ALPHAIMMO'), true);
+  assert.strictEqual(c.estDocumentLogement_('2024-01-01_Contrat_Bailleur X'), false, '« bailleur » ⊅ « bail »');
+
+  // ⚠️ PORTÉE LIMITÉE, assumée : 2 des 4 fichiers réels ne portent AUCUN mot de logement — la
+  // règle ne peut RIEN pour eux, et c'est pour ça que `CORRECTIONS_MANUELLES` existe.
+  assert.strictEqual(c.estDocumentLogement_('2026-07-06_Capture d\'écran de message_Jean-Paul Verlaine.jpg'), false);
+  const corr = JSON.parse(JSON.stringify(c.CONFIG.CORRECTIONS_MANUELLES || []));
+  assert.strictEqual(corr.length, 4, 'les 4 fichiers sont déclarés, décision de Marc');
+  corr.forEach((x) => {
+    assert.match(x.id, /^[A-Za-z0-9_-]{20,}$/, 'un identifiant Drive réel');
+    assert.strictEqual(x.cible, c.CONFIG.MISSIONS_IDS.correspondance03, 'cible = 03/Correspondance');
+    assert.ok(x.quoi && x.quoi.length > 10, 'la RAISON est écrite : ce mécanisme déplace par identité');
+  });
+});
+
+test('C28-65 : le véto logement ne bloque PAS le vocabulaire véhicule (bail/loyer/propriétaire)', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Reset.gs', 'Missions.gs']);
+  // 🔴 Au Québec « bail » et « loyer » sont le vocabulaire STANDARD d'une location longue durée de
+  // voiture, « propriétaire » est le mot de la SAAQ, et « immeuble » vit dans l'adresse d'un
+  // assureur. Le premier jet les opposait sans réserve et bloquait de vrais documents de véhicule.
+  [['2022-03-10_Contrat de location longue durée_Loyer mensuel véhicule Peugeot 208.pdf', false],
+    ['2021-09-01_Attestation_Transfert de propriétaire véhicule SAAQ.pdf', false],
+    ['2024-06-06_Assurance auto_Immeuble Bellerives.pdf', false],
+    // ⚠️ LIMITE assumée : l'échappatoire exige un mot GÉNÉRIQUE de véhicule (« véhicule », « auto »,
+    // « voiture »). « Bail_Hyundai Elantra » n'en a aucun — une liste de MARQUES serait le retour
+    // du piège « Avis » (ADR-0044), donc le véto s'applique et le fichier est REFUSÉ. C'est le bon
+    // côté de l'asymétrie : un refus coûte un ré-examen, un faux positif coûte un document égaré.
+    ['2023-05-01_Bail_Hyundai Elantra 2019.pdf', true],
+    // …mais un mot AMBIGU sans aucun mot de véhicule reste un véto.
+    ['2024-01-01_Bail_Groupe Immobilier Alphaimmo.pdf', true],
+    ['2024-01-01_Quittance_Loyer de janvier.pdf', true],
+    // …et les mots SÛRS valent véto en toute circonstance.
+    ['2026-07-06_SMS_proprio plombier visite appartement.jpg', true],
+    ['2024-01-01_Attestation_Locataire.pdf', true],
+  ].forEach(([nom, attendu]) => assert.strictEqual(c.estDocumentLogement_(nom), attendu, nom));
+});
+
+test('C28-65 : les corrections manuelles DÉLÈGUENT la mutation, et respectent l\'épingle de Marc', () => {
+  const h = ctxRunner();
+  const c = h.c;
+  const tag = c.CONFIG.CORRECTIONS_MANUELLES_TAG;
+  const cible = c.CONFIG.MISSIONS_IDS.correspondance03;
+  const appels = [];
+  // On mocke le déplacement DÉLÉGUÉ : ce test vérifie le PILOTE (idempotence, épingle, statuts),
+  // pas la mutation — celle-ci a ses propres tests (chat-reorg.test.js), et c'est justement
+  // l'intérêt de déléguer plutôt que d'écrire un second chemin de mutation.
+  c.appliquerDeplacerFichier_ = (a) => { appels.push(a); return { statut: 'appliqué' }; };
+  c.ensembleDomainesProteges_ = () => ({});
+  c.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => h.store[k] || null,
+    setProperty: (k, v) => { h.store[k] = v; },
+  }) };
+
+  c.appliquerCorrectionsManuelles_(() => false);
+  assert.strictEqual(appels.length, 4, 'les 4 corrections déclarées sont déléguées');
+  appels.forEach((a) => assert.strictEqual(a.cible, cible));
+  assert.strictEqual(h.store['DriveAI_CORR_FINI'], tag, 'tag one-shot posé : tout est consommé');
+
+  // Rejeu : idempotent, plus aucun appel.
+  appels.length = 0;
+  h.store['DriveAI_CORR_FINI'] = null;
+  c.appliquerCorrectionsManuelles_(() => false);
+  assert.strictEqual(appels.length, 0, 'clés posées ⇒ aucun re-déplacement');
+
+  // 🔴 ÉPINGLE : Marc a rangé le fichier lui-même entre la décision et le déploiement. La
+  // correction ne doit PAS défaire son geste.
+  const h2 = ctxRunner();
+  const c2 = h2.c;
+  const ids = JSON.parse(JSON.stringify(c2.CONFIG.CORRECTIONS_MANUELLES)).map((x) => x.id);
+  h2.index['epingle|' + ids[0]] = true;
+  const appels2 = [];
+  c2.appliquerDeplacerFichier_ = (a) => { appels2.push(a); return { statut: 'appliqué' }; };
+  c2.ensembleDomainesProteges_ = () => ({});
+  c2.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => h2.store[k] || null, setProperty: (k, v) => { h2.store[k] = v; },
+  }) };
+  c2.appliquerCorrectionsManuelles_(() => false);
+  assert.strictEqual(appels2.length, 3, 'le fichier ÉPINGLÉ par Marc n\'est pas touché');
+  assert.ok(appels2.every((a) => a.source !== ids[0]));
+});
+
+test('C28-65 : les missions honorent l\'ÉPINGLE (sinon l\'immunité est un mot)', () => {
+  const h = ctxRunner();
+  const IDS = h.c.CONFIG.MISSIONS_IDS;
+  // Un fichier épinglé (rangé à la main, ou par une correction manuelle) ne doit JAMAIS être
+  // re-collecté par une campagne de rangement — c'était déjà vrai de la consolidation, du reset
+  // et de la migration ; les missions l'ignoraient, si bien que `dispatch03` aurait repris les
+  // fichiers corrigés au premier bump de version, pour les re-router PAR DATE.
+  h.index['epingle|fpin'] = true;
+  h.arbre[IDS.vehiculeIsole] = {
+    files: [h.fichier('fpin', '2025-01-01_Facture_Garage.pdf'), h.fichier('flibre', '2025-02-01_SAAQ.pdf')],
+    folders: {},
+  };
+  h.arbre[IDS.vehiculesPluriel] = { files: [], folders: {} };
+  h.arbre[IDS.vehiculeCible] = { files: [], folders: {} };
+  h.c.executerMission_('vehicule', () => false);
+  assert.deepStrictEqual(h.moves.map((m) => m.id), ['flibre'], 'seul le NON épinglé bouge');
+});
+
+test('C28-65 : un échec PERMANENT est abandonné après N essais (pas 288 rejeux par jour, à vie)', () => {
+  const h = ctxRunner();
+  const c = h.c;
+  let appels = 0;
+  // `échec` = fichier ou cible introuvable (Marc a vidé sa corbeille, par exemple). C'est une
+  // PANNE, donc on re-tente — mais sans borne, la boucle tournerait à chaque tick indéfiniment,
+  // avec une ligne de Journal à chaque fois : l'historique de diagnostic (20 000 lignes) serait
+  // chassé en ~17 jours, et les autres corrections resteraient « non finies » pour toujours.
+  // Le mode d'échec le plus réaliste n'est pas un statut typé mais un THROW (« Access denied »
+  // permanent sur un fichier partagé) : il partait au catch externe, qui ne comptait rien.
+  c.appliquerDeplacerFichier_ = () => { appels++; throw new Error('Access denied'); };
+  c.ensembleDomainesProteges_ = () => ({});
+  c.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => h.store[k] || null, setProperty: (k, v) => { h.store[k] = v; },
+  }) };
+  // Le compteur d'essais vit dans `Journal.gs`, hors de ce contexte : sans lui, le `catch` du
+  // pilote l'avale et l'abandon ne se déclenche JAMAIS — ce qui rendait ce test faussement vert
+  // (24 essais au lieu de 12). En production les deux fichiers sont chargés ensemble.
+  const compteur = {};
+  c.incrementerEchec_ = (k) => { compteur[k] = (compteur[k] || 0) + 1; return compteur[k]; };
+
+  const max = c.CONFIG.QUARANTAINE_MAX;
+  for (let i = 0; i < max + 3; i++) c.appliquerCorrectionsManuelles_(() => false);
+
+  // 4 entrées × au plus `max` essais chacune : bornées, jamais infinies.
+  assert.ok(appels <= 4 * max, 'nombre d\'essais BORNÉ (' + appels + ' ≤ ' + (4 * max) + ')');
+  assert.ok(appels >= 4, 'et on a bien essayé');
+  // …et une fois abandonnées, les clés sont posées : plus aucun appel.
+  const avant = appels;
+  c.appliquerCorrectionsManuelles_(() => false);
+  assert.strictEqual(appels, avant, 'après abandon, plus AUCUN essai');
+  assert.strictEqual(h.store['DriveAI_CORR_FINI'], c.CONFIG.CORRECTIONS_MANUELLES_TAG,
+    'la campagne se referme au lieu de rester « non finie » à vie');
+});
+
+test('sourcesJetables : CHAQUE spec tranche explicitement (un défaut ne décide pas d’un geste destructeur)', () => {
+  // Le défaut valait « toutes les sources » : une mission écrite sans ce champ peignait ses
+  // dossiers en ROUGE (= « bon pour suppression »). Marc obéit au signal, la collecte lève ensuite
+  // sur les dossiers disparus, la mission ne converge plus jamais, et celle gatée dessus par
+  // `convergenceApres` est bloquée à vie — heartbeat vert (audit sécurité 2026-09-10).
+  const specs = pur.tableMissions_();
+  assert.ok(specs.length >= 8);
+  for (const s of specs) {
+    assert.ok(Object.prototype.hasOwnProperty.call(s, 'sourcesJetables'),
+      `la mission « ${s.tag} » doit déclarer sourcesJetables (ne serait-ce que [])`);
+    assert.ok(Array.isArray(s.sourcesJetables), `sourcesJetables de « ${s.tag} » doit être un tableau`);
+    // Même exigence pour `ciblesADepeindre` (revue code C28-105) : plus aucune mission réelle ne
+    // le porte depuis ADR-0055, donc un renommage silencieux du champ ne serait vu par personne —
+    // la sonde de dé-peinture deviendrait inerte sans qu'aucun test ne tombe.
+    assert.ok(Object.prototype.hasOwnProperty.call(s, 'ciblesADepeindre'),
+      `la mission « ${s.tag} » doit déclarer ciblesADepeindre (ne serait-ce que [])`);
+    assert.ok(Array.isArray(s.ciblesADepeindre), `ciblesADepeindre de « ${s.tag} » doit être un tableau`);
+    // Une source jetable est forcément une SOURCE de la mission : jamais un dossier tiers.
+    for (const j of s.sourcesJetables) {
+      assert.ok(s.sources.indexOf(j) !== -1, `« ${s.tag} » : ${j} est déclaré jetable sans être une source`);
+    }
+  }
+});
+
+test('épingles (décisions fichier par fichier avec Marc) : priment sur la règle, et seulement pour l’identité visée', () => {
+  const IDS = pur.CONFIG.MISSIONS_IDS;
+  // Les 3 documents « C26-08 » : la règle les enverrait dans `_Technique` (documentation métier) ;
+  // Marc les veut chez Alphatek. L'épingle les y envoie SANS toucher à la règle des autres.
+  const ctx = { employeurParSource: {}, techniqueId: 'ID_TECHNIQUE' };
+  const epingles = Object.keys(pur.CONFIG.MISSIONS_EPINGLES || {});
+  assert.ok(epingles.length >= 3);
+  // Chaque épingle rend une cible COMPLÈTE (jamais un dossier vide) et prime sur la règle.
+  // Le nom choisi est routé par une VRAIE règle (documentation métier → `_Technique`) : sans ça
+  // l'assertion serait vide de sens — déplacer l'épingle après les règles laisserait le test vert
+  // (défaut trouvé en revue, prouvé par mutation).
+  const NOM_ROUTE = '2025-11-07_Rapport de maintenance_Atelier.pdf';
+  assert.strictEqual(plain(pur.routerCarriere_(NOM_ROUTE,
+    { sourceId: IDS.carriereRacine, sousChemin: '', fileId: 'sans-epingle' }, ctx)).cibleId, 'ID_TECHNIQUE',
+  'pré-condition : ce nom EST routé par une règle');
+  for (const id of epingles) {
+    const r = plain(pur.routerCarriere_(NOM_ROUTE, { sourceId: IDS.carriereRacine, sousChemin: '', fileId: id }, ctx));
+    assert.ok(r && (r.cibleId || (r.cibleParentId && r.cibleNom)), `épingle ${id} : cible complète`);
+    assert.notStrictEqual(r.cibleId, 'ID_TECHNIQUE', `épingle ${id} : la règle a été court-circuitée`);
+  }
+  // Toute cible d'épingle est un ID Drive plausible : une clé de `MISSIONS_IDS` mal orthographiée
+  // passerait sinon pour un ID et ne se verrait qu'en prod, par un échec de `getFolderById`.
+  for (const id of epingles) {
+    const r = pur.epingleMission_(id);
+    const cible = r.cibleId || r.cibleParentId;
+    assert.ok(/^[A-Za-z0-9_-]{25,}$/.test(cible), `épingle ${id} : cible « ${cible} » n'est pas un ID Drive`);
+  }
+  // Les 3 documents « C26-08 » partent chez Alphatek.
+  const chezAlphatek = epingles.filter((id) => pur.CONFIG.MISSIONS_EPINGLES[id].cibleId === 'employeurA');
+  assert.strictEqual(chezAlphatek.length, 3);
+  for (const id of chezAlphatek) {
+    assert.strictEqual(pur.epingleMission_(id).cibleId, IDS.employeurA);
+  }
+  // `domaine:<nom>` résout un domaine FIXE. Les 3 signatures notariales vont dans `01/État civil &
+  // notarial` (nœud EXISTANT) et surtout PAS dans un 8ᵉ nœud de `02 · Finances`, qui est plein 7/7.
+  const notariales = epingles.map((id) => pur.epingleMission_(id)).filter((r) => r.cibleNom === 'État civil & notarial');
+  assert.strictEqual(notariales.length, 3);
+  for (const notarial of notariales) {
+    assert.strictEqual(notarial.cibleParentId, pur.CONFIG.DOMAINES['01 · Administratif & identité']);
+  }
+  // Aucune épingle ne vise `02 · Finances` : la contrainte ≤ 7 y interdit tout nouveau nœud.
+  for (const id of Object.keys(pur.CONFIG.MISSIONS_EPINGLES)) {
+    const r = pur.epingleMission_(id);
+    if (r.cibleParentId === pur.CONFIG.DOMAINES['02 · Finances']) {
+      assert.fail(`épingle ${id} : créerait un nœud dans 02 · Finances, plein (docs/TAXONOMY.md)`);
+    }
+  }
+  // Sans épingle, la règle générale s'applique inchangée : un rapport de maintenance reste de la
+  // documentation métier et part dans `_Technique` — l'épingle n'a pas élargi le routage.
+  const sansEpingle = plain(pur.routerCarriere_('2025-11-07_Rapport de maintenance_Atelier.pdf',
+    { sourceId: IDS.carriereRacine, sousChemin: '', fileId: 'un-autre-fichier' }, ctx));
+  assert.strictEqual(sansEpingle.cibleId, 'ID_TECHNIQUE', 'la règle générale n\'a pas bougé');
+  // Et un document SANS épingle ni règle reste un refus révisable (jamais une cible devinée).
+  assert.strictEqual(pur.routerCarriere_('2025-11-07_Notes techniques d\'automatisme_x.jpg',
+    { sourceId: IDS.carriereRacine, sousChemin: '', fileId: 'encore-un-autre' }, ctx), null);
+  // Table vide ou clé inconnue ⇒ null (jamais une cible devinée).
+  assert.strictEqual(pur.epingleMission_('inconnu'), null);
+  assert.strictEqual(pur.epingleMission_(undefined), null);
+});
+
+test('épingles : un domaine AUTO absent ⇒ REFUS, jamais une cible vide (échec fermé)', () => {
+  // `CONFIG.DOMAINES` ne porte que les domaines FIXES : « 07 · Santé » et « 09 · Voyages » vivent
+  // en Script Property et peuvent manquer. Une épingle qui les viserait doit refuser, pas rendre
+  // un parent vide — un `moveTo` vers '' détacherait le fichier (leçon C28-62 PR5).
+  const sauve = pur.CONFIG.MISSIONS_EPINGLES;
+  try {
+    pur.CONFIG.MISSIONS_EPINGLES = { zz: { cibleParentId: 'domaine:07 · Santé', cibleNom: 'X' } };
+    assert.throws(() => pur.epingleMission_('zz'), /irrésolvable/, 'domaine absent ⇒ LEVÉE, pas une cible vide');
+    // …et surtout : la règle générale ne reprend PAS la main (sinon la décision de Marc serait
+    // remplacée en silence par un déplacement à clé de succès).
+    assert.throws(() => pur.routerCarriere_('2025-11-07_Rapport de maintenance_Atelier.pdf',
+      { sourceId: pur.CONFIG.MISSIONS_IDS.carriereRacine, sousChemin: '', fileId: 'zz' },
+      { employeurParSource: {}, techniqueId: 'ID_TECHNIQUE' }), /irrésolvable/);
+  } finally {
+    pur.CONFIG.MISSIONS_EPINGLES = sauve;
+  }
+});
+
+test('§1.2 — une cible à la CORBEILLE refuse le dépôt (jamais de suppression automatique)', () => {
+  // `sousDossier_` écarte déjà les ENFANTS corbeillés (C28-93) ; `getFolderById`, lui, rend un
+  // dossier corbeillé sans lever. Un dépôt dedans = purge Drive à 30 jours = suppression
+  // AUTOMATIQUE, le garde-fou non négociable. Mutation : retirer le `if (!vivant(racineCible))`
+  // de `traiterItemMission_` ⇒ ce test tombe (le fichier est déplacé et la clé posée).
+  const h = ctxSchool();
+  const paires = h.c.CONFIG.MISSIONS_IDS.ecoles06;
+  const avecId = paires.filter((p) => p.cible)[0];
+  paires.forEach((p) => { h.arbre[p.src] = { files: [], folders: {} }; });
+  h.arbre[avecId.src].files = [h.fichier('fx', '2019-05-01_Relevé_UNIVA.pdf')];
+  h.arbre[avecId.cible] = { files: [], folders: {}, corbeille: true };
+
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.strictEqual(h.moves.filter((m) => m.vers).length, 0, 'aucun dépôt dans une corbeille');
+  assert.ok(!h.index['mission|ecoles-archives06c|' + h.c.CONFIG.MISSIONS_REGLES_VERSION + '|fx'],
+    'aucune clé posée : le fichier est re-tenté, jamais perdu de vue');
+  assert.ok(!h.store['DriveAI_MISSION_FINI_ecoles-archives06c'], 'une passe incomplète ne conclut pas');
+
+  // LIBÉRATION : la corbeille vidée/restaurée, le dépôt reprend (un gate se teste par sa levée).
+  h.arbre[avecId.cible].corbeille = false;
+  h.c.executerMission_('ecoles-archives06c', () => false);
+  assert.strictEqual(h.moves.filter((m) => m.vers).length, 1);
+});
+
+test('estSourceDisparue_ : un dossier SUPPRIMÉ est une source vide, une PANNE reste une erreur', () => {
+  // Vérifié dans le Drive de Marc le 2026-09-12 : les 4 sources de la mission véhicule et les 2 de
+  // la mission logement n'existent plus — elles avaient été proposées à la suppression une fois
+  // vidées. Sans ce prédicat, la collecte les compte en ERREUR : plus aucune passe complète, donc
+  // plus aucune convergence, et une ligne de journal par source et par tick (288/jour).
+  // ⚠️ LE MESSAGE RÉEL, NON TRONQUÉ (revue sécurité C28-105). La version précédente de ce test
+  // construisait le message canonique de Drive puis en RETIRAIT la moitié « or you do not have
+  // permission to access it. » — c'est-à-dire exactement la moitié qui faisait échouer le
+  // prédicat. Il assertait sur une chaîne que Drive n'émet jamais, et verrouillait le bug.
+  // L'API ne distingue VOLONTAIREMENT pas « absent » de « interdit » : le marqueur de disparition
+  // doit donc être reconnu EN PREMIER, et « permission » ne récuse que s'il est SEUL.
+  for (const msg of ['No item with the given ID could be found, or you do not have permission to access it.',
+    'Aucun élément ne correspond à l\'ID indiqué. Il est possible que vous ne disposiez pas des autorisations requises.',
+    'No item with the given ID could be found',
+    'Not Found', 'Aucun élément trouvé avec cet ID', 'Dossier introuvable']) {
+    assert.strictEqual(pur.estSourceDisparue_(new Error(msg)), true, msg);
+  }
+  for (const msg of ['Service Drive indisponible', 'Quota exceeded', 'Timeout',
+    'You do not have permission to access the requested document']) {
+    assert.strictEqual(pur.estSourceDisparue_(new Error(msg)), false, msg);
+  }
+  assert.strictEqual(pur.estSourceDisparue_(null), false);
+});

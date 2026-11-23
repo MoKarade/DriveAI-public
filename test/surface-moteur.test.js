@@ -1,0 +1,342 @@
+'use strict';
+/**
+ * FILET DE SURFACE (audit 2026-07-02) — né d'un vrai incident : un retrait de code mort par regex
+ * avait AVALÉ `deciderRoutage_` entière ; la syntaxe passait, les tests unitaires (qui mockent leurs
+ * dépendances) passaient, et chaque document serait parti en quarantaine à l'exécution.
+ * Ce test charge TOUT le moteur ensemble et vérifie que chaque fonction du CONTRAT INTERNE
+ * (appelée en travers des modules) est définie. Toute disparition accidentelle casse ici.
+ */
+const { test } = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+const { load } = require('./harness');
+
+const TOUS_LES_GS = fs.readdirSync(path.join(__dirname, '..', 'src'))
+  .filter((f) => f.endsWith('.gs'));
+
+const ctx = load(TOUS_LES_GS);
+
+// Le contrat interne : les fonctions appelées EN TRAVERS des modules (pipeline, tick, maintenance).
+const CONTRAT = [
+  // pipeline & routage
+  'traiterDocument_', 'deciderRoutage_', 'doublonRapide_', 'routageTechnique_', 'routageMedia_',
+  'estTechnique_', 'estMediaDirect_', 'estPhoto_', 'estNomNonDocumentaire_',
+  'extension_', 'extraireTexte_', 'classifier_', 'gererEchec_', 'empreinteBlob_',
+  'enrichirClassifDepuisNom_', 'creerRaccourcisEntites_', 'deposer_',
+  // état
+  'indexContient_', 'indexAjouter_', 'estDoublon_', 'feuille_', 'journalInfo_', 'journalErreur_',
+  'initialiserSheet_', 'majSante_', 'notifierEchec_', 'incrementerEchec_',
+  // entités
+  'entitesCache_', 'reinitialiserEntitesCache_', 'resoudreEntite_', 'entiteEnAttenteAjouter_',
+  'creerDossiersEntitesValidees_', 'promouvoirEntiteValidee_', 'appliquerCurationEntites_',
+  'estEntiteGenerique_', 'estFusionnableEntite_', 'incrementerVuEntite_',
+  // Identité : repli quand la table REFUSE d'attribuer (C28-72) — appelé par deciderRoutageV2_.
+  'repliIdentite_',
+  // canonicalisation & fusion d'entités (refonte 2026-07-07 ; branchée sur le chemin VIVANT P4/C28-10)
+  'canoniserEntite_', 'cleCanoniqueEntite_', 'estProprietaireMarc_', 'estJetonGenerique_',
+  'retirerSuffixeJuridique_', 'canoniserVehicule_', 'canoniserAdresse_', 'corrigerOcrConnu_',
+  'dossiersExistantsDomaine_', // « reality check » Drive des propositions (P4/C28-10)
+  // sources & maintenance
+  'traiterGmail_', 'traiterGmailHistorique_', 'traiterPageHistorique_', 'pageFilsHisto_',
+  'requeteHisto_', 'dateGmail_',
+  // panne de QUOTA Gmail journalier (C28-15 — suspension persistée, patron R2)
+  'chargerPanneGmail_', 'estPanneGmail_', 'signalerPanneGmail_', 'signalerRetablissementGmail_',
+  // (Panne de CONFIG d'API Google, sondes, jeton OAuth hubperso et callback `doGet` : partis avec
+  // Tasks/Calendar, ADR-0074 — voir `retirees` plus bas.)
+  'doGet',
+  // Lecture bornée des onglets pour le résumé du hub (hier dans Mcp.gs, retiré par l'ADR-0074).
+  'lireOngletBorne_', 'lireQueueOngletBornee_', 'antiRafalePilote_',
+  // C28-49 (ADR-0039) : missions de curation — appelées en travers des modules (Main/Journal).
+  'executerMission_', 'tableMissions_', 'gMissionsJour_', 'gMissionsAmont03_', 'chargerEtatMissions_',
+  'budgetJourMissions_', 'cleMission_', 'apparierUnique_', 'jetonsCible_', 'logementParDate_',
+  'dateDuNomMission_', 'fenetresOccupation_', 'ciblesAvecJetons_', 'collecterMission_',
+  'traiterItemMission_', 'peindreDossierRouge_', 'peindreSourcesVides_', 'estDossierVideMission_',
+  'depeindreDossier_', 'depeindreCiblesRemplies_', 'assurerDepeintureCibles_',
+  // C28-49 PR2 : Carrière + Finances.
+  'employeurDuNom_', 'typeDuNomMission_', 'anneeDuNomMission_', 'typeContient_',
+  'routerFinance02_', 'sousDossierEmployeur_', 'routerCarriere_', 'moisManquantsPaies_',
+  // ADR-0044 §5 : prédicats PURS partagés par la mission carrière ET la table du flux.
+  'estTypeRecrutement_', 'estDocumentationMetier_', 'estReleveDePaie_', 'employeurAutreDuNom_',
+  'estModeleOuFormulaire_',
+  'domaineHors02DuNom_', 'resetMotEntier_',
+  'estTypeFiscalReset_',
+  'exclusionsSortie02_',
+  'appliquerCorrectionsManuelles_', 'estDocumentLogement_',
+  // Appelé PAR `Missions.gs` (batirCtx de la mission carrière) et DÉFINI dans `Router.gs` :
+  // appel inter-module, donc au contrat. Sa disparition serait invisible en CI sans ça.
+  'dossierTechnique_',
+  'ecrireRapportPaies_',
+  // C28-49 PR2 (revue finale) : prédicats PARTAGÉS flux ↔ missions, définis dans Reset.gs et
+  // appelés depuis Missions.gs — une seule règle, deux consommateurs (leçon C28-26).
+  'anneePlausible_', 'estTypePaieReset_', 'estFeuilletFiscalReset_', 'estRibReset_',
+  // C28-51 (ADR-0040) : canons bailleurs/véhicules partagés (Reset.gs ↔ Missions.gs) + cibles.
+  'vehiculeDuNom_', 'logementDuBailleur_', 'cibleBailleur_', 'categorieVehiculeMission_',
+  'bucketEmetteur_', 'epingleMission_', 'estSourceDisparue_',
+  'ciblesLogement_', 'categoriesVehiculeReset_',
+  // curation des mails (C28-19, ADR-0020) : confiance, scan cyclique, « pas suspect » 1-clic
+  'decisionSuspect_', 'confianceCache_', 'reinitialiserConfianceCache_', 'apprendreConfiance_',
+  'scanCycliqueTri_', 'appliquerPasSuspect_', 'purgerClesTriIndex_',
+  'actionPasSuspect_', 'validerThreadId_',
+  // fenêtre des mails récents (porte `ancien` du verdict « à traiter », ADR-0075/0076 ; héritée de C28-24)
+  'joursFenetreIntentions_', 'estHorsFenetreIntentions_',
+  'traiterDepots_', 'ordonnerDepots_', 'collecterPartages_', 'appliquerMigrationTaxonomie_',
+  // re-analyse v2 ciblée (C26-08, ADR-0018)
+  'estAReanalyser_', 'appliquerReanalyseCiblee_', 'reanalyserUnePage_', 'collecterAReanalyser_',
+  'reanalyserFichier_',
+  // progression LIVE des opérations (C28-18) : rendu centralisé (tick finally) + recensements
+  'majProgressions_', 'majProgressionsFinTick_', 'registreApresProgression_', 'lignesProgression_', 'assurerEnteteProgression_',
+  // télémétrie coûts & quotas (C28-24) : rendu centralisé (tick finally), lu par l'app (PR3)
+  'majTelemetrie_', 'lignesTelemetrie_', 'compteurFilsJour_',
+  // résumé hub (C28-27) : pré-calcul au tick finally (Main.gs) des 4 métriques du widget du hub
+  'majResumeHub_', 'compterMetriquesHub_', 'compterMetriquesHubBorne_', 'fenetreCouvre7j_', 'compterDossierRevue_', 'cleDocumentIndex_', 'tsCellule_',
+  'compterRestantMigration_', 'compterRestantReanalyse_', 'compterCampagneDossier_',
+  'majCompteurCampagne_', 'finaliserCompteurCampagne_',
+  'exporterTexteNatif_', 'exportNatifMime_', // natifs Google lisibles (R3)
+  'budgetCampagnesAtteint_', 'reinitialiserFreinBudget_', // frein budget campagnes (R3, §2.6)
+  'appliquerRangementInitial_', 'appliquerRejeuSiNouvelleVersion_', 'rangementTermine_',
+  'appliquerRelancesQuarantaine_',
+  'estAReclasserLeger_', 'collecterAReclasser_', 'deplacerVersATrier_',
+  'aParentProtege_', 'ensembleDomainesProteges_', 'nbFichiersATrier_',
+  'normaliserCle_', // Entites.gs, appelé par Router/Corrections/Maintenance
+  // réconciliation Index↔Drive (C28-07, plan P3)
+  'synchroniserIndex_', 'constaterEtatDrive_', 'decisionSyncIndex_', 'cheminsSyncCompatibles_',
+  // Drive REST
+  'deplacerEtRenommer_', 'renommer_', 'creerRaccourci_', 'fetchDriveAvecRetry_', 'jetonDrive_',
+  // ADR-0077 : `metaFichierRest_` (DriveRest.gs) et `porteurVivantDe_` (Journal.gs) sont appelées par Pipeline.gs.
+  'metaFichierRest_', 'porteurVivantDe_',
+  // corrections & formulaire
+  'lireEtAppliquerCorrections_', 'enregistrerCorrection_', 'reinitialiserCorrectionsCache_',
+  'blocFewShot_', 'assurerFormulaireCorrection_',
+  'reinitialiserEscalades_', 'reinitialiserUsage_', 'flushUsage_',
+  'reinitialiserPannePlateforme_', 'estPannePlateforme_', 'detecterPannePlateforme_',
+  'signalerPannePlateforme_', 'chargerPannePlateforme_', 'signalerRetablissement_',
+  'estCodeSystemique_', 'poserPannePlateforme_', // panne durable 429/529/5xx (C28-12)
+  'emailAlerte_', 'signalerNatifUneFois_',
+  // tri Gmail (#16)
+  'trierFilsGmail_', 'trierFil_', 'decisionTri_', 'heuristiquePhishing_', 'adresseExpediteur_',
+  'texteSanteTriDegrade_',
+  'poserOperationCourante_', 'operationCourante_', 'fusionnerOps_', 'ventilationCoutMois_',
+  'lignesCouts_', 'majCouts_', 'usageRunOpsSnapshot_', 'lireResumeHubPersiste_',
+  'communVehiculeDepuisSource_', 'communVehiculeDuNom_', 'estLocationVehicule_',
+  'normaliserLibelle_', 'parserMiniCategorie_', 'miniCategorie_', 'triApprisCache_', 'apprendreTri_',
+  'reinitialiserTriApprisCache_', 'libellesUtilisateur_', 'reinitialiserLibellesCache_',
+  'estPromoGmail_', 'reinitialiserPromoSetCache_', 'signalerPanneEcriture_', 'reinitialiserPanneEcriture_',
+  'scanAvantTri_', 'scanArriereTri_',
+  'nettoyerBoiteHistorique_', 'finaliserPasseBoite_', // nettoyage profond > 30 j (C28-22, ADR-0022)
+  'filsFondLusJour_', 'reliquatFondNonVivant_', 'rearmerCampagneTri_', 'finaliserPasseCampagne_', 'trierHistoriqueArchive_', // historique archivé, plafond commun (ADR-0076)
+  'newslettersJamaisLues_', 'apprentissagesSemaine_',
+  'lienGmail_',
+  // cibles publiques des déclencheurs / outils
+  'tickDriveAI', 'installerTrigger', 'chienDeGarde', 'resumeHebdo', 'rangerToutLeDrive', 'dequarantaine',
+  'dequarantainerLignes_', // noyau appelé par le tick (R3) — JAMAIS dequarantaine() (réentrance)
+  'rattraperMediasMalClasses', 'doPost', 'tickPonctuel', 'fileIdDepuisCleMaintenance_',
+  'etatCampagnesRangement', // diagnostic un-clic LECTURE SEULE (état campagnes rangement) — Diagnostic.gs
+  // Journal QUOTIDIEN du vrac par domaine (demande Marc 2026-08-12) — HistoriqueVrac.gs, appelée
+  // depuis Main.gs (finally du tick) ; réutilise compterVracRacineDomaine_ (Diagnostic.gs).
+  'majHistoriqueVrac_', 'ligneHistoriqueVrac_', 'domainesHistoriqueVrac_', 'budgetJourHistoriqueVrac_',
+  // Validation de `_Doublons` par empreinte (C28-49 PR4, ADR-0047) — Doublons.gs, appelée depuis
+  // Main.gs (finally du tick, hors `etapeSuivie_` : registre C28-44 saturé) ; `texteSanteDoublons_`
+  // est appelée par `majSante_` (Journal.gs) et `COLONNES_RAPPORT_DOUBLONS` par `initialiserSheet_`.
+  'majValidationDoublons_',
+  // La RÉSOLUTION des identifiants (C49-16). Cinq contrats INTER-MODULES, donc cinq noms que
+  // seul ce test retient : `etatResolutionFileId_`, `resolutionFileIdDoitTourner_` et
+  // `etapeResolutionFileId_` sont appelées par `Main.gs` ; `texteSanteResolutionFileId_` par
+  // `Journal.gs` ; et `resoudreIdentifiantsMaintenant` est le chemin que MARC emprunte depuis
+  // l'éditeur — un chemin que seul un humain emprunte n'a personne d'autre pour le retenir
+  // (C28-137), et c'est le seul moyen de finir la passe sans attendre les ticks.
+  'etatResolutionFileId_', 'resolutionFileIdDoitTourner_', 'etapeResolutionFileId_',
+  'texteSanteResolutionFileId_', 'resoudreIdentifiantsMaintenant',
+  // `panneResolutionFileId_` est lue par `Main.gs` (la gate) ET par la Santé ; `tronquer_`
+  // (`Ocr.gs`) borne la cause persistée. Contrats inter-modules, donc seul ce test les retient.
+  'panneResolutionFileId_', 'suspendreResolutionFileId_', 'leverSuspensionResolutionFileId_',
+  'tronquer_', 'segmentsChemin_', 'estExemplaireEcarte_', 'cheminsDossier_', 'fichesDossierMemo_',
+  'accepterCandidat_', 'decoderCumulResolution_', 'detailMotifsResolution_',
+  'encoderMotifsResolution_', 'decoderMotifsResolution_', 'noterFinResolutionFileId_',
+  // Le module consomme `urlListeDrive_` + `pageListeDrive_` (`Doublons.gs`) pour chercher par
+  // nom — la MÊME pagination que la détection de doublons, jamais une seconde écrite à part —
+  // et `estFileIdPlausible_` (`Journal.gs`), qui décide si une cellule porte un id ou du bruit.
+  'phraseResolutionFileId_', 'selectionnerAResoudre_', 'choisirResolutionFileId_',
+  'candidatsPourNom_', 'dejaTrancheFileId_', 'refusFileId_',
+  'inventorierDoublons_', 'balayerExemplairesDoublons_',
+  'ecrireVerdictsDoublons_', 'feuilleRapportDoublons_', 'texteSanteDoublons_', 'pageListeDrive_',
+  'texteSanteHistoGmail_', // Main.gs, appelée par Journal.gs (ligne de Santé C28-99)
+  'statutHistoGmail_', // Journal.gs, appelée par Main.gs — UNE règle de statut, deux surfaces
+  // Re-datation de `06` (C28-92, ADR-0056) — trois contrats INTER-MODULES que la 1ʳᵉ rédaction
+  // avait oubliés alors que leurs jumeaux ci-dessus y étaient (🟠 revues code et sécurité) :
+  // ADR-0058 — le domaine d'une paie / d'un RL-1 est dérivé du TYPE. Contrat INTER-MODULE :
+  // défini dans Reset.gs, appelé depuis Router.gs, comme ses voisins `estTypePaieReset_` /
+  // `estFeuilletFiscalReset_` déjà déclarés plus haut (🟡 revue structure : ils manquaient).
+  'estRevenuEmployeurReset_', 'estRl31Reset_', 'estDisqualifieCommeRevenuReset_', 'estFeuilletT4Reset_',
+  // ADR-0080 — règle stricte des factures : défini dans Reset.gs, appelé depuis Router.gs.
+  'estFactureOuRecuPaiementReset_',
+  'texteSanteReanalyse_', // Main.gs, appelée par Journal.gs (ligne de Santé)
+  'statutReanalyse_', // Main.gs — les SEPT causes d'arrêt (la 7e, C49-20), une seule règle
+  'budgetJourReanalyse_', // Migration.gs, appelée par Main.gs (minutes du jour de la ligne de Santé)
+  'reDatationEnCours_', // Migration.gs, appelée par Consolidation.gs (garde D11)
+  'dateReferenceReanalyse_', // Migration.gs — date de référence : le nom d'abord, Drive en repli
+  'estExemplaireSurvivant_', 'verdictClotureDoublon_', 'urlListeDrive_', 'bilanDoublons_',
+  'idDoublonsSansCreer_', 'estJetonPaginationRefuse_',
+  // Drainage de `Documents ID` (C28-73, ADR-0048) — DocumentsID.gs, un-clic manuel (aucun budget de
+  // tick) ; `traiterDocument_` + `deplacerEtRenommer_`/`renommer_` sont les appels inter-modules.
+  'drainerDocumentsID', 'drainerUnFichierDocumentsID_', 'dossiersDrainageDocumentsID_',
+  'estDrainableDocumentsID_', 'bilanDrainageDocumentsID_', 'cleDrainageDocumentsID_',
+  'collecterDrainageDocumentsID_', 'finDrainageDocumentsID_',
+  'estPossedeParMarcDocumentsID_',
+  'ligneSanteDoublons_', 'budgetJourDoublons_',
+  // Suivi GÉNÉRIQUE des opérations du tick (C28-44, ADR-0038) — Suivi.gs : wrapper appelé par
+  // Main.gs (PR2), vue fusionnée lue par Journal.gs/majProgressions_ (PR3), flush au finally.
+  'etapeSuivie_', 'suiviReset_', 'suiviSkip_', 'suiviOpsFusionne_', 'flusherSuiviOps_',
+  'chargerSuiviOps_', 'fusionnerSuiviOps_', 'encoderSuiviOps_', 'clesRegistreSuivi_',
+  'statutDepuisSuivi_', // PR3 : statut des opérations sans lecteur de campagne (Journal.gs l'appelle)
+  // C28-47 : débit & estimation de fin des campagnes à compteur (Journal.gs les appelle)
+  'majDebit_', 'estimationFin_', 'chargerDebits_', 'majDebits_',
+
+  'reparerIncidentSheet', 'estCleFichierIncident_', // réparation incident Sheet d'état (2026-07-08)
+  'fusionnerDomaine07PersoVers08', 'remplacerColonneOnglet_', // fusion domaine erroné (anomalies 2026-07-08)
+  'terminerFusionDomaine07', // fin de fusion (ré-étiquetage seul, idempotent)
+  // web app (la recherche IA et le chat à outils sont retirés par l'ADR-0074)
+  'actionTickPonctuel_', 'appelAnthropicTexte_', 'domainesAutorises_',
+  'texteReponse_', // Llm.gs, appelé par Prefiltre.gs et TriGmail.gs
+  'appliquerDeplacerFichier_', // Reorg.gs — appliqué au chemin gardé (C21-06)
+  // réorg IA (#21, C21-04 : proposition ; C21-06 : application)
+  'appliquerReorgIA_', 'inventaireDossiers_', 'resumeArborescence_', 'promptReorg_',
+  'parserPropositionReorg_', 'lignePourAction_', 'solderDemande_', 'aParentEtrangerProtege_',
+  'chaineMonteVersProtege_',
+  'etapeReorg_', 'appliquerReorgValidee_', 'appliquerUneAction_', 'actionsValidees_',
+  'proposerSourceFusion_', 'videsCandidatsRecreables_', 'filtrerVidesCandidatsRecreables_',
+  'partiesId_', 'dernierSegment_', 'ensembleIntouchables_', 'repointerEntites_', 'solderAction_',
+  'estSegmentStructurel_', 'estNoeudRecreable_', 'estNoeudRecreablePrudent_', 'noeudsTableReset_',
+  // documents d'identité & titulaire (refonte 2026-07-07)
+  'normaliserTypeIdentite_', 'estDocumentIdentitePersonnel_', 'dossierIdentite_', 'titulairePourNom_',
+  'nommerDocument_', 'garantirNomUnique_', 'casseNomPersonne_', 'sousDossierPourNom_',
+  // décision non-document (refonte 2026-07-07)
+  'decisionNonDocument_', 'distinguerVraiScan_', 'estExportDonnees_', 'estMediaSansTexte_', 'extensionEstTechnique_',
+  // analyse 2 passes & routage v2 (refonte #26, C26-05/06 — flag CONFIG.ANALYSE_V2)
+  'classifierDeuxPasses_', 'appelAnthropicV2_', 'normaliserChampsV2_',
+  'deciderRoutageV2_', 'planRoutageV2_', 'nomsDansDossier_', 'budgetMsRun_',
+  // fail-safe hybride ultra-strict (ADR-0016 — révision §2.1)
+  'estClassificationVide_', 'estRenseigne_', 'routageAVerifier_', 'dossierAVerifier_',
+  // secret CI dédié des actions pousser-reset / assurer-trigger (WebApp.gs)
+  'verifierSecretSync_',
+  // entités auto-validées (#18)
+  'autoValiderEntitesFrequentes_', 'estAutoValidable_', 'entitesAutoValidees_', 'estValidee_',
+  // dry-run v2 (#26, C26-07, ADR-0015) : preuve avant/après, zéro mutation
+  'appliquerDryRunV2_', 'traiterUnDryRunV2_', 'chargerOuGenererEchantillonDryRunV2_',
+  'collecterCandidatsDryRunV2_', 'collecterCandidatsDomaine_', 'domainesAEchantillonner_',
+  'stratifierEchantillonDryRunV2_', 'ligneDryRunV2_', 'cheminActuelDryRunV2_',
+  'encoderEchantillonDryRunV2_', 'decoderEchantillonDryRunV2_',
+  'usageRunSnapshot_', 'coutDollarsDelta_',
+  // comparaison 1↔2 passes (ADR-0034 §5) : preuve avant d'allumer la 2ᵉ passe conditionnelle
+  'appliquerComparaisonV2_', 'traiterUnComparaisonV2_', 'classifierComparaisonV2_',
+  'comparerPassesV2_', 'ligneComparaisonV2_', 'planPourClassifV2_',
+  'champsDivergentsV2_', 'fauxNegatifSensibleV2_', 'placementCanoniqueV2_',
+  'placementLisibleV2_', 'verdictSautV2_', 'passe1SuffisammentSure_',
+  'synthetiserComparaisonV2_', 'messageSyntheseComparaisonV2_', 'estPannePlateforme_',
+  // consolidation de l'arborescence (C28-26, ADR-0023) : dry-run pur, appelé depuis Main
+  'genererPlanConsolidation_', 'traiterUnConsolidation_', 'collecterConsolidation_',
+  'analyserNomClasse_', 'cheminCibleConsolidation_', 'decisionConsolidation_',
+  'entitesValideesParCle_', 'entitesValideesOuNull_', 'empreintesPlanConsolidation_',
+  'sousCheminDomaine_', 'budgetJourConsolidation_', // règle unique flux↔plan + budget quotidien (revue flotte)
+  // ADR-0052 : `bucketTypeDomaine_` vit dans Reset.gs et est appelée depuis Router.gs — contrat
+  // INTER-MODULE, donc invisible des tests unitaires mockés si elle disparaissait.
+  'bucketTypeDomaine_', 'estDocumentIdentiteReset_',
+  // `segmentsChemin_` vit dans Router.gs et est appelée depuis ConsolidationExec.gs.
+  'segmentsChemin_', 'estSousCheminDe_', 'ecoleParDateReset_',
+  'estCibleInterdite_', // C28-31 : année/type d'identité ne sont JAMAIS parents d'un regroupement
+  'segmentsSousDomaine_', 'dossierEntiteParId_', // ADR-0028 : confinement + chemin réel, et le RÉSOLVEUR UNIQUE par ID — Router.gs, appelés AUSSI par ConsolidationExec.gs
+  'seedEntitesMarc_', // seed one-shot des entités de Marc (décision 2026-07-17), appelé depuis Main
+  // exécution du plan de consolidation (ADR-0024) — moveTo seul, §1 par mutation, cible recalculée
+  'appliquerPlanConsolidation_', 'appliquerLigneConsolidation_', 'positionActuelleFichier_',
+  'ligneAAppliquer_', 'budgetJourConsoExec_', 'dossierCiblePlan_', 'nbParentsBorne_',
+  // RESET complet (C28-33, ADR-0030 PR2) — rassemblement/placement/04 interne, appelés depuis Main ;
+  // resetEnCours_ suspend conso-2/réorg-auto (ADR-0030 « Transition ») ; réutilisent detecterDossierVide_
+  // (ConsolidationExec.gs) et repointerEntites_ (Reorg.gs) EN TRAVERS des modules.
+  'rassemblerReset_', 'placerReset_', 'appliquerReset04Interne_', 'resetEnCours_', 'resetTermine_',
+  // ADR-0032 (pilote CI) : appelées EN TRAVERS des modules (WebApp.gs → Reset.gs / Main.gs).
+  'pousserResetPilote_', 'pilotageTermineReset_', 'actionAssurerTrigger_', 'installerTrigger',
+  'auditerTriSujetCorpsDetail_', 'acquerirVerrouReset_', // ADR-0075 §3 : audit du tri lancé par la CI (WebApp.gs → TriGmail.gs / Reset.gs)
+  'analyserReliquatReset_', 'analyserPageReliquatReset_', 'analyserFichierReliquat_', // ADR-0030 PR5 : passe LLM du reliquat (appelée par Main.gs)
+  'detecterDossierVide_', 'repointerEntites_',
+  // ADR-0055 : `repointerEcoles06_` (Missions.gs) appelle `sousDossier_` (Router.gs) pour
+  // find-or-créer la cible qui n'existe pas encore — 2ᵉ contrat inter-module de cette fonction.
+  'sousDossier_',
+  // ADR-0060 : `repointerEcoles06_` (Missions.gs) ne fait plus que TROUVER une cible sans ID.
+  'sousDossierExistant_', 'carteRepointageEcoles06_',
+  // Débit du placement (revue #229) : `empreinteReutiliseeReset_` (Reset.gs) appelle
+  // `empreinteConnueParId_` (Journal.gs) et consomme `empreintesPlanDeuxSens_` (Consolidation.gs) —
+  // trois modules différents, donc INVISIBLES des tests unitaires mockés : d'où leur place ici.
+  'empreinteReutiliseeReset_', 'empreinteConnueParId_', 'fileIdDeCleIndex_',
+  // C49-16 — `fileIdDeLigneIndex_` est LA règle de lecture du fileId, appelée par quatre modules
+  // (`PerimetrePiece`, `RattrapagePiece`, `AuditPiece`, `Memoire`) ; `estFileIdPlausible_` est son
+  // prédicat, partagé avec `ResolutionFileId.gs`. Deux contrats qu'aucun test unitaire mocké ne
+  // voit disparaître — et si l'un s'évapore, les lecteurs retombent en silence sur la CLÉ,
+  // c'est-à-dire sur l'angle mort Gmail que ce lot existe pour fermer.
+  'fileIdDeLigneIndex_', 'estFileIdPlausible_',
+  'empreintesPlanDeuxSens_', 'dossierDomaineMemo_', 'gardePartReset_',
+  // fusion des dossiers en double (#47, ADR-0036) : dry-run un-clic, ZÉRO mutation (PR1)
+  'genererPlanFusion', 'clusteriserDossiers_', 'dossiersLies_', 'cibleFusion_', 'lignesPlanFusion_',
+  'acronymesFusion_', 'anneesDistinctes_', 'collecterSousDossiersFusion_', 'domainesFusion_',
+  'estAncreStructurelleFusion_',
+  // exécution du plan de fusion (#47 PR2, ADR-0037 — FusionExec.gs) : moveTo seul, gardé, gaté OFF
+  'appliquerPlanFusion_', 'fusionsAExecuter_', 'ligneFusionAAppliquer_', 'budgetJourFusionExec_',
+  'cibleFusionValide_', 'idDomaineFusion_', 'deplacerFichierFusion_', 'fondreSourceFichiers_',
+  'appliquerUneSourceFusion_',
+];
+
+test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {
+  const absentes = CONTRAT.filter((nom) => typeof ctx[nom] !== 'function');
+  assert.deepStrictEqual(absentes, [], `fonctions ATTENDUES mais absentes : ${absentes.join(', ')}`);
+});
+
+test('surface du moteur : les fonctions RETIRÉES par l\'audit ne reviennent pas par accident', () => {
+  const retirees = ['decouperCiblePlan_', // remplacée par le RECALCUL de cible au move (revue C28-26)
+    'rejouerLaRevue', 'sourceParNomRevue_', 'nettoyerDoublonsRevue',
+    'deplacerVersDoublons_', 'viderOnglet_', 'estAReclasser_', 'doublon_',
+    'curseurSuivantHisto_', 'miniVerifActionRdv_',
+    'dossiersMiroir_', 'dossierMiroirPourChemin_', // miroir à plat 2026-07-08 : plus de sous-dossiers
+    // miroir Drive NotebookLM (ADR-0017) ABANDONNÉ le 2026-09-28 (demande de Marc) : ne reviennent pas
+    'dossierMiroir_', 'estFichierMiroirable_', 'nettoyerSegmentChemin_', 'nomFichierMiroir_',
+    'ecrireFichierMiroir_', 'actionSyncMiroir_', 'mimeTypePourMiroir_', 'majFichierBinaireMiroir_',
+    'ecrireRecensement_', 'ecrireProgression_', 'repeter_', // barre texte mono-op retirée (C28-18)
+    'jetonGoogle_', // ADR-0041 : Tasks/Calendar passaient par jetonHubperso_ — le jeton du script ne doit pas revenir ici
+    // ADR-0074 (05/11/2026) : création de tâches/rendez-vous, sondes d'API, jeton hubperso et extraction d'intentions retirés
+    'creerTache_', 'creerEvenement_', 'jetonHubperso_', 'lierCompteHubperso', 'traiterCallbackHubperso_', 'sonderApiConfig_',
+    'chargerPanneConfigApi_', 'estPanneConfigApi_', 'texteSanteConfigApi_', 'extraireIntentions_', 'appelIntentions_',
+    'parserIntentions_', 'extraireEtCreer_', 'creerIntentionIdempotente_', 'hashHex_', 'fetchGoogleAvecRetry_',
+    // ADR-0075 6b (06/11/2026) : l'analyse d'importance séparée est absorbée par le tri (sujet + corps)
+    'traiterIntentionsMail_', 'armerOuLeverRetardIntentions_', 'marquerCoupeIntentions_', 'lireRetardIntentions_',
+    'balayerNouveauxMails_', 'balayerArriereHistorique_', 'traiterMessagePourIntentions_', 'marquerMailImportant_',
+    'miniCheckMail_', 'parserMiniCheck_', 'intentionsSuspendues_', 'pageFilsActions_',
+    'referentielViseUneSource_', 'dossiersVisesParEntites_']; // ADR-0060 : la garde « une entité vise la source » était vraie à vie ; find-only à la place
+  const revenues = retirees.filter((nom) => typeof ctx[nom] === 'function');
+  assert.deepStrictEqual(revenues, [], `retirées mais présentes : ${revenues.join(', ')}`);
+});
+
+/**
+ * TRIPWIRE D'INVENTAIRE (leçon §9, incident C28-53) — `feuille_(nom)` rend `null` si l'onglet est
+ * absent de `initialiserSheet_` : `getSheetByName(nom) || (initialiserSheet_(ss), getSheetByName(nom))`
+ * ne crée QUE les onglets de la liste `creerOnglet_`. L'appelant plante alors sur `getRange of null`
+ * — vécu avec `RapportPaies`, oublié de la liste : la mission paies crashait à chaque tick pendant
+ * des jours, l'erreur avalée par le try/catch d'étape et prise pour du bruit.
+ *
+ * La leçon disait « vérifier par INVENTAIRE (grep) » ; un grep qu'on se rappelle de lancer n'est pas
+ * un verrou. Celui-ci échoue tout seul, dans les deux sens (un onglet créé que personne ne lit est
+ * du code mort tout aussi révélateur).
+ */
+test('INVENTAIRE : tout onglet lu par feuille_() est créé par initialiserSheet_, et réciproquement', () => {
+  const lus = new Set();
+  const crees = new Set();
+  for (const f of TOUS_LES_GS) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', f), 'utf8');
+    for (const m of src.matchAll(/feuille_\(\s*'([^']+)'/g)) lus.add(m[1]);
+    for (const m of src.matchAll(/creerOnglet_\(\s*ss\s*,\s*'([^']+)'/g)) crees.add(m[1]);
+  }
+  const manquants = [...lus].filter((n) => !crees.has(n));
+  assert.deepStrictEqual(manquants, [],
+    'onglet(s) lu(s) par feuille_() mais JAMAIS créé(s) par initialiserSheet_ → feuille_() rend null ' +
+    'et l\'appelant plante sur getRange of null (incident RapportPaies, C28-53) : ' + manquants.join(', '));
+  const orphelins = [...crees].filter((n) => !lus.has(n));
+  assert.deepStrictEqual(orphelins, [],
+    'onglet(s) créé(s) que personne ne lit — code mort ou lecteur supprimé : ' + orphelins.join(', '));
+});

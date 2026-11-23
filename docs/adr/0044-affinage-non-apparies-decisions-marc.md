@@ -1,0 +1,472 @@
+# ADR-0044 — Affinage des non-appariés : 8 décisions du propriétaire (2026-08-19)
+
+- **Statut** : accepté (2026-08-19)
+- **Contexte** : 141 fichiers « non appariés » bloqués sur 5 missions
+- **Complète** : ADR-0039 (missions de curation), ADR-0040 (affinage c49-2)
+
+## 1. Le diagnostic — 141 blocages, 4 causes
+
+Marc : « y'en a beaucoup en attente d'affinage, pose-moi des questions ». Les dossiers SOURCES ont
+été lus (jamais un échantillon) avant de poser la moindre question. Les 141 ne sont pas 141 cas
+particuliers :
+
+| Mission | Bloqués | Cause réelle observée |
+|---|---|---|
+| véhicules | 48 | **Le repli par DATE ne pouvait pas fonctionner.** Diagnostic initial (« `Marque K` figure dans `MISSIONS_VEHICULES` sans dossier cible ⇒ `fenetresCompletes` faux à vie ») : **nécessaire mais FAUX comme cause suffisante** — voir §4, corrigé le 20/08 sur preuve Drive. |
+| logements | 10 | Baux datés sans adresse dans le nom, annexes TAL génériques, et documents d'avant le Québec (Ville A, Gestionnaire étranger A/Pays F). |
+| contrats 03 | 20 | Formulaires vierges/génériques (4× le même formulaire de l'association de propriétaires, de même date, 2× Bailleur F, consentements d'un service locatif) + des documents de VOITURE égarés (3× location d'un loueur, vente d'un concessionnaire, carte verte MUTA). |
+| dossiers-années 02 | 24 | Les « dossiers-années » ne sont pas fiscaux, ce sont des **fourre-tout d'année** : Mobile Boreale, courtage, débit préautorisé Bailleur F, caisse santé, tableau de bord budgétaire. La mission ne sait router que le fiscal → refuse tout le reste. |
+| employeurs & CV 05 | 39 | **Non encore examiné** — à instruire avant toute règle (le protocole du projet interdit d'inventer des règles sans preuve). |
+
+## 2. Les décisions
+
+1. **Véhicules — thèmes SOUS chaque véhicule.** Confirme le fonctionnement existant
+   (`MISSIONS_CATEGORIES_VEHICULE`) : `Véhicule A/Entretien & réparations`, etc.
+2. **Marque K n'est PAS un véhicule** — c'était une recherche d'achat. Retiré de `MISSIONS_VEHICULES`.
+   ⚠️ C'est le correctif à plus fort levier : il rend `fenetresCompletes` atteignable et débloque
+   l'attribution par DATE pour l'ensemble des documents génériques datés.
+3. **Un « Recherche & achat » COMMUN sous « Véhicule »**, au même niveau que les véhicules, pour
+   le magasinage qui n'a pas abouti (Marque K compris). Le thème par-véhicule reste : véhicule NOMMÉ ⇒
+   sous son dossier ; véhicule inconnu ⇒ le commun. Jamais deviné.
+4. **Un « Locations » COMMUN sous « Véhicule »** : une voiture louée quelques jours n'est pas un
+   véhicule de Marc et ne doit pas polluer Véhicule A / Véhicule B / Véhicule C.
+5. **Époque France/étranger : classée par THÈME comme le reste** — pas de dossier « Anciens ».
+   MUTA avec les assurances, Energie Aurore avec l'énergie, le bail de Ville A avec les logements.
+6. **Formulaires génériques/vierges → « Modèles & formulaires », UN PAR DOMAINE**
+   (`03 · …/Modèles & formulaires`, `02 · …/Modèles & formulaires`) : le générique reste près de
+   son sujet.
+7. **Dossiers-années 02 : chaque non-fiscal part vers son VRAI domaine** (Boreale → télécom,
+   courtier → placements, DPA Bailleur F → le logement, caisse santé → santé). Les dossiers-années se vident
+   pour de bon. ⚠️ Contrainte du projet : réutiliser **la même règle de routage que le flux vivant**
+   (leçon §7 « une seule règle, deux consommateurs ») — jamais une seconde formule parallèle.
+8. ~~Non tranché : les 39 de « employeurs & CV »~~ — **instruits le 20/08**, décisions 9 à 12.
+
+### Les 39 de « employeurs & CV » — 5 familles, 4 décisions (20/08)
+
+Les 3 sources de la mission (`Employeurs/Employeur A`, `Employeurs/Employeur B`, racine 05) ont été
+lues. Les refus viennent de `sousDossierEmployeur_`, qui ne connaît que 4 types (Contrats,
+Attestations & lettres, Formulaires, Évaluations), et de `employeurDuNom_` quand l'employeur n'a
+pas de dossier.
+
+9. **« Relevé_<employeur> » sans numéro = relevé de PAIE mensuel** → `02 · Revenus & paie/<employeur>`.
+   Cause du blocage : `estTypePaieReset_` ne matche que `paie|paye|salaire` et
+   `estFeuilletFiscalReset_` est ANCRÉ sur le nombre (`relevé 1|31`) — « Relevé » seul ne matchait
+   rien. La cadence MENSUELLE des fichiers (2023-04, 05, 07, 08 ; 2025-01) confirme la décision de
+   Marc : un RL-1 serait annuel. ⚠️ Élargir `estTypePaieReset_` à « relevé » nu serait DANGEREUX
+   (un relevé bancaire n'est pas une paie) : la règle doit exiger un EMPLOYEUR connu, ce que le
+   routeur carrière garantit déjà (`if (!employeur) return null` en amont).
+10. **Recrutement → dossier « Recherche d'emploi » RECRÉÉ sous 05** (offres d'emploi, invitations
+    d'entretien, descriptions de rôle, listes d'entreprises cibles, comparatifs de grilles).
+    ⚠️ **Conséquence à livrer dans le MÊME geste** : la mission `carriere` dissout aujourd'hui
+    `Recherche d'emploi` vers `CV & lettres` (`IDS.rechercheEmploi` en source, `sourcesJetables`).
+    Garder les deux, c'est un PING-PONG garanti — la fusion doit être retirée. Marc a été averti du
+    conflit et a confirmé son choix.
+11. **Employeur sans dossier → « Autres employeurs » commun** (Employeur D, Employeur C,
+    Organisme d’emploi A, Employeur E, Employeur F…), plutôt qu'un dossier par nom à un seul
+    fichier. Les PAIES continuent de partir en 02 quel que soit l'employeur (décision 9 + le
+    domicile unique des paies).
+12. **Documentation MÉTIER → `_Technique`** (bon de livraison d'un fabricant, rapport de maintenance
+    d'un robot convoyeur, plaque signalétique Marque X, supports de cours, évaluation de
+    performance) : ce n'est pas de l'administratif de carrière.
+
+**Restent hors périmètre, volontairement** : 3 fichiers `.p7s` « Contrat_Me Prénom NOM »
+(1 448 octets — des signatures cryptographiques, pas des documents), à traiter avec la mission
+`_Technique`/`_Doublons` ; et tout ce qui toucherait `04 · Immigration`, jamais déplacé
+automatiquement (§2).
+
+## 3. Conséquences
+
+- Toute règle modifiée ici **exige un bump de `MISSIONS_REGLES_VERSION`** (`c49-2` → `c49-3`) :
+  les refus sont keyés sous la version, sinon l'affinage reste sans effet (leçon C28-33, « un
+  verdict NÉGATIF est révisable — la version de la table fait partie de l'état »).
+- Le bump est sûr : la collecte ne re-présente que le reliquat des dossiers SOURCES ; le déjà-rangé
+  n'y est plus, donc rien ne sera re-déplacé.
+- Décision 7 fait SORTIR des documents de `02 · Finances` : c'est un mouvement inter-domaines,
+  assumé et demandé. Les gardes §2 (zone protégée `04`, aucune suppression) restent entières.
+- Découpage : **PR1** (livrée) = décisions 2/3/4 + bump ; **PR2** = décisions 9/10/11/12 (les 39 de
+  05 — dont le RETRAIT de la fusion `Recherche d'emploi` → `CV & lettres`, indissociable de la
+  décision 10) ; **PR3** = décision 6 (Modèles & formulaires) ; **PR4** = décision 7 (dossiers-années).
+- Chaque PR qui touche une règle **bumpe à nouveau** `MISSIONS_REGLES_VERSION` : sans cela son
+  affinage reste sans effet sur les refus déjà keyés.
+
+
+## 4. Correction du diagnostic « véhicules » et décision du propriétaire du 2026-08-20
+
+> Cette section **révise** la ligne « véhicules » du §1 et les décisions 2/3/4. Elle est écrite
+> après la revue flotte de la PR1 (structure-keeper + code-reviewer, convergents) et une
+> **vérification directe dans le Drive**, qui a démenti la cause annoncée.
+
+### 4.1 Ce que le Drive dit vraiment (lu le 2026-08-20)
+
+| Dossier | Contenu réel |
+|---|---|
+| `Véhicule/Véhicule A` | **VIDE** — racine et 4 sous-dossiers, zéro fichier |
+| `Véhicule/Véhicule B` | 2 fichiers datés (2019-11-09, 2023-11-24) **+ un sous-dossier `Marque K`** portant un comparatif d'occasion daté 2026-07-31 |
+| `Véhicule/Véhicule C` | 1 fichier daté (2026-07-16) |
+| `Véhicule/Marque K` | **existe** (créé par le moteur le 18/08), 2 fichiers datés 2026-07-01 |
+
+Trois conséquences, toutes fatales au repli par date :
+
+1. **La gate n'était pas bloquée par Marque K, mais par la Véhicule A.** `fenetresOccupation_` ne rend une
+   fenêtre que pour un dossier contenant au moins un fichier daté. La Véhicule A est vide : elle n'a
+   **jamais** eu de fenêtre, et n'en aura pas tant qu'elle est vide. `fenetresCompletes` restait
+   donc faux **après** le retrait de Marque K — la PR1 initiale ne débloquait rien.
+2. **Les fenêtres étaient polluées.** Contrairement à ce que le code supposait, `ciblesAvecJetons_`
+   liste **tous** les enfants de « Véhicule » — donc aussi `Véhicule/Marque K` et les dossiers communs.
+   Un générique daté aurait pu être rangé dans le dossier même que cet ADR retire.
+3. **Elles étaient inutilisables sur le fond.** La fenêtre de la Véhicule B court de 2019-11 à 2026-07
+   (à cause du comparatif Marque K mal rangé sous elle) : elle aurait avalé jusqu'aux documents de
+   l'époque française. Une fenêtre dérivée d'un état que la mission **déplace elle-même** ne peut
+   pas porter un verdict définitif (leçon « donnée MOUVANTE », C28-49).
+
+Et surtout : sur les 48, **quasiment aucun ne nomme un véhicule du canon** — 16 assurances
+Bellerives, 19 factures de garage, 11 annonces de magasinage. Ils dépendaient TOUS du repli par
+date.
+
+### 4.2 Décision du propriétaire (2026-08-20) — un commun « À attribuer »
+
+Question posée : « comment attribuer les 37 documents qui ne nomment aucun de tes véhicules ? ».
+Réponse : **un dossier commun « À attribuer »**, plutôt que de deviner ou de laisser bloqué.
+
+- **Le repli par DATE est RETIRÉ de la mission véhicule** (`batirCtx` ne construit plus de fenêtre,
+  la gate de complétude disparaît). `logementParDate_` **reste** au service de la mission LOGEMENT,
+  dont les squelettes sont remplis et les périodes disjointes.
+- Ordre de décision **complet** (7 étapes — les deux dernières manquaient à une première rédaction
+  de cette section, alors que ce sont elles qui traitent le gros du volume) :
+  1. dossier `Véhicule C` isolé → en bloc ;
+  2. **les 2 dossiers « Marque K » parasites, par IDENTITÉ de source** (`sourceId`) — pas par le
+     nommage : leurs fichiers sont à la RACINE de la source, donc `sousChemin` vaut `''` et la
+     règle `sources: ['Marque K']` ne les voit pas ;
+  3. commun par dossier source dissous (`Véhicules/Marque K/…`) ou par **jeton de nom** (`marque k`,
+     `Modèle K`) ;
+  4. **location** : + un véhicule du canon ⇒ refus (ambigu) ; sinon `Locations` ;
+  5. **véhicule nommé** → `Véhicule/<v>/<catégorie>` ;
+  6. **sous-dossier source PORTANT le nom d'un commun** (`Véhicules/Recherche & achat`) → ce
+     commun. **Après** l'étape 5, pour qu'un magasinage qui nomme la Véhicule B aille bien sous la
+     Véhicule B (décision 1) ;
+  7. sinon **`Véhicule/À attribuer`**, catégorie d'origine conservée — sauf si la règle partagée
+     du flux sait le placer ailleurs que sous « Véhicule » (filet de sécurité, §4.3 #9).
+- **Rien n'est deviné, rien n'est bloqué.** Marc répartit quand il veut.
+
+### 4.3 Autres correctifs issus de la revue (même geste)
+
+| # | Correctif |
+|---|---|
+| 1 | Les communs se reconnaissent aussi par **jetons de NOM** (`communVehiculeDuNom_`), consultés par le **flux vivant** ET les missions — sans quoi un document « Marque K » entré par le flux tombait **à plat à la racine de `03`** (le vrac que `HistoriqueVrac` compte comme dette). Décision 3 « Marque K compris » n'était tenue que pour le dossier source. |
+| 2 | Les **2 dossiers « Marque K » créés par le moteur** (`Véhicule/Marque K`, `Véhicule/Véhicule B/Marque K`) deviennent des **sources** de la mission : sans ça, retirer Marque K du canon les laissait orphelins à vie. |
+| 3 | `estLocationVehicule_` + véhicule **du canon** = **AMBIGU** ⇒ refus (révisable) au lieu d'un déplacement définitif : au Québec « location » désigne couramment un **bail** automobile, et la LOA est le mode d'acquisition standard en France. |
+| 4 | Les communs sont déclarés dans **`estSegmentStructurel_`** (Reorg.gs). ⚠️ La PR1 affirmait que leur présence dans `STRUCTURE_CIBLE_RESET` les protégeait via `estAncreStructurelleFusion_` : **c'est faux** — ce prédicat ne lit que le premier niveau du domaine, et la collecte de `Fusion.gs` n'est même pas récursive. L'exposition réelle est l'inventaire de la **Réorg**, lui bien récursif ; `Locations` et `À attribuer` n'étaient couverts par rien. *(Nuance : `estAncreStructurelleFusion_` appelle `estSegmentStructurel_` en première ligne — le correctif couvre donc Fusion **aussi**, le jour où sa collecte deviendrait récursive.)* |
+| 5 | `MISSIONS_MOTS_VEHICULE` : pluriels ajoutés (`véhicules`, `voitures`, `automobiles` manquaient alors qu'`autos` était là) + test verrouillant l'invariant tacite « jetons alphabétiques seulement » (le préfixe de date n'est pas retiré par ce prédicat). |
+| 6 | `docs/TAXONOMY.md` mis à jour dans le même commit. |
+| 7 | **Le jeton `Modèle K` récupéré.** Il appartenait à l'entrée Marque K du canon ; le retirer avec elle renvoyait « Garage Modèle K » **à plat dans `03`**. Une suppression d'entrée emporte ses jetons — vérifier ce qu'ils couvraient. |
+| 8 | Les 2 dossiers Marque K sont dissous **par identité de source**, pas par le nommage (cf. §4.2 étape 2). Dépendre du mot « marque k » marchait pour les 3 fichiers actuels, pas pour le suivant. |
+| 9 | **Filet de sécurité sur `À attribuer`** : c'est un DÉPLACEMENT, donc définitif. Or « Véhicules » n'est pas un dossier pur (Marc y a rangé 4 conversations de propriétaire/plombier). Avant d'avaler un document, le routeur demande à la règle partagée du flux si elle sait le placer ailleurs que sous « Véhicule » — si oui, **refus** (révisable). Les 2 filets FAIBLES du flux (`Contrats`/`Correspondance`) sont exclus : ils attrapent par SOUS-CHAÎNE. |
+| 10 | **Le FLUX apprend `À attribuer`** (`Reset.gs`) pour les documents de véhicule typés sans véhicule identifiable (immatriculation, contravention, SAAQ). Ils rendaient `null`, donc partaient **à plat à la racine de `03`** — le vrac que `HistoriqueVrac` compte comme dette. Voir §4.4 : c'est ce correctif qui rend le placement CONVERGENT. |
+| 11 | **`dispatch03`, le 3ᵉ consommateur, était resté en arrière** : il filait les « location + véhicule du canon » dans `Locations` sans l'arbitrage d'ambiguïté (déplacement définitif) et ignorait `communVehiculeDuNom_`. Instance exacte de la leçon « mutualiser UNE dimension d'une règle ne couvre pas les autres » : le prédicat était partagé, la DÉCISION non. |
+
+### 4.4 Consolidation : décision explicite de NE PAS bumper `CONSOLIDATION_TAG`
+
+`RESET_TABLE_VERSION t4 → t5` est **inerte aujourd'hui** (`RESET_ACTIF: false`). Les vrais
+consommateurs de `cheminCibleReset_` en production sont le **flux vivant** (sans clé de règle) et
+la **consolidation**, dont la clé `conso|<tag>|<fileId>` ne porte **pas** la version de table.
+
+Le risque d'un bump `conso-3 → conso-4` était que la consolidation, ne sachant pas reproduire la
+cible de la mission, propose de **déplacer vers la racine du domaine** ce que la mission vient de
+ranger — et `CONSOLIDATION_EXEC_ACTIF` l'aurait **exécuté**, sans validation ligne à ligne.
+
+**Le correctif #10 supprime ce risque à la racine** : le flux calcule désormais lui-même
+`Véhicule/À attribuer`, donc la consolidation recalcule la MÊME cible et inscrit « OK » au lieu de
+proposer un retour au vrac. Flux, mission et consolidation sont d'accord **par construction**,
+ce qui vaut mieux qu'un négatif tenu par de la prose (« promesse de verrou = verrou codé »).
+
+**Décision inchangée : pas de bump dans cette PR** — il n'apporte rien ici et coûterait une
+re-marche complète du Drive. Mais il redevient *sûr*, ce qui n'était pas le cas avant #10. Le jour
+où la campagne reset sera relancée (`RESET_ACTIF`), le couple `RESET_TABLE_VERSION` ↔
+`CONSOLIDATION_TAG` devra être réexaminé.
+
+### 4.5 Ce que la PR livre réellement (chiffré, sans promesse)
+
+- **jusqu'à 11 fichiers** de `Véhicules/Recherche & achat` → `Véhicule/Recherche & achat`
+  (majorant : ceux qui nomment un véhicule du canon partent sous CE véhicule, étape 5 avant 6) ;
+- **3 fichiers** des 2 dossiers « Marque K » → même destination ;
+- **~35 fichiers** (assurances, garages, SAAQ) → `Véhicule/À attribuer`, groupés par catégorie ;
+- les documents « Marque K », « Modèle K », immatriculation/contravention/SAAQ du **flux vivant** ne
+  tombent plus à plat à la racine de `03`.
+
+⚠️ **Sur les 2 dossiers « Marque K »** : leurs horodatages de création sont à vitesse machine
+(`Véhicule/Véhicule B/Marque K` à 16:47:08 puis `Véhicule/Véhicule C` 7 s plus tard), ce qui désigne le
+moteur — mais **je n'ai pas identifié le chemin de code** qui produit `Véhicule/Véhicule B/Marque K`.
+Les dissoudre reste conforme à la décision 2 quelle qu'en soit l'origine (« Marque K, c'était juste une
+recherche d'achat ») ; si Marc les avait créés à la main, le geste est le même.
+
+Aucun document n'est attribué à un véhicule qui n'est pas nommé — c'est la décision du propriétaire.
+
+
+## 5. PR2 — les 39 de « employeurs & CV », instruits sur pièces (2026-08-20)
+
+Les 3 sources ont été relues avant d'écrire la moindre règle (protocole §8). Répartition RÉELLE :
+
+| Famille | Volume | Exemples réels | Destination (décision) |
+|---|---|---|---|
+| Relevés de paie mensuels | 7 | `2023-04_Relevé_Employeur B.pdf` … `2025-01_` | `02 · Revenus & paie/<employeur>` (D9) |
+| Recrutement | ~15 | `Offre d'emploi_Cégep B`, `Invitation d'entretien_Employeur B`, `Description de rôle`, `Liste d'entreprises cibles`, `Liste de prospection`, `Répertoire d'entreprises industrielles`, `Formulaire de reclassement_Organisme d’emploi A` | `05 · Carrière/Recherche d'emploi` (D10) |
+| Documentation métier | 6 | `Bon de livraison_Fabricant`, `Plaque signalétique_Marque X`, `Rapport de maintenance_robot convoyeur`, `Rapport de service_Employeur A`, `Support de cours` ×2 | `_Technique` (D12) |
+| Employeur sans dossier | 3 | `Attestation employeur_Employeur D`, `Attestation_Employeur C`, `Paie_Organisme d’emploi A` | `05/Employeurs/Autres employeurs` — et la PAIE en `02 · Revenus & paie/Autres employeurs` (D11) |
+
+### 5.1 Précisions de mise en œuvre
+
+- **D9, le prédicat est ÉTROIT.** Élargir `estTypePaieReset_` à « relevé » nu serait dangereux (un
+  relevé BANCAIRE n'est pas une paie). La règle exige les trois : type « relevé », **ni** feuillet
+  fiscal (`estFeuilletFiscalReset_`, ancré sur le nombre — RL-1/RL-31 sont ANNUELS), **ni** RIB
+  (`estRibReset_`), **et** un employeur CONNU. La cadence mensuelle observée (2023-04, 05, 07, 08 ;
+  2025-01) confirme la lecture de Marc.
+- **D11 borne le nombre de dossiers.** Un dossier par employeur ferait déborder la règle des ≤ 7
+  enfants de « Revenus & paie » (3 canoniques + 5 occasionnels). D'où **un seul** `Autres employeurs`,
+  des DEUX côtés (05 et 02) — c'est aussi ce que Marc demande (« plutôt qu'un dossier par nom à un
+  seul fichier »). Les employeurs sans dossier reconnus par une table dédiée
+  (`MISSIONS_EMPLOYEURS_AUTRES`), jamais devinés.
+- **D10 exige un geste SYMÉTRIQUE.** La mission `carriere` DISSOLVAIT `Recherche d'emploi` vers
+  `CV & lettres` ; la table du flux visait la cible de cette fusion. Recréer le dossier sans retirer
+  les deux serait un PING-PONG garanti. Livré dans le même commit : source + `sourcesJetables` +
+  branche du routeur retirées, nœud re-déclaré dans `STRUCTURE_CIBLE_RESET`, verrou d'ABSENCE
+  inversé en verrou de PRÉSENCE, et le FLUX apprend les types de recrutement (une seule règle, deux
+  consommateurs).
+
+### 5.2 Deux exceptions ASSUMÉES, contre la lettre de la décision
+
+1. **L'« Évaluation de performance » de 2016 n'ira PAS dans `_Technique`**, bien que Marc l'ait citée
+   en D12. Router le type « évaluation de performance » vers `_Technique` entrerait en collision
+   frontale avec `sousDossierEmployeur_`, qui range les **Évaluations** dans le dossier de
+   l'employeur : une vraie évaluation RH partirait dans le fourre-tout technique. Le fichier visé
+   (`…reclassement migration taxonomie 2016`) est un artefact isolé ; il reste REFUSÉ (révisable),
+   ce qui coûte un re-examen au lieu d'un document perdu de vue.
+2. **`Fiche comparative` exige un mot de SALAIRE.** Le type seul est trop générique pour porter un
+   déplacement définitif ; la règle s'appuie sur le nom complet (`salarial`), conformément au cas
+   réel (« Comparatif grilles salariales deux employeurs publics »).
+
+Restent volontairement REFUSÉS, faute de règle prouvée : `Document professionnel_Employeur B`
+(type non informatif), `Attestation conformité algorithme calcul de paie` (aucun employeur),
+`Lettre de recommandation_École d’ingénieurs A` (une ÉCOLE, pas un employeur — relève de `06 · Études`),
+`Note personnelle … Émetteur d’ETF ETF`, et les 3 `.p7s` (signatures cryptographiques, hors périmètre §2).
+Un refus est keyé sous la version : il se ré-évaluera au prochain affinage.
+
+### 5.3 Bump
+
+`MISSIONS_REGLES_VERSION` **`c49-3` → `c49-4`** : sans lui, les 39 resteraient marqués « déjà
+tenté » sous c49-3 et l'affinage serait sans effet (leçon C28-33).
+
+
+### 5.4 Convergence flux ↔ mission ↔ consolidation (issu de la revue flotte)
+
+`ConsolidationExec` **recalcule** la cible d'un fichier au moment du déplacement, via
+`cheminCibleReset_`. Si le flux ne sait pas reproduire ce que la mission a décidé, **il défait le
+rangement, sans bruit**. C'est le défaut corrigé en §4.3 #10 pour `À attribuer` ; la revue en a
+trouvé quatre instances de plus dans PR2, toutes mesurées :
+
+| Décision | Cible mission | Ce que le flux rendait AVANT | État |
+|---|---|---|---|
+| D9 | `Revenus & paie/<employeur>` | `Relevés/AAAA` (relevés **bancaires**) | corrigé |
+| D11 (02) | `Revenus & paie/Autres employeurs` | `Revenus & paie` (racine) | corrigé |
+| D11 (05) | `Employeurs/Autres employeurs/<type>` | `null` ⇒ racine de `05` (vrac) | corrigé |
+| *(pré-existant)* | `Employeurs/<X>/<type>` | `Employeurs/<X>` (un cran au-dessus) | corrigé |
+
+Ces quatre-là sont désormais tenues par **un tripwire** (`test/missions.test.js`) : pour chaque cas
+de `routerCarriere_`, `cheminCibleReset_(domaine, nom)` doit rendre **le même sous-chemin**. C'est
+ce test qui rend la symétrie structurelle au lieu de dépendre de la vigilance d'un relecteur — et
+il aurait attrapé les quatre tout seul. Prouvé par mutation dans les deux sens.
+
+**Exception assumée — D12 est ASYMÉTRIQUE, et c'est structurel.** `_Technique` est **hors
+domaines** : le flux ne peut pas y router (`cheminCibleReset_` rend un chemin *dans* un domaine),
+et la consolidation ne parcourt que les domaines — elle ne verra donc jamais ces fichiers. Aucune
+divergence possible. Le revers : un futur « Bon de livraison » entrant par Gmail dans `05` rendra
+`null` et restera à plat, sans que la mission (convergée) le reprenne. D12 est un **one-shot** sur
+le stock, pas une règle de flux — écrit ici pour que la dette ne réapparaisse pas sans explication.
+
+### 5.5 Deux prédicats trop larges, rattrapés en revue
+
+1. **`estReleveDePaie_` avalait les relevés QUALIFIÉS.** « Relevé d'**emploi** » (le ROE, remis par
+   tout employeur québécois en fin de contrat — donc très plausible dans `Employeurs/Employeur B`)
+   partait en `02 · Revenus & paie`, alors que `Reset.gs` porte la décision **inverse** en toutes
+   lettres : « c'est un document de CARRIÈRE (05) ». *Le code contredisait son propre commentaire.*
+   Idem « relevé de notes » (études) et « relevé de compte » (banque). Deny-list explicite ajoutée.
+2. **Les jetons `crest` et `trajectoire` sont des mots courants.** « Bilan — Trajectoire
+   professionnelle » (un document d'accompagnement carrière, dont le dossier `Formation & bilans`
+   existe précisément) partait chez « Autres employeurs ». Même collision que « dupont ⊂ Exemplel »
+   (C28-49). Jetons passés en **multi-mots** (deux mots par employeur), avec un
+   contre-exemple par employeur en test : le charset ne prouve pas la discrimination.
+
+Les deux produisaient un **déplacement définitif à clé de SUCCÈS**. Rappel de la règle qui les
+condamne : le prédicat qui déclenche l'action irréversible est STRICT, et **dans le doute il
+REFUSE** — un refus coûte un re-examen, un faux positif coûte un document perdu de vue.
+
+### 5.6 Reste ouvert (dit, pas caché)
+
+- **Le contenu de `Recherche d'emploi` est déjà parti.** Sous `c49-3` le dossier était une source
+  JETABLE : la mission l'a vidé vers `CV & lettres`, et le bump ne rouvre que les refus des sources
+  COURANTES — `CV & lettres` n'en est pas une. **Le rapatriement est donc MANUEL.** Le dossier
+  lui-même a été vérifié dans le Drive le 2026-08-20 : il existe, est bien sous `05 · Carrière`, et
+  n'est pas corbeillé.
+- **Sa COULEUR n'a pas pu être vérifiée** (l'outil de lecture Drive ne rend pas `folderColorRgb`).
+  S'il a été peint en ROUGE quand il était vide, il crie « supprimable » alors qu'il redevient la
+  cible officielle du recrutement — à dépeindre à la main, ou à traiter dans un geste ultérieur.
+
+
+## 6. PR3 — décision 6 : « Modèles & formulaires » (2026-08-20)
+
+Source relue avant d'écrire la règle. `03 · Contrats` contient **9 fichiers**, dont **8 formulaires** :
+4× `Formulaire de demande de location_Association de propriétaires` (même date), 2× le même pour
+`Bailleur F`, 2× `Formulaire de consentement communication…_Service locatif`. Le 9ᵉ est un
+`Contrat de vente véhicule d'occasion_Concessionnaire`, hors périmètre de cette décision.
+
+### 6.1 ⚠️ La décision n'est PAS applicable telle quelle à `02 · Finances`
+
+Décision 6 demandait un `Modèles & formulaires` **par domaine**, en citant `03` *et* `02`. Or la
+règle des **≤ 7 nœuds par niveau** — la contrainte que Marc a lui-même posée — l'interdit :
+
+| Domaine | Nœuds actuels | Place pour un nœud de plus ? |
+|---|---|---|
+| `03 · Logement & véhicule` | 6 | **oui** (→ 7) |
+| `02 · Finances` | **7 — PLEIN** | **non** |
+| `05 · Carrière` | 7 (depuis D10) | non |
+| `06 · Études & diplômes` | 7 | non |
+
+**Livré : `03` seulement**, là où les 8 fichiers sont et où la place existe. Pour `02`, la décision
+reste ouverte : elle exige d'abord de libérer un nœud (regrouper deux existants), ce qui est une
+décision du propriétaire, pas un arbitrage technique. Aucune preuve de besoin côté `02` pour l'instant :
+les 24 bloqués y sont des **fourre-tout d'année** (décision 7, PR4), pas des formulaires.
+
+### 6.2 Ordre : le SPÉCIFIQUE gagne toujours sur le générique
+
+La règle est un **filet**, placé APRÈS les règles par entité (adresse, bailleur, véhicule) et AVANT
+les filets `Contrats`/`Correspondance`. Conséquence voulue : le jour où `Bailleur F` entrerait
+dans `MISSIONS_BAILLEURS` (il n'y est pas), ses formulaires partiraient chez le **bailleur**, pas
+dans les modèles. Un formulaire attribuable n'est pas un modèle.
+
+### 6.3 Correctif transverse : les nœuds de NIVEAU 1 étaient mutables par la Réorg
+
+En posant ce nœud, la revue de PR2 (finding B-bis) devient concrète : `estAncreStructurelleFusion_`
+protège les buckets de niveau 1 **du côté Fusion**, mais `estSegmentStructurel_` — que consulte
+l'inventaire RÉCURSIF de la **Réorg** — ne les connaissait pas. Un plan LLM pouvait donc proposer de
+fusionner `Modèles & formulaires` (vide au départ, donc candidat idéal) ou `Recherche d'emploi` vers
+un voisin sémantique ; validé, le dossier partait en `vide-candidat` puis à la corbeille, pendant
+que le flux le recrée PAR NOM au document suivant — split-brain.
+
+`estSegmentStructurel_` reconnaît désormais **tout bucket de niveau 1 de `STRUCTURE_CIBLE_RESET`**,
+comme le fait déjà son jumeau côté Fusion. Bénéfice secondaire : le LLM ne reçoit plus ces dossiers
+comme « regroupables », donc plus d'essais brûlés sur des actions que la whitelist rejette de toute
+façon.
+
+## 7. PR4 — décision 7 : vider les dossiers-années de 02 (2026-08-20)
+
+Les **12 dossiers-années ont été lus intégralement** (6 sont vides ; 24 fichiers dans les 6 autres).
+Jamais un échantillon : c'est le comptage exhaustif qui a montré que la décision 7 nommait 4 exemples
+pour un ensemble bien plus hétérogène.
+
+### 7.1 La conception : le FLUX fait autorité, la table ne choisit qu'une SORTIE
+
+Contrainte de Marc : « réutiliser la MÊME règle de routage que le flux vivant ». Or le flux n'a
+**aucune** règle pure de choix de DOMAINE — c'est le LLM qui tranche. Il n'y avait donc rien à
+réutiliser de ce côté. `routerFinance02_` a **deux étages, et l'ordre EST la règle** :
+
+1. **Le flux fait autorité DANS 02.** `cheminCibleReset_('02 · Finances', nom)` est essayé en
+   PREMIER : ce que 02 sait placer y reste.
+2. Sinon, **sortie inter-domaines** via `MISSIONS_ANNEES02_DOMAINES` (jetons MOT ENTIER, motifs et
+   exclusions multi-mots), avec le sous-chemin calculé par le flux du domaine d'arrivée. Jamais un
+   domaine **protégé** ; flux muet à l'arrivée ⇒ on redescend à l'étage 3.
+Sinon : **refus keyé** (révisable). Il n'y a **PAS** de repli local — un troisième étage existait
+(paie, fiscal, relevés, reçus, assurances, + année du dossier SOURCE) ; mesuré après la
+restructuration, il était productif sur **0 cas sur 11** et a été retiré. Ce qu'il coûte, dit :
+l'année du dossier source pour un nom sans année plausible (dégradation de bucket, jamais un
+refus), et le mot `declaration` nu — que le flux ne reprend PAS, volontairement (il volerait
+« Relevé de déclaration de sinistre ») ; les tournures fiscales réelles sont listées à la place.
+
+**Cet ordre a été payé par la revue.** La première version faisait l'inverse (table d'abord, flux
+en dernier recours) et deux défauts en découlaient, tous deux vérifiés par exécution :
+
+- un `Avis d'imposition_SCI SCI A` **quittait les Finances pour `05 · Carrière`** sur le seul jeton
+  « mric », avec une clé de SUCCÈS — donc pour toujours. Une garde par liste de types réservés a
+  été essayée puis **jetée** : elle ratait ce cas précis (le type n'était dans aucune liste). Le bon
+  test n'est pas une liste à tenir à jour, c'est « le flux sait-il le placer dans 02 ? » ;
+- les règles locales imposaient leur propre arbitrage et **divergeaient du flux sur 5 familles
+  mesurées** (relevé de paie D9, assurance émise par une banque, facture d'un courtier, facture
+  d'un assureur, relevé d'impôt) — la consolidation défaisait chacune juste après.
+
+Deux erreurs du **flux lui-même** ont été corrigées au passage, sans quoi l'autorité qu'on lui donne
+aurait propagé ses fautes : « Assurance_Bellerives » partait en `Banques` (le TYPE ne comptait pas,
+seul l'émetteur) et « Relevé d'impôt » en `Relevés` (le générique « relevé » passait avant le fiscal).
+
+Mesure avant d'écrire la moindre règle : le flux savait déjà router un CONTRAT Mobile Boreale vers
+`Contrats & fournisseurs/**Mobile Boreale**` (dossier d'entité), plus finement que la cible envisagée.
+⚠️ Depuis que le flux fait autorité, cela ne vaut plus que si `02` est muet : une `Facture_Boreale
+Plus` reste désormais en `02/Reçus & factures` (c'est une dépense), et c'est voulu.
+
+**Résultat : 21 rangés, 1 refusé** (`Note de frais_Prénom NOM` — le domaine d'une note de
+frais nominative n'est pas décidable, un refus est révisable). Comptage : **24 fichiers** dans les
+6 dossiers-années non vides, **22 noms distincts** (2 doublons de forme sur Boreale et les statuts),
+dont 21 rangés + 1 refusé.
+
+### 7.2 Deux pièges trouvés en mesurant, invisibles en lecture
+
+1. **`CONFIG.DOMAINES` ne contient que les 7 domaines FIXES.** `07 · Santé` et `09 · Voyages` sont
+   des domaines **AUTO** dont l'ID vit en Script Property et peut être **absent**. Lire la CONFIG
+   seule rendait `undefined` — un `cibleId` vide, donc un plantage au `moveTo`. Résolution déplacée
+   dans `batirCtx` (I/O), routeur toujours PUR, et **échec fermé** : domaine sans ID ⇒ refus.
+2. **`sousDossier_` ne résout qu'UN niveau.** Passer `Contrats & fournisseurs/Mobile Boreale` aurait
+   créé un dossier **portant la barre oblique dans son nom**. Le chemin est désormais découpé
+   segment par segment (rétro-compatible). ⚠️ Le mock de test concatène `parent + '/' + nom` : il
+   produit la MÊME chaîne dans les deux cas — seul le **nombre d'appels** distingue le correct du
+   faux, et c'est la mutation qui l'a révélé.
+
+### 7.3 Ce que PR4 ne fait PAS, et pourquoi
+
+- **Le DPA `Bailleur F`** part en `02/Banques` (un mandat de prélèvement est une autorisation
+  bancaire), et non « vers le logement » comme demandé : `Bailleur F` **n'est pas un bailleur
+  déclaré**, donc aucune adresse ne peut être visée. Le router vers `03` sans adresse produirait du
+  vrac. Dès que Marc donne l'adresse, l'entrée entre dans `MISSIONS_BAILLEURS` et ce document —
+  **ainsi que ses 2 formulaires de demande de location** (§6) — partent chez le bon logement.
+- Les nouvelles règles de flux (budgets, achats en ligne, courtage, banque, formulaire fiscal étranger, revendeur en ligne,
+  statuts de société, caisse santé) profitent **aussi au flux vivant** : ces documents seront mieux classés
+  à l'avenir, pas seulement rattrapés.
+
+### 7.4 Versions : ce qui est bumpé, et ce qui ne l'est PAS (décision écrite)
+
+`MISSIONS_REGLES_VERSION` c49-5 → **c49-6** : les refus des missions sont keyés dessus, sans quoi
+l'affinage resterait sans effet.
+
+`RESET_TABLE_VERSION` reste **`t5`** et `CONSOLIDATION_TAG` reste **`conso-3`**, délibérément
+(§4.4 a créé le précédent d'écrire la décision plutôt que de laisser croire à un oubli) :
+
+- le reset est **éteint** (`RESET_ACTIF: false`) — bumper `t5` n'aurait aucun effet observable ;
+- bumper `CONSOLIDATION_TAG` ferait **re-marcher tout le Drive** pour ré-évaluer des fichiers déjà
+  marqués « OK ». Le gain (quelques budgets/courtage/formulaires fiscaux déjà rangés ailleurs) ne vaut pas le coût en
+  quota, et les nouvelles règles s'appliquent de toute façon à **tout ce qui passe désormais**.
+- ⚠️ Conséquence assumée et à connaître : un fichier déjà classé sous les anciennes règles ne sera
+  pas repris. Si un jour on veut le rattrapage, c'est `CONSOLIDATION_TAG` qu'il faut bumper — pas
+  `RESET_TABLE_VERSION`, qui ne pilote rien tant que le reset dort.
+
+### 7.5 Ce que la décision 7 ne ferme PAS (dit, pas passé sous silence)
+
+**Les dossiers-années vont se remplir à nouveau.** `CONFIG.DOMAINES_PAR_ANNEE` contient
+`02 · Finances` : le flux vivant y crée `02 · Finances/AAAA` pour tout document dont l'entité n'est
+pas validée — **les mêmes dossiers**, retrouvés par nom. Et `executerMission_` s'arrête définitivement
+après convergence (`DriveAI_MISSION_FINI_<tag>`). Donc la mission vide les 12 dossiers, converge,
+s'arrête… et le flux les re-remplit **en silence**, sans re-drainage jusqu'au prochain bump de
+version. Le nettoyage sera défait.
+
+**DÉCISION DE MARC (2026-08-20) : la mission devient PERPÉTUELLE** (issue 2 sur les 3 proposées).
+Elle draine indéfiniment ; le flux peut recréer `02 · Finances/AAAA`, ils sont vidés au tick suivant.
+Deux conséquences livrées dans le même geste :
+- elle n'écrit **jamais** `DriveAI_MISSION_FINI_annees02` et n'est **jamais peinte en rouge** (peindre
+  des dossiers que le flux recrée inviterait à supprimer pour rien) ;
+- 🔴 `paies` était gatée sur elle par `convergenceApres` — **retiré**. Une mission qui n'écrit jamais
+  son drapeau bloquerait l'aval **à vie** (c'est la leçon C28-32 « un statut terminal ne peut pas
+  servir de signal d'occupation », vue par l'autre bout : ici le statut n'arrive jamais). Un test
+  interdit désormais à toute mission d'attendre la convergence d'une perpétuelle.
+
+*(Issues écartées : retirer `02` de `DOMAINES_PAR_ANNEE` — les documents sans entité validée iraient
+à plat dans 02, à étudier séparément ; re-bumper la version périodiquement — silencieux.)*
+
+**Correction d'une affirmation fausse.** Le premier jet de §7 écrivait que les 12 dossiers vidés
+seraient visibles « en `vide-candidat` dans l'app ». C'est faux : `detecterDossierVide_` écarte tout
+nom `AAAA` via `estSegmentStructurel_`. Il n'existe **aucun** signal automatique — c'était une
+compensation imaginaire, écrite dans trois documents vivants à la fois.

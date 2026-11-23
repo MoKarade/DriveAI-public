@@ -1,0 +1,4 @@
+{
+  "_doc": "Cliquet de couverture du moteur Apps Script (src/*.gs), lignes. Part de la mesure du 2026-10-16 (86,6 % sur Node 22 en local) moins une marge pour la dérive d'attribution des lignes entre versions de Node ; `node .github/ci/couverture-moteur.mjs --maj` le resserre quand la mesure monte. Ne descend jamais : le baisser demande une décision de Marc.",
+  "lignes": { "min": 86.0 }
+}

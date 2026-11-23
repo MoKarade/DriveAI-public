@@ -1,0 +1,367 @@
+'use strict';
+/**
+ * CONSOLIDATION (C28-26, ADR-0023) — fonctions PURES du plan de consolidation (Consolidation.gs) :
+ * décomposition du nom classé, chemin CIBLE sous la taxonomie à plat (année/entité validée/type
+ * d'identité), et DÉCISION (OK / Déplacer / Doublon / Ignoré). Les exigences du plan architecte :
+ * un fichier mal rangé → « Déplacer » ; un hash déjà vu → « Doublon » ; un fichier sous 04 →
+ * « Ignoré » MÊME s'il est mal rangé ou en double (§1). Aucune I/O ici.
+ */
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { load } = require('./harness');
+
+const ctx = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Migration.gs', 'Reset.gs', 'Missions.gs', 'Router.gs']);
+const plat = (o) => JSON.parse(JSON.stringify(o)); // normalise les prototypes (frontière vm)
+
+/* ---------- analyserNomClasse_ : décomposition du nom AAAA[-MM[-JJ]]_Type_Tiers.ext ---------- */
+
+test('analyserNomClasse_ : nom au jour, au mois, à l\'année — et hors convention → null', () => {
+  assert.deepStrictEqual(plat(ctx.analyserNomClasse_('2026-03-01_Facture_Zephyr.pdf')),
+    { annee: '2026', type: 'Facture', tiers: 'Zephyr' });
+  assert.deepStrictEqual(plat(ctx.analyserNomClasse_('2026-03_Relevé_Bellerives.pdf')),
+    { annee: '2026', type: 'Relevé', tiers: 'Bellerives' });
+  assert.deepStrictEqual(plat(ctx.analyserNomClasse_('2023_Bulletin de notes_CORVIA.pdf')),
+    { annee: '2023', type: 'Bulletin de notes', tiers: 'CORVIA' });
+  // sans tiers (nomSansTiers_) : le type reste lisible
+  assert.deepStrictEqual(plat(ctx.analyserNomClasse_('2026-06-16_Rapport.pdf')),
+    { annee: '2026', type: 'Rapport', tiers: null });
+  // hors convention → tout null (le fichier sera ciblé à plat au domaine)
+  assert.deepStrictEqual(plat(ctx.analyserNomClasse_('PXL_20240101_123.jpg')),
+    { annee: null, type: null, tiers: null });
+});
+
+/* ---------- cheminCibleConsolidation_ : la formule du plan (année si domaine par année + entité VALIDÉE, sinon plat) ---------- */
+
+// Entités validées de test : carte cleCanoniqueEntite_ → {nom, dossierId} (comme
+// entitesValideesParCle_ depuis l'ADR-0028 — l'ID est la vérité topologique, le nom un repli).
+const validees = {};
+[['02 · Finances', 'Bellerives'], ['05 · Carrière', 'Alphatek']].forEach(([dom, ent]) => {
+  validees[ctx.cleCanoniqueEntite_(dom, ent)] = { nom: ent, dossierId: 'ID_' + ent };
+});
+
+test('cheminCibleConsolidation_ : DÉLÈGUE à la structure Reset (ADR-0033) — 02 par TYPE, plus par entité', () => {
+  // La consolidation calcule sa cible par la MÊME règle que le flux ET le Reset (`cheminCibleReset_`).
+  // Décision Marc « unifier sur la structure validée » : une facture/un relevé va dans l'arbre
+  // thématique du Reset, PAS dans un dossier d'entité — une banque validée regroupe par TYPE.
+  const domAnnee = ctx.CONFIG.DOMAINES_PAR_ANNEE[0]; // 02 · Finances
+  assert.strictEqual(ctx.cheminCibleConsolidation_(domAnnee, '2026-03-01_Facture_Zephyr.pdf', validees).nom,
+    'Reçus & factures/2026', 'facture → arbre thématique Reçus & factures/AAAA');
+  assert.strictEqual(ctx.cheminCibleConsolidation_(domAnnee, '2026-03_Relevé_Bellerives.pdf', validees).nom,
+    'Relevés/2026', 'relevé (même d\'une entité validée) → Relevés/AAAA, plus un dossier d\'entité (ADR-0033)');
+});
+
+test('cheminCibleConsolidation_ : employeur/recherche via Reset ; REPLI à plat quand le Reset ne route pas', () => {
+  assert.strictEqual(ctx.cheminCibleConsolidation_('05 · Carrière', '2026-06_Bulletin de paie_Alphatek.pdf', validees).nom,
+    'Employeurs/Alphatek', 'paie d\'employeur → arbre Employeurs/X (Reset)');
+  assert.strictEqual(ctx.cheminCibleConsolidation_('05 · Carrière', '2026-01-05_Lettre_Schneider Electric.pdf', validees).nom,
+    'CV & lettres/Lettres de motivation (Archives)', 'une lettre de démarche 05 → CV & lettres/Lettres de motivation (Archives), jamais un dossier d\'entreprise');
+  assert.strictEqual(ctx.cheminCibleConsolidation_('08 · Perso & projets', 'PXL_20240101_123.jpg', validees).nom,
+    '', 'hors convention → le Reset rend null → repli à plat au domaine (jamais de limbo)');
+  // une entité validée dans un AUTRE domaine ne crée pas de dossier ici (le Reset ne route pas → repli)
+  assert.strictEqual(ctx.cheminCibleConsolidation_('05 · Carrière', '2026-03_Relevé_Bellerives.pdf', validees).nom,
+    '', 'Bellerives est validée en 02, pas en 05 : repli à plat');
+});
+
+test('cheminCibleConsolidation_ : pièce d\'identité → arbre Reset (Pièces d\'identité & permis…) dans SON domaine', () => {
+  assert.strictEqual(ctx.cheminCibleConsolidation_('01 · Administratif & identité', '2020-01-01_Passeport_Marc Exemple.pdf', validees).nom,
+    'Pièces d\'identité & permis');
+  assert.strictEqual(ctx.cheminCibleConsolidation_('01 · Administratif & identité', '2023-02-01_Permis de conduire_Marc Exemple.pdf', {}).nom,
+    'Pièces d\'identité & permis', 'même sans référentiel d\'entités');
+  // Un passeport ÉGARÉ dans 02 : le Reset ne route pas une identité hors 01 (null) → repli année en 02.
+  // Le re-DOMAINE reste hors périmètre de la consolidation (O2) — garde-fou préservé.
+  assert.strictEqual(ctx.cheminCibleConsolidation_('02 · Finances', '2020-01-01_Passeport_Marc Exemple.pdf', validees).nom,
+    '2020', 'l\'exception identité reste scopée à son domaine (repli année en 02)');
+});
+
+test('cheminCibleConsolidation_ : identité d\'un TIERS non déclaré → `Pièces d\'identité`, JAMAIS un dossier de TYPE', () => {
+  const nom = '2023-11-06_Permis de conduire_Frederique Exemple.pdf';
+  const D = '01 · Administratif & identité';
+  // ANTI-TAUTOLOGIE : on prouve d'abord que la TABLE refuse ce nom. Sans cette assertion, le cas
+  // glisserait dans la branche déléguée (`relReset`) et ce test ne verrouillerait rien du repli —
+  // le piège exact de C28-62 PR4 (un tripwire vrai par construction).
+  assert.strictEqual(ctx.cheminCibleReset_(D, nom), null,
+    'la table doit REFUSER ce nom (tiers non déclaré) — sinon ce test n\'exerce pas le repli');
+  assert.strictEqual(ctx.cheminCibleConsolidation_(D, nom, validees).nom, 'Pièces d\'identité & permis',
+    'avant C28-72 la conso rendait « Permis de conduire » : la collecte étant RÉCURSIVE, elle voyait ' +
+    'le fichier posé par le flux dans `Pièces d\'identité & permis`, décidait « Déplacer », et l\'exécuteur ' +
+    'RE-CRÉAIT le nœud parasite par nom — le correctif du flux annulé par la campagne voisine.');
+});
+
+/* ---------- TRIPWIRE : la cible de consolidation == la sortie du flux vivant (règle UNIQUE) ---------- */
+
+test('TRIPWIRE flux vivant ↔ consolidation : pour un même document, le sous-chemin est IDENTIQUE (sinon « Déplacer » en boucle)', () => {
+  const cas = [
+    // [classif, date, ext, domaine attendu]
+    [{ domaine: '02 · Finances', type_doc: 'Facture', emetteur: 'Fournisseury', date_doc: '2026-01-10' }, '2026-01-10', '.pdf'],
+    [{ domaine: '02 · Finances', type_doc: 'Relevé', emetteur: 'Bellerives', sousDossier: 'Bellerives Inc.', date_doc: '2026-03-15' }, '2026-03-15', '.pdf'],
+    [{ domaine: '05 · Carrière', type_doc: 'Lettre', emetteur: 'Schneider Electric', date_doc: '2026-01-05' }, '2026-01-05', '.pdf'],
+    [{ estDocumentIdentite: true, sousDossierType: 'Passeport', titulaire: 'Marc Exemple', domaine: '01 · Administratif & identité', date_doc: '2020-01-01' }, '2020-01-01', '.pdf'],
+    // C28-72 — le SEUL cas de cette liste qui passe par le REPLI des deux côtés (la table refuse
+    // d'attribuer un tiers non déclaré). Les quatre autres passent par la délégation, donc ils
+    // étaient d'accord par construction : sans ce cas-ci, le tripwire était aveugle à la divergence
+    // qui a fabriqué `01 · Administratif/Permis de conduire` en prod.
+    [{ estDocumentIdentite: true, sousDossierType: 'Permis de conduire', titulaire: 'Frederique Exemple', domaine: '01 · Administratif & identité', date_doc: '2023-11-06' }, '2023-11-06', '.pdf'],
+  ];
+  // Garde anti-tautologie du cas ci-dessus : si la table se mettait un jour à router ce nom, il
+  // cesserait d'exercer le repli et ce tripwire redeviendrait vrai par construction.
+  assert.strictEqual(ctx.cheminCibleReset_('01 · Administratif & identité',
+    '2023-11-06_Permis de conduire_Frederique Exemple.pdf'), null,
+    'le cas « tiers non déclaré » doit rester REFUSÉ par la table pour exercer le repli');
+  for (const [classif, date, ext] of cas) {
+    const meta = { nomFichier: 'f' + ext, taille: 100000, extraitOcr: 'texte lisible du document '.repeat(4), emetteur: classif.emetteur || '' };
+    const plan = ctx.planRoutageV2_(classif, meta, date, ext, validees);
+    assert.strictEqual(plan.type, 'classé', JSON.stringify(plan));
+    // Le fichier que le flux vivant vient de produire (plan.nom, dans plan.domaine) doit être « OK »
+    // pour la consolidation : même sous-chemin par la règle unique.
+    const cible = ctx.cheminCibleConsolidation_(plan.domaine, plan.nom, validees);
+    assert.strictEqual(cible.nom, plan.sousDossier,
+      'divergence flux↔plan pour ' + plan.nom + ' (' + plan.domaine + ') : flux="' + plan.sousDossier + '" vs conso="' + cible.nom + '"');
+    // ADR-0028 : l'ID cible doit AUSSI coïncider — sinon le flux rangerait par ID et la
+    // consolidation jugerait par nom (l'un déferait l'autre, à l'envers du bug corrigé).
+    assert.strictEqual(cible.id, plan.dossierIdCible || '',
+      'divergence d\'ID flux↔plan pour ' + plan.nom + ' (' + plan.domaine + ')');
+  }
+});
+
+/* ---------- budgetJourConsolidation_ : ms réelles persistées, remises à zéro au rollover ---------- */
+
+test('budgetJourConsolidation_ : la valeur ne vaut que si la date persistée est AUJOURD\'HUI (sinon 0), format date|ms', () => {
+  const props = (kv) => ({ getProperty: (k) => (k in kv ? kv[k] : null) });
+  assert.strictEqual(ctx.budgetJourConsolidation_(props({ DriveAI_CONSO_JOUR: '2026/07/16|540000' }), '2026/07/16'), 540000);
+  assert.strictEqual(ctx.budgetJourConsolidation_(props({ DriveAI_CONSO_JOUR: '2026/07/15|540000' }), '2026/07/16'), 0,
+    'rollover : la consommation de la veille ne compte pas aujourd\'hui');
+  assert.strictEqual(ctx.budgetJourConsolidation_(props({}), '2026/07/16'), 0);
+  assert.strictEqual(ctx.budgetJourConsolidation_(props({ DriveAI_CONSO_JOUR: 'corrompu' }), '2026/07/16'), 0);
+});
+
+/* ---------- decisionConsolidation_ : OK / Déplacer / Doublon / Ignoré ---------- */
+
+test('decisionConsolidation_ : fichier mal rangé → « Déplacer » vers la cible complète', () => {
+  const d = ctx.decisionConsolidation_({
+    domaine: '05 · Carrière', sousCheminActuel: 'Schneider Electric', sousCheminCible: 'CV & lettres',
+    protege: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(d.action, 'Déplacer');
+  assert.strictEqual(d.cible, '05 · Carrière/CV & lettres');
+  // ⚠️ Ce test visait une cible VIDE jusqu'au 13/09 — c'est-à-dire « Déplacer vers la RACINE du
+  // domaine », que C28-90 interdit désormais pour un fichier déjà rangé (le vrac est ce que la
+  // campagne vide, pas ce qu'elle produit). Le « mal rangé » se prouve avec une vraie cible.
+  const versRacine = ctx.decisionConsolidation_({
+    domaine: '05 · Carrière', sousCheminActuel: 'Schneider Electric', sousCheminCible: '',
+    protege: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(versRacine.action, 'OK', 'aucune règle ne sait le placer ⇒ on ne le remonte pas');
+  // …et un fichier DÉJÀ à la racine avec une cible vide n'a simplement rien à faire.
+  assert.strictEqual(ctx.decisionConsolidation_({
+    domaine: '05 · Carrière', sousCheminActuel: '', sousCheminCible: '',
+    protege: false, raccourci: false, doublonDe: null,
+  }).action, 'OK');
+});
+
+test('decisionConsolidation_ : déjà au bon endroit → « OK » (le plan converge, rien à faire)', () => {
+  const d = ctx.decisionConsolidation_({
+    domaine: '02 · Finances', sousCheminActuel: '2026/Bellerives', sousCheminCible: '2026/Bellerives',
+    protege: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(d.action, 'OK');
+  assert.strictEqual(d.cible, '02 · Finances/2026/Bellerives');
+});
+
+test('decisionConsolidation_ : entité à la PROFONDEUR 2 → « OK » par ID, jamais « Déplacer » (ADR-0028)', () => {
+  // LE test de non-régression du chantier : le dossier d'entité « Alphatek » a été déplacé sous un
+  // regroupement « Anciens employeurs » (ADR-0027, validé par Marc). Le sous-chemin TEXTUEL diffère
+  // de la cible à plat — avant l'ADR-0028, la consolidation ressortait les fichiers à chaque passe
+  // (puis proposait de corbeiller le dossier vidé). L'égalité d'ID doit primer.
+  const d = ctx.decisionConsolidation_({
+    domaine: '05 · Carrière',
+    sousCheminActuel: 'Anciens employeurs/Alphatek',
+    sousCheminCible: 'Alphatek',
+    dossierIdCible: 'ID_Alphatek',
+    parentId: 'ID_Alphatek',       // le fichier EST dans le dossier de l'entité, quelle que soit sa profondeur
+    protege: false, protegeIllisible: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(d.action, 'OK');
+  assert.match(d.raison, /ID/);
+
+  // Contre-épreuve : même configuration mais le fichier est AILLEURS → « Déplacer » (on n'a pas
+  // neutralisé la consolidation en la rendant permissive).
+  const ailleurs = ctx.decisionConsolidation_({
+    domaine: '05 · Carrière',
+    sousCheminActuel: 'Vrac',
+    sousCheminCible: 'Alphatek',
+    dossierIdCible: 'ID_Alphatek',
+    parentId: 'ID_AUTRE',
+    protege: false, protegeIllisible: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(ailleurs.action, 'Déplacer');
+
+  // Sans ID (entité validée dont le dossier n'existe pas encore) : comportement TEXTUEL d'avant.
+  const sansId = ctx.decisionConsolidation_({
+    domaine: '05 · Carrière', sousCheminActuel: 'Anciens employeurs/Alphatek', sousCheminCible: 'Alphatek',
+    dossierIdCible: '', parentId: 'ID_Alphatek',
+    protege: false, protegeIllisible: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(sansId.action, 'Déplacer', 'repli textuel : jamais un OK inventé sans ID');
+
+  // La zone protégée prime TOUJOURS sur la nouvelle règle (ordre des gardes inchangé, §1).
+  const protege = ctx.decisionConsolidation_({
+    domaine: '04 · Immigration', sousCheminActuel: 'X', sousCheminCible: 'Alphatek',
+    dossierIdCible: 'ID_Alphatek', parentId: 'ID_Alphatek',
+    protege: true, protegeIllisible: false, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(protege.action, 'Ignoré');
+});
+
+test('decisionConsolidation_ : hash déjà vu par la campagne → « Doublon », cible _Doublons (déplacement seul, §2)', () => {
+  const d = ctx.decisionConsolidation_({
+    domaine: '02 · Finances', sousCheminActuel: '2026', sousCheminCible: '2026',
+    protege: false, raccourci: false, doublonDe: 'id-premier-porteur',
+  });
+  assert.strictEqual(d.action, 'Doublon');
+  assert.strictEqual(d.cible, '_Doublons');
+  assert.ok(d.raison.includes('id-premier-porteur'), 'la raison nomme le premier porteur : ' + d.raison);
+});
+
+test('decisionConsolidation_ : zone protégée (04) → « Ignoré » MÊME mal rangé, MÊME en doublon (§1)', () => {
+  const malRange = ctx.decisionConsolidation_({
+    domaine: '04 · Immigration', sousCheminActuel: 'IRCC', sousCheminCible: '',
+    protege: true, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(malRange.action, 'Ignoré', 'jamais de déplacement proposé en zone protégée');
+  const doublon = ctx.decisionConsolidation_({
+    domaine: '04 · Immigration', sousCheminActuel: '', sousCheminCible: '',
+    protege: true, raccourci: false, doublonDe: 'id-x',
+  });
+  assert.strictEqual(doublon.action, 'Ignoré');
+  assert.ok(doublon.raison.includes('doublon constaté'), 'le doublon est CONSTATÉ sans être déplacé : ' + doublon.raison);
+  assert.ok(doublon.raison.includes('Zone protégée'), doublon.raison);
+});
+
+test('decisionConsolidation_ : contrôle §1 ILLISIBLE → « Ignoré » avec une raison HONNÊTE (jamais « Zone protégée » à tort)', () => {
+  const d = ctx.decisionConsolidation_({
+    domaine: '02 · Finances', sousCheminActuel: 'X', sousCheminCible: '',
+    protege: false, protegeIllisible: true, raccourci: false, doublonDe: null,
+  });
+  assert.strictEqual(d.action, 'Ignoré', 'abstention prudente (échec-fermé §1)');
+  assert.ok(/illisible/i.test(d.raison), 'la raison dit la vérité (le plan que Marc valide ne ment pas) : ' + d.raison);
+  assert.ok(!/Zone protégée \(04\) intouchable/.test(d.raison), 'jamais étiqueté « zone protégée » sans preuve : ' + d.raison);
+});
+
+test('decisionConsolidation_ : raccourci Drive → « Ignoré » (artefact d\'entité voulu, jamais déplacé)', () => {
+  const d = ctx.decisionConsolidation_({
+    domaine: '02 · Finances', sousCheminActuel: 'Société Fédérale', sousCheminCible: '',
+    protege: false, raccourci: true, doublonDe: null,
+  });
+  assert.strictEqual(d.action, 'Ignoré');
+  assert.ok(/raccourci/i.test(d.raison), d.raison);
+});
+
+/* ---------- Garde-fous de surface : le module ne porte AUCUNE mutation Drive ---------- */
+
+test('Consolidation.gs : aucun appel de mutation Drive (dry-run PUR par construction)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'Consolidation.gs'), 'utf8');
+  // Motifs d'APPEL réels (parenthèse ouvrante) — les mentions en commentaire ne matchent pas.
+  // `UrlFetchApp` (sans parenthèse) : la voie REST Drive passerait sous les motifs DriveApp — le
+  // module n'en a AUCUN besoin légitime (revue sécurité C28-26 : promesse de verrou = couverture réelle).
+  ['moveTo(', 'setTrashed(', 'setName(', '.createFolder(', '.createFile(', 'removeFile(', 'addFile(',
+    'addFolder(', 'removeFolder(', 'makeCopy(', 'setContent(', 'UrlFetchApp']
+    .forEach((motif) => {
+      assert.ok(!src.includes(motif), 'mutation interdite trouvée dans Consolidation.gs : ' + motif);
+    });
+});
+
+/* ---------- ROTATION du plan au bump de CONSOLIDATION_TAG (fondement du fix ADR-0035) ---------- */
+
+// Contexte minimal pour n'exercer QUE la rotation en tête de `genererPlanConsolidation_` :
+// `estBudgetDepasse` renvoie true ⇒ on retourne juste APRÈS la rotation, avant toute collecte.
+function ctxRotationConso(store) {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Migration.gs', 'Reset.gs', 'Missions.gs', 'Router.gs']);
+  c.COLONNES_PLAN_CONSOLIDATION = ['Horodaté', 'Fichier', 'ID', 'Action', 'Cible', 'Raison', 'Empreinte']; // vit dans Journal.gs
+  const suppr = [];
+  let cleared = 0;
+  c.PropertiesService = { getScriptProperties: () => ({
+    getProperty: (k) => (k in store ? store[k] : null),
+    setProperty: (k, v) => { store[k] = String(v); },
+    deleteProperty: (k) => { suppr.push(k); delete store[k]; },
+  }) };
+  c.feuille_ = () => ({ getLastRow: () => 3, getRange: () => ({ clearContent: () => { cleared++; } }) });
+  c.journalInfo_ = () => {};
+  return { c, suppr, clearedRef: () => cleared };
+}
+
+test('genererPlanConsolidation_ : bump de CONSOLIDATION_TAG → ROTATION (plan périmé purgé + 3 curseurs remis à zéro)', () => {
+  // C'est LE mécanisme sur lequel repose ADR-0035 : conso-2 avait pu figer les 305 en « OK » ; le bump
+  // conso-3 doit purger le plan et remettre les curseurs pour re-évaluer TOUT sous t4.
+  const store = {
+    DriveAI_CONSO_PLAN_TAG: 'conso-2', DriveAI_CONSOLIDATION: 'conso-2',
+    DriveAI_CONSO_EXEC_LIGNE: '956', DriveAI_CONSO_EXEC_FINI: 'conso-2',
+  };
+  const { c, suppr, clearedRef } = ctxRotationConso(store);
+  c.CONFIG.CONSOLIDATION_TAG = 'conso-3'; // FORCÉ (le défaut EST déjà conso-3, mais on le dérive du contexte)
+  c.genererPlanConsolidation_(() => true);
+  assert.strictEqual(clearedRef(), 1, 'le plan périmé (conso-2) est purgé (clearContent)');
+  assert.ok(suppr.includes('DriveAI_CONSOLIDATION') && suppr.includes('DriveAI_CONSO_EXEC_LIGNE') && suppr.includes('DriveAI_CONSO_EXEC_FINI'),
+    'les 3 curseurs (campagne finie + exec ligne + exec fini) sont remis à zéro');
+  assert.strictEqual(store.DriveAI_CONSO_PLAN_TAG, 'conso-3', 'le tag courant est adopté');
+});
+
+test('genererPlanConsolidation_ : MÊME tag → PAS de rotation (un plan EN COURS n\'est jamais purgé — mutation-preuve du test ci-dessus)', () => {
+  const store = { DriveAI_CONSO_PLAN_TAG: 'conso-3', DriveAI_CONSO_EXEC_LIGNE: '956' };
+  const { c, suppr, clearedRef } = ctxRotationConso(store);
+  c.CONFIG.CONSOLIDATION_TAG = 'conso-3';
+  c.genererPlanConsolidation_(() => true);
+  assert.strictEqual(clearedRef(), 0, 'tag inchangé → aucune purge');
+  assert.strictEqual(suppr.length, 0, 'aucun curseur supprimé');
+  assert.strictEqual(store.DriveAI_CONSO_EXEC_LIGNE, '956', 'le curseur d\'exec en cours est préservé');
+});
+
+/* ---------- RÉUTILISATION d'empreinte (perf, revue apps-script-quota) : pas de re-hash si déjà en Index ---------- */
+
+function ctxHashConso(opts) {
+  const c = load(['Config.gs', 'Entites.gs', 'Consolidation.gs', 'Migration.gs', 'Reset.gs', 'Missions.gs', 'Router.gs']);
+  let blobAppels = 0;
+  const lignes = [];
+  const f = {
+    getId: () => opts.id || 'F1', getName: () => 'doc', getMimeType: () => (opts.mime || 'application/pdf'),
+    getSize: () => (opts.size || 1000),
+    getBlob: () => ({ getBytes: () => [1, 2, 3] }),
+    getParents: () => ({ hasNext: () => false, next: () => null }),
+  };
+  c.DriveApp = { getFileById: () => f };
+  c.empreinteConnueParId_ = () => (opts.connue !== undefined ? opts.connue : '');
+  c.empreinteBlob_ = () => { blobAppels++; return 'HASH-CALCULE'; };
+  c.aParentProtege_ = () => false;
+  c.cheminActuelDryRunV2_ = () => '05 · Carrière';           // sousCheminActuel = ''
+  c.cheminCibleConsolidation_ = () => ({ nom: 'CV & lettres', id: '' }); // ⇒ Déplacer
+  c.indexAjouter_ = () => {};
+  const ctx = { proteges: {}, empreintesVues: {}, validees: {}, feuille: { appendRow: (r) => lignes.push(r) } };
+  return { c, ctx, lignes, blobAppels: () => blobAppels };
+}
+
+test('traiterUnConsolidation_ : empreinte DÉJÀ en Index → réutilisée, AUCUN re-hash (getBlob/empreinteBlob_ jamais appelés)', () => {
+  const { c, ctx, lignes, blobAppels } = ctxHashConso({ connue: 'HASH-INDEX' });
+  c.traiterUnConsolidation_('F1', '05 · Carrière', 'conso-3', ctx);
+  assert.strictEqual(blobAppels(), 0, 'le hash n\'est PAS recalculé quand l\'empreinte est déjà connue (le goulot évité)');
+  assert.strictEqual(lignes[0][6], 'HASH-INDEX', 'la colonne Empreinte du plan porte l\'empreinte RÉUTILISÉE');
+  assert.strictEqual(lignes[0][3], 'Déplacer', 'la décision de routage est inchangée (réutilisation = perf seule)');
+});
+
+test('traiterUnConsolidation_ : empreinte INCONNUE → repli sur le hash (empreinteBlob_ appelé), comportement historique', () => {
+  const { c, ctx, lignes, blobAppels } = ctxHashConso({ connue: '' });
+  c.traiterUnConsolidation_('F2', '05 · Carrière', 'conso-3', ctx);
+  assert.strictEqual(blobAppels(), 1, 'sans empreinte connue, on hache (une seule fois)');
+  assert.strictEqual(lignes[0][6], 'HASH-CALCULE', 'la colonne Empreinte porte le hash fraîchement calculé');
+});
+
+test('traiterUnConsolidation_ : fichier Google NATIF → empreinte VIDE (jamais réutilisée ni hachée) — anti-faux-doublon', () => {
+  // Revue file-checker : pour un natif, l'empreinte de l'Index est le hash du TEXTE exporté ; deux natifs
+  // quasi vides partagent MD5("") → le 2ᵉ partirait à tort dans _Doublons (exec ON). `empreinteReutiliseeReset_`
+  // exclut les natifs → empreinte vide → JAMAIS marqué doublon. On NE réutilise PAS l'empreinte connue.
+  const { c, ctx, lignes, blobAppels } = ctxHashConso({ mime: 'application/vnd.google-apps.document', connue: 'HASH-TEXTE-EXPORTE' });
+  c.traiterUnConsolidation_('F3', '05 · Carrière', 'conso-3', ctx);
+  assert.strictEqual(lignes[0][6], '', 'un natif ne porte JAMAIS d\'empreinte (ni réutilisée ni hachée) — sens sûr');
+  assert.strictEqual(blobAppels(), 0, 'aucun hash de blob natif (export PDF ambigu)');
+  assert.notStrictEqual(lignes[0][3], 'Doublon', 'sans empreinte, jamais classé Doublon');
+});

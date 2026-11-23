@@ -1,0 +1,3 @@
+# Outils de la CI (job « Sécurité (secrets · analyse statique) »), installés par .github/workflows/ci.yml.
+# Épinglés ici pour que Dependabot (écosystème pip) propose leurs mises à jour ; jamais dans l'app.
+semgrep==1.183.0
