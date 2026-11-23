@@ -293,6 +293,7 @@ function tickDriveAI() {
     reinitialiserConfianceCache_();  // expéditeurs « pas suspect » (C28-19), rechargés 1×/run
     reinitialiserFicheCache_();      // habitudes par expéditeur (ADR-0081), rechargées 1×/run
     reinitialiserEscaladeTri_();     // plafond d'escalades du tri par run (ADR-0081)
+    reinitialiserBrouillonsTri_();   // plafond de brouillons de réponse du tri par run (ADR-0081)
     reinitialiserLibellesCache_();   // libellés Gmail de Marc, rechargés 1×/run
     reinitialiserPromoSetCache_();   // fils CATEGORY_PROMOTIONS (signal déterministe), 1×/run
     reinitialiserPanneEcriture_();   // panne d'ÉCRITURE Gmail : nouvelle chance à chaque run
