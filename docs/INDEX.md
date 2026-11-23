@@ -2,7 +2,7 @@
 
 <!-- GÉNÉRÉ par `node .github/ci/generer-index.mjs` : ne pas modifier à la main (`--verifier` échoue si ce fichier est périmé). -->
 
-118 document(s). Ancien titre -> nouveau chemin : [correspondance.md](correspondance.md).
+119 document(s). Ancien titre -> nouveau chemin : [correspondance.md](correspondance.md).
 
 ## docs/
 
@@ -108,6 +108,7 @@
 - [ADR-0078 — L'écran et la session de DriveAI sur Firebase (plan Blaze, plafonds bas)](adr/0078-app-et-session-sur-firebase-blaze.md) — `docs/adr/0078-app-et-session-sur-firebase-blaze.md`
 - [ADR-0079 — Fiabilisation du moteur (Groupe A) sans changement des règles de tri, et gel du Groupe B sous protocole de précision](adr/0079-fiabilisation-moteur-et-gel-regles-tri.md) — `docs/adr/0079-fiabilisation-moteur-et-gel-regles-tri.md`
 - [ADR-0080 — Alignement sur le référentiel de classement & nommage à 9 piliers](adr/0080-referentiel-classement-9-piliers.md) — `docs/adr/0080-referentiel-classement-9-piliers.md`
+- [ADR-0081 — Le « cerveau » de DriveAI : fiche apprise, autonomie encadrée, mémoire des décisions](adr/0081-le-cerveau-de-driveai.md) — `docs/adr/0081-le-cerveau-de-driveai.md`
 - [Décisions d'architecture (ADR) — DriveAI](adr/README.md) — `docs/adr/README.md`
 
 ## docs/captures/
