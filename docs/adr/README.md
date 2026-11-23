@@ -102,5 +102,6 @@ jointes, pas des décisions.
 | [0078](0078-app-et-session-sur-firebase-blaze.md) | L'écran et la session de DriveAI sur Firebase (plan Blaze, plafonds bas) | Accepté | complète 0074 (§2 point 5) · remplace Vercel pour `app/` et `api/` |
 | [0079](0079-fiabilisation-moteur-et-gel-regles-tri.md) | Fiabilisation du moteur (Groupe A) et gel des règles de tri (Groupe B) | Accepté | complète 0004, 0012, 0050, 0073, 0075, 0076, 0077 · protocole de précision |
 | [0080](0080-referentiel-classement-9-piliers.md) | Alignement sur le référentiel de classement & nommage à 9 piliers | Accepté | complète 0002, 0030, 0033, 0052, 0058 · protocole de précision |
+| [0081](0081-le-cerveau-de-driveai.md) | Le « cerveau » de DriveAI : fiche apprise, autonomie encadrée, mémoire des décisions | Accepté | complète 0003, 0075, 0076, 0080 · révise 0079 |
 
 Voir aussi `docs/ROADMAP.md` (ordre d'implémentation), `docs/RUNBOOK.md` (exploitation) et `docs/GUIDE.md` (usage).
