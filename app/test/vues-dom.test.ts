@@ -37,6 +37,7 @@ const spies = vi.hoisted(() => ({
   ajouterLigne: vi.fn<(onglet: string, ligne: (string | number)[]) => Promise<void>>(),
   marquerPasSuspect: vi.fn<(threadId: string) => Promise<string>>(),
   demanderPassageMoteur: vi.fn<() => Promise<string>>(),
+  annulerActionMoteur: vi.fn<(actionId: string) => Promise<string>>(),
   listerEnfants: vi.fn<(dossierId: string, pageToken?: string) => Promise<PageDrive>>(),
   rechercherDrive: vi.fn<
     (texte: string, options?: OptionsRechercheDrive) => Promise<ResultatRechercheDrive>
@@ -84,6 +85,7 @@ vi.mock('../src/google', () => ({
   ajouterLigne: spies.ajouterLigne,
   marquerPasSuspect: spies.marquerPasSuspect,
   demanderPassageMoteur: spies.demanderPassageMoteur,
+  annulerActionMoteur: spies.annulerActionMoteur,
   listerEnfants: spies.listerEnfants,
   rechercherDrive: spies.rechercherDrive,
   creerDossier: spies.creerDossier,
@@ -180,6 +182,7 @@ function reinitialiserSpies() {
   spies.ajouterLigne.mockReset().mockResolvedValue(undefined);
   spies.marquerPasSuspect.mockReset().mockResolvedValue('ok');
   spies.demanderPassageMoteur.mockReset().mockResolvedValue('passage lancé');
+  spies.annulerActionMoteur.mockReset().mockResolvedValue('Action annulée.');
   spies.listerEnfants.mockReset().mockResolvedValue({
     elements: [
       {
@@ -1249,6 +1252,37 @@ describe('Vues principales — interactions DOM (P0-3, P0-4, P1-1..P1-3, P2-1)',
       expect(screen.queryByText('Réponse tri tronquée à max_tokens')).toBeNull();
       expect(screen.queryByRole('region', { name: 'Points d’attention' })).toBeNull();
       expect(screen.getByRole('button', { name: /3 masquée\(s\) — réafficher/i })).toBeDefined();
+    });
+
+    it('ADR-0081 (vague 3b) : affiche les actions récentes, annule en 1 clic les actions réversibles et gère une erreur', async () => {
+      mockEtat.progression = [];
+      mockEtat.donnees = donneesBase({
+        actionsBrut: [
+          ['act-lib001', '2026-11-23 16:00:00', 'gmail-libelle', 'Voyages', '', 'Voyages', 'appliqué', 'Libellé créé'],
+          ['act-dep001', '2026-11-23 16:05:00', 'drive-deplacer', 'F1', '{"parentId":"A","nom":"scan.pdf"}', '{"parentId":"B","nom":"2026-11-23_Reçu_Exemple.pdf"}', 'appliqué', 'Classement dépôt manuel'],
+          ['act-ren001', '2026-11-23 16:06:00', 'drive-renommer', 'F2', '{"nom":"ancien.pdf"}', '{"nom":"nouveau.pdf"}', 'appliqué', 'Renommage'],
+        ],
+      });
+
+      render(createElement(Etat, { langue: 'fr' }));
+      const regionActions = screen.getByRole('region', { name: 'Actions récentes' });
+      expect(within(regionActions).getByText('2026-11-23_Reçu_Exemple.pdf')).toBeDefined();
+      expect(within(regionActions).getByText('Voyages')).toBeDefined();
+      expect(within(regionActions).getAllByRole('button', { name: /^Annuler —/ })).toHaveLength(2);
+
+      await act(async () => {
+        fireEvent.click(within(regionActions).getByRole('button', { name: 'Annuler — 2026-11-23_Reçu_Exemple.pdf' }));
+      });
+      expect(spies.annulerActionMoteur).toHaveBeenCalledWith('act-dep001');
+      expect(within(regionActions).getByRole('status').textContent).toContain('Action annulée.');
+      expect(within(regionActions).getAllByRole('button', { name: /^Annuler —/ })).toHaveLength(1);
+      expect(mockEtat.rafraichir).toHaveBeenCalledWith(true);
+
+      spies.annulerActionMoteur.mockRejectedValueOnce(new Error('Web app 503'));
+      await act(async () => {
+        fireEvent.click(within(regionActions).getByRole('button', { name: 'Annuler — nouveau.pdf' }));
+      });
+      expect(within(regionActions).getByRole('alert').textContent).toContain('Web app 503');
     });
   });
 

@@ -1132,3 +1132,12 @@ export async function demanderPassageMoteur(): Promise<string> {
   if (MODE_MOCK) return 'passage lancé';
   return demandeWebApp('tick', {}, true);
 }
+
+/**
+ * Annule une action réversible consignée dans l'onglet `Actions` (WebApp.gs `actionAnnulerAction_`).
+ * Idempotent et mémorisé côté moteur via `requestId` (`rejouable: true`). En MODE_MOCK : aucun appel réseau.
+ */
+export async function annulerActionMoteur(actionId: string): Promise<string> {
+  if (MODE_MOCK) return 'Action annulée.';
+  return demandeWebApp('annuler-action', { actionId }, true);
+}

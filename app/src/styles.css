@@ -529,6 +529,7 @@ tr:first-child > td { border-top: none; }
   .colonnes.etat-vue > .etat-bento-gauche { grid-column: 1; }
   .colonnes.etat-vue > .etat-bento-droite { grid-column: 2; }
   .colonnes.etat-vue > .etat-classements { order: 2; }
+  .colonnes.etat-vue > .etat-actions-recentes { order: 2; }
   .colonnes.etat-vue > .etat-logique { order: 3; }
 }
 .etat-revue-carte { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -589,6 +590,16 @@ tr:first-child > td { border-top: none; }
 .erreur-item .date { white-space: normal; overflow-wrap: anywhere; max-width: 100%; min-width: 0; }
 .erreur-msg { flex: 1 1 12rem; color: var(--erreur); font-size: 0.86rem; min-width: 0; overflow-wrap: anywhere; }
 .erreur-vu { margin-left: auto; flex-shrink: 0; min-height: 44px; min-width: 44px; }
+
+.actions-liste { display: flex; flex-direction: column; gap: 0.45rem; }
+.action-item {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.6rem;
+  padding: 0.5rem 0.65rem; border-radius: var(--r-m); background: var(--carte-douce); border: 1px solid var(--bordure);
+  min-width: 0;
+}
+.action-item .date { white-space: normal; overflow-wrap: anywhere; max-width: 100%; min-width: 0; }
+.action-resume { flex: 1 1 12rem; color: var(--texte); font-size: 0.88rem; min-width: 0; overflow-wrap: anywhere; }
+.action-annuler { margin-left: auto; flex-shrink: 0; min-height: 44px; min-width: 44px; }
 
 .logique-grille {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem;

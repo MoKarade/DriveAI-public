@@ -26,12 +26,17 @@ import {
   grouperErreursJournal,
   lireErreursVues,
   enregistrerErreursVues,
+  interpreterActions,
+  LigneAction,
 } from '../etat';
+import { annulerActionMoteur } from '../google';
+import { erreurSimple } from '../erreurSimple';
 import { formaterMontant } from '../explorateur';
 import { CleTexte, Langue, t } from '../i18n';
 
 const BUDGET_CROISIERE = 25; // cible < 25 $/mois (décision propriétaire ADR-0081)
 const ERREURS_MAX = 8;
+const ACTIONS_MAX = 12;
 
 export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Section) => void }) {
   const { donnees, erreur, synchroA, rafraichir } = useEtatGlobal();
@@ -41,7 +46,29 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
   const [erreurSynchro, setErreurSynchro] = useState('');
   const [synchroLocaleA, setSynchroLocaleA] = useState<Date | null>(null);
   const [erreursVues, setErreursVues] = useState<string[]>(lireErreursVues);
+  const [actionEnCours, setActionEnCours] = useState('');
+  const [actionsAnnuleesLocales, setActionsAnnuleesLocales] = useState<string[]>([]);
+  const [retourAction, setRetourAction] = useState<{ type: 'ok' | 'erreur'; texte: string } | null>(null);
   const passageAction = usePassageMoteur(langue);
+
+  async function gererAnnulationAction(action: LigneAction) {
+    if (actionEnCours) return;
+    setActionEnCours(action.id);
+    setRetourAction(null);
+    try {
+      const msg = (await annulerActionMoteur(action.id)).trim();
+      setActionsAnnuleesLocales((prev) => Array.from(new Set([...prev, action.id])));
+      setRetourAction({ type: 'ok', texte: msg || t('actionAnnuleeOk', langue) });
+      void rafraichir(true).catch(() => {});
+    } catch (e) {
+      setRetourAction({
+        type: 'erreur',
+        texte: `${t('erreur', langue)} : ${erreurSimple(String(e), langue).slice(0, 180)}`,
+      });
+    } finally {
+      setActionEnCours('');
+    }
+  }
 
   function marquerGroupeErreursVu(cles: string[]) {
     setErreursVues((prev) => {
@@ -177,6 +204,8 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
   const archivesJour = syn.gmail.archivage.archivesJour;
   const archivesMesurees = archivesJour !== null && Number.isFinite(archivesJour);
   const lectureAffiche = synchroA ?? synchroLocaleA;
+  const actionsRecentes = interpreterActions(donnees.actionsBrut ?? []).slice(0, ACTIONS_MAX);
+  const annuleesSet = new Set(actionsAnnuleesLocales);
 
   const actionsAccueilUrgentes = syn.fileRevue.suspects + syn.fileRevue.aVerifier + syn.fileRevue.importants;
   const actionsDocumentsDisponibles =
@@ -512,6 +541,51 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
         )}
       </section>
 
+      <section className="carte etat-actions-recentes" aria-label={t('actionsRecentesTitre', langue)}>
+        <h2>
+          {t('actionsRecentesTitre', langue)}
+          {actionsRecentes.length > 0 && <span className="badge">{actionsRecentes.length}</span>}
+        </h2>
+        {retourAction && (
+          <p className={retourAction.type === 'erreur' ? 'erreur bandeau-erreur' : 'ok bandeau-ok'} role={retourAction.type === 'erreur' ? 'alert' : 'status'}>
+            {retourAction.texte}
+          </p>
+        )}
+        {actionsRecentes.length === 0 ? (
+          <p className="variante">{t('aucuneActionRecente', langue)}</p>
+        ) : (
+          <div className="actions-liste">
+            {actionsRecentes.map((a) => {
+              const estAnnulee = a.statut === 'annulé' || annuleesSet.has(a.id);
+              const peutAnnuler = a.annulable && !estAnnulee;
+              const enCours = actionEnCours === a.id;
+              return (
+                <div key={a.id} className="action-item">
+                  {a.horodatage && <span className="date">{a.horodatage}</span>}
+                  <span className="pastille douce">{libelleTypeAction(a.type, langue)}</span>
+                  <span className="action-resume">{a.resume || a.cible}</span>
+                  <span className={`pastille ${estAnnulee ? 'douce' : 'ok'}`}>
+                    {estAnnulee ? t('actionStatutAnnule', langue) : t('actionStatutApplique', langue)}
+                  </span>
+                  {peutAnnuler && (
+                    <button
+                      type="button"
+                      className="discret bouton-icone-texte action-annuler"
+                      disabled={actionEnCours !== ''}
+                      aria-busy={enCours}
+                      aria-label={`${t('annulerAction', langue)} — ${a.resume || a.cible}`}
+                      onClick={() => void gererAnnulationAction(a)}
+                    >
+                      <span>{enCours ? t('annulationEnCours', langue) : t('annulerAction', langue)}</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       <section className="carte etat-logique" aria-label={t('logiqueTitre', langue)}>
         <h2>{t('logiqueTitre', langue)}</h2>
         <div className="logique-grille">
@@ -552,3 +626,13 @@ const LIBELLES_STATUT: Record<FamilleStatut, CleTexte> = {
   suspendu: 'stSuspendu', pause: 'stPause', termine: 'stTermine',
   erreur: 'stErreur', inactif: 'stInactif', ajour: 'stAJour',
 };
+
+function libelleTypeAction(type: string, langue: Langue): string {
+  switch (type) {
+    case 'drive-deplacer': return t('actionTypeDriveDeplacer', langue);
+    case 'drive-renommer': return t('actionTypeDriveRenommer', langue);
+    case 'gmail-libelle': return t('actionTypeGmailLibelle', langue);
+    case 'drive-dossier': return t('actionTypeDriveDossier', langue);
+    default: return type || '—';
+  }
+}

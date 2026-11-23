@@ -56,6 +56,7 @@ const spiesGoogle = vi.hoisted(() => ({
   ajouterLigne: vi.fn(async () => {}),
   marquerPasSuspect: vi.fn(async () => 'ok'),
   demanderPassageMoteur: vi.fn(async () => 'passage lancé'),
+  annulerActionMoteur: vi.fn(async () => 'Action annulée.'),
   viderCachePlages: vi.fn(() => {}),
 }));
 
@@ -104,6 +105,7 @@ vi.mock('../src/google', () => ({
   ajouterLigne: spiesGoogle.ajouterLigne,
   marquerPasSuspect: spiesGoogle.marquerPasSuspect,
   demanderPassageMoteur: spiesGoogle.demanderPassageMoteur,
+  annulerActionMoteur: spiesGoogle.annulerActionMoteur,
   viderCachePlages: spiesGoogle.viderCachePlages,
 }));
 
