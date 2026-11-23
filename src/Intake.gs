@@ -235,7 +235,12 @@ function traiterFichierDepose_(fileId, cleRedepot) {
       empreinteNonIdentifiante: texte.length < CONFIG.OCR_MIN_CARS_EXPLOITABLE,
       blob: function () { return Utilities.newBlob(texte, 'text/plain', nom + '.txt'); },
       placer: function (dossierId, nouveauNom) {
-        return deplacerEtRenommer_(fileId, dossierId, aTrier, nouveauNom) ? fileId : '';
+        if (!deplacerEtRenommer_(fileId, dossierId, aTrier, nouveauNom)) return '';
+        if (typeof enregistrerAction_ === 'function') {
+          enregistrerAction_('drive-deplacer', fileId, { parentId: aTrier, nom: nom },
+            { parentId: dossierId, nom: nouveauNom }, 'Classement dépôt manuel');
+        }
+        return fileId;
       }
     });
     return;
@@ -251,7 +256,12 @@ function traiterFichierDepose_(fileId, cleRedepot) {
     date: date,
     blob: function () { return f.getBlob(); },
     placer: function (dossierId, nouveauNom) {
-      return deplacerEtRenommer_(fileId, dossierId, aTrier, nouveauNom) ? fileId : '';
+      if (!deplacerEtRenommer_(fileId, dossierId, aTrier, nouveauNom)) return '';
+      if (typeof enregistrerAction_ === 'function') {
+        enregistrerAction_('drive-deplacer', fileId, { parentId: aTrier, nom: nom },
+          { parentId: dossierId, nom: nouveauNom }, 'Classement dépôt manuel');
+      }
+      return fileId;
     }
   };
   // Remise par Marc : l'empreinte est déjà à l'Index, sans ce bypass le fichier repartirait en `_Doublons` (ADR-0071).

@@ -4,9 +4,10 @@
  * Le scope `gmail.modify` PERMET la mise à la corbeille (purge définitive à 30 j = perte de fait)
  * et la destruction des ~60 libellés de Marc. Ce test est LE verrou : il interdit dans `src/`
  * tout motif de corbeille/Spam/suppression Gmail — il tourne dans la CI REQUISE qui gate `main`.
- * Écritures Gmail AUTORISÉES (les seules) : poser un libellé EXISTANT (`addToThread`) et
- * archiver (`moveToArchive`, réversible). Retirer un libellé de Marc est AUSSI interdit
- * (revue ronde 2) : le tri ne « détrique » jamais — seul Marc retire un libellé.
+ * Écritures Gmail AUTORISÉES : poser un libellé (`addToThread`), préparer un brouillon
+ * (`createDraftReply`), créer un libellé dans le helper unique et borné `creerLibelleAutonome_`
+ * (`TriGmail.gs`, ADR-0081 — 1 occurrence max), et archiver (`moveToArchive`, réversible).
+ * Retirer ou détruire un libellé reste STRICTEMENT interdit.
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -35,7 +36,7 @@ const INTERDITS = [
   { motif: /ToTrash/i, raison: 'corbeille Gmail (toutes variantes moveTo/moveThreads…)' },
   { motif: /ToSpam/i, raison: 'marquage Spam (toutes variantes)' },
   { motif: /deleteLabel/i, raison: 'destruction d\'un libellé de Marc' },
-  { motif: /createLabel/i, raison: 'création de libellé (le moteur PROPOSE, Marc crée)' },
+  { motif: /createLabel/i, raison: 'création de libellé hors helper unique TriGmail.gs (ADR-0081)' },
   { motif: /removeFromThread|removeLabel/i, raison: 'retrait d\'un libellé de Marc (seul Marc retire)' },
   { motif: /batchDelete/i, raison: 'suppression en masse' },
   { motif: /Gmail\.Users/, raison: 'service avancé Gmail interdit en bloc (contournait les motifs GmailApp)' },
@@ -63,18 +64,25 @@ test('surface Gmail : les motifs interdits ATTRAPENT les contournements démontr
 
 test('surface Gmail : AUCUN motif de corbeille/Spam/suppression/retrait de libellé dans src/ (récursif)', () => {
   const violations = [];
+  let createLabelTri = 0;
   for (const chemin of fichiersSource_(SRC)) {
+    const nomFichier = path.relative(SRC, chemin);
     const contenu = fs.readFileSync(chemin, 'utf-8');
     const lignes = contenu.split('\n');
     for (let i = 0; i < lignes.length; i++) {
       for (const { motif, raison } of INTERDITS) {
-        if (motif.test(lignes[i])) {
-          violations.push(`${path.relative(SRC, chemin)}:${i + 1} (${raison}) → ${lignes[i].trim()}`);
+        if (!motif.test(lignes[i])) continue;
+        if (nomFichier === 'TriGmail.gs' && motif.source === 'createLabel') {
+          createLabelTri++;
+          continue;
         }
+        violations.push(`${nomFichier}:${i + 1} (${raison}) → ${lignes[i].trim()}`);
       }
     }
   }
   assert.deepStrictEqual(violations, [], 'écritures Gmail interdites détectées :\n' + violations.join('\n'));
+  assert.ok(createLabelTri <= 1,
+    `TriGmail.gs porte ${createLabelTri} createLabel — seul le helper borné creerLibelleAutonome_ est admis (1 max)`);
 });
 
 test('surface Gmail : le manifeste ne demande JAMAIS plus que gmail.modify', () => {

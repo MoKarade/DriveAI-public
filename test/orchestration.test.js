@@ -700,7 +700,7 @@ function ctxTickMain(opts) {
     'reinitialiserIndexCache_', 'reinitialiserEntitesCache_', 'reinitialiserCorrectionsCache_',
     'reinitialiserEscalades_', 'chargerPannePlateforme_', 'chargerPanneGmail_',
     'reinitialiserTriApprisCache_', 'reinitialiserConfianceCache_', 'reinitialiserFicheCache_',
-    'reinitialiserEscaladeTri_', 'reinitialiserBrouillonsTri_', 'reinitialiserLibellesCache_',
+    'reinitialiserEscaladeTri_', 'reinitialiserBrouillonsTri_', 'reinitialiserLibellesCrees_', 'reinitialiserLibellesCache_',
     'reinitialiserPromoSetCache_', 'reinitialiserPanneEcriture_', 'reinitialiserUsage_',
     'reinitialiserFreinBudget_', 'assurerIntervalleTick_', 'assurerTriggerResume_',
     'assurerTriggerChienDeGarde_', 'assurerNomsDomaines_', 'appliquerRejeuSiNouvelleVersion_',

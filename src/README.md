@@ -26,6 +26,7 @@
 | `Corrections.gs` | Apprentissage few-shot depuis l'onglet `Corrections` (ADR-0003) |
 | `Formulaire.gs` | Formulaire Google de correction (find-or-create + lecture des réponses) |
 | `Journal.gs` | État Sheet : Index (idempotence), Journal borné, Santé, quarantaine, Télémétrie |
+| `Actions.gs` | Journal des actions réversibles (`Actions`) et annulation 1-clic sans suppression (ADR-0081) |
 | `Resume.gs` | Résumé hebdomadaire par mail |
 | `Cout.gs` | Mesure du coût LLM réel (cible < 10 $/mois, plafond 20 $/mois) |
 | `Prefiltre.gs` | Pré-filtres déterministes (mots-clés, zone protégée) ; l'importance est décidée par `TriGmail.gs` (ADR-0075 6b) |
