@@ -4,7 +4,8 @@
  * Défauts locaux (`VEILLE_DRIVE_ACTIF = true`, `VEILLE_DRIVE_MAX_PAR_RUN = 15`,
  * `VEILLE_DRIVE_BUDGET_MS = 20000`), surchargeables via `CONFIG` sans modifier `Config.gs`.
  * Déplacements réversibles seuls journalisés dans `Actions`, jamais aucune suppression.
- * `Marc` (racine système), `Anna` et `04 · Immigration` (multi-parents strict) restent intouchés.
+ * `Marc` (racine système) et les dossiers système (`_Technique`, `_Doublons`, `_Médias`, `00 · À trier`, `00 · À vérifier`)
+ * restent intouchés ; `Anna` et `04 · Immigration` sont suivis au catalogue en lecture seule sur Drive.
  */
 
 var _veilleErreurSignaleeRun = false;
@@ -58,16 +59,28 @@ function estChangementDriveIgnorable_(ch, idsIgnores) {
   return estFichierExcluVeille_(ch.file.name);
 }
 
-/** Vrai si un ancêtre appartient à une zone jamais touchée ni ré-aspirée vers `00 · À trier`. PURE. */
-function estSousZoneIgnoreeVeille_(nomsAncetres) {
+/** Vrai si un ancêtre appartient à un dossier système technique/tampon exclu du suivi récursif. PURE. */
+function estSousZoneSystemeVeille_(nomsAncetres) {
   var zones = {
-    'anna': true,
-    '04 · immigration': true,
     '_technique': true,
     '_doublons': true,
     '_médias': true,
     '00 · à trier': true,
-    '00 · à vérifier': true,
+    '00 · à vérifier': true
+  };
+  var liste = nomsAncetres || [];
+  for (var i = 0; i < liste.length; i++) {
+    var k = String(liste[i] || '').trim().toLowerCase();
+    if (zones[k]) return true;
+  }
+  return false;
+}
+
+/** Vrai si un ancêtre appartient à une zone suivie en lecture seule au catalogue (jamais déplacée sur Drive). PURE. */
+function estZoneCatalogueLectureSeuleVeille_(nomsAncetres) {
+  var zones = {
+    'anna': true,
+    '04 · immigration': true,
     'données & exports': true
   };
   var liste = nomsAncetres || [];
@@ -76,6 +89,11 @@ function estSousZoneIgnoreeVeille_(nomsAncetres) {
     if (zones[k]) return true;
   }
   return false;
+}
+
+/** Vrai si un ancêtre appartient à une zone jamais déplacée automatiquement vers `00 · À trier`. PURE. */
+function estSousZoneIgnoreeVeille_(nomsAncetres) {
+  return estSousZoneSystemeVeille_(nomsAncetres) || estZoneCatalogueLectureSeuleVeille_(nomsAncetres);
 }
 
 /** Formate un chemin logique d'arborescence (retire `Mon Drive` puis `Marc` en tête, segments joints par `/`). PURE. */
@@ -91,11 +109,13 @@ function formaterCheminLogiqueVeille_(segments) {
   return propre.join('/');
 }
 
-/** Extrait le nom de domaine en tête d'un chemin logique (`05 · Carrière/...` → `'05 · Carrière'`). PURE. */
+/** Extrait le nom de domaine en tête d'un chemin logique (`05 · Carrière/...` → `'05 · Carrière'`, `Anna/...` → `'Anna'`). PURE. */
 function domaineDeCheminVeille_(chemin) {
   var parts = String(chemin == null ? '' : chemin).split('/');
   var tete = String(parts[0] || '').trim();
-  return /^0[1-9]\s*·/.test(tete) ? tete : '';
+  if (/^0[1-9]\s*·/.test(tete)) return tete;
+  if (tete.toLowerCase() === 'anna') return 'Anna';
+  return '';
 }
 
 /** Vrai si le statut d'Index autorise une mise à jour automatique vers `déplacé`/`corbeillé`. PURE. */
@@ -126,6 +146,30 @@ function cheminDossierVeille_(dirObj) {
     segments.push(dirObj.getName());
   } catch (e) { }
   return { chemin: formaterCheminLogiqueVeille_(segments), ancetresEtNom: segments };
+}
+
+function cheminParentFichierVeille_(fObj) {
+  try {
+    var it = fObj.getParents();
+    if (!it.hasNext()) return '';
+    return cheminDossierVeille_(it.next()).chemin;
+  } catch (e) {
+    return '';
+  }
+}
+
+function cataloguerLectureSeuleVeille_(fid, nom, chemin) {
+  if (!fid || estFichierExcluVeille_(nom) || typeof indexAjouter_ !== 'function') return false;
+  var cheminPropre = formaterCheminLogiqueVeille_(String(chemin || '').split('/')) || String(chemin || '');
+  var domaine = domaineDeCheminVeille_(cheminPropre);
+  indexAjouter_('drive|' + fid, {
+    statut: 'manuel',
+    domaine: domaine,
+    chemin: cheminPropre,
+    nom: nom,
+    fileId: fid
+  });
+  return true;
 }
 
 function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu) {
@@ -169,7 +213,7 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
   return { statut: dec.statut, chemin: cheminFinal, nom: nomFinal };
 }
 
-function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, garde) {
+function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, garde, cataloguerInconnus) {
   var maxProfondeur = 6;
   var maxSousDossiers = (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_DOSSIER_MAX_SOUS_DOSSIERS) || 30;
   var plafondSync = maxSync > 0 ? maxSync : 0;
@@ -177,7 +221,7 @@ function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, gar
   var tronque = false;
   if (!dirObj || plafondSync <= 0) return { maj: 0, tronque: plafondSync <= 0 };
 
-  var file = [{ dossier: dirObj, chemin: cheminBase, profondeur: 0 }];
+  var file = [{ dossier: dirObj, chemin: cheminBase, profondeur: 0, lectureSeule: Boolean(cataloguerInconnus) }];
   var vus = {};
   var sousDossiersVus = 0;
 
@@ -187,12 +231,22 @@ function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, gar
     if (vus[did]) continue;
     vus[did] = true;
     sousDossiersVus++;
+    var lsCourant = Boolean(courant.lectureSeule) ||
+      estZoneCatalogueLectureSeuleVeille_(String(courant.chemin || '').split('/'));
 
     var itF = courant.dossier.getFiles();
     while (itF.hasNext() && maj < plafondSync && !garde()) {
       var f = itF.next();
       try { if (f.isTrashed && f.isTrashed()) continue; } catch (eTr) { }
-      if (synchroniserFichierIndexVeille_(f.getId(), f.getName(), courant.chemin, false)) maj++;
+      var ffid = f.getId();
+      var fnom = f.getName();
+      if (synchroniserFichierIndexVeille_(ffid, fnom, courant.chemin, false)) {
+        maj++;
+      } else if (lsCourant) {
+        var dejaIdx = (typeof derniereCleIndexPourFileId_ === 'function' && Boolean(derniereCleIndexPourFileId_(ffid))) ||
+          (typeof indexContient_ === 'function' && indexContient_('drive|' + ffid));
+        if (!dejaIdx && cataloguerLectureSeuleVeille_(ffid, fnom, courant.chemin)) maj++;
+      }
     }
     if (itF.hasNext()) tronque = true;
 
@@ -201,9 +255,14 @@ function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, gar
       while (itD.hasNext() && !garde()) {
         var sd = itD.next();
         var sdNom = sd.getName();
-        if (estSousZoneIgnoreeVeille_([sdNom]) || vus[sd.getId()]) continue;
+        if (estSousZoneSystemeVeille_([sdNom]) || vus[sd.getId()]) continue;
         var sdChemin = courant.chemin ? courant.chemin + '/' + sdNom : sdNom;
-        file.push({ dossier: sd, chemin: sdChemin, profondeur: courant.profondeur + 1 });
+        file.push({
+          dossier: sd,
+          chemin: sdChemin,
+          profondeur: courant.profondeur + 1,
+          lectureSeule: lsCourant || estZoneCatalogueLectureSeuleVeille_([sdNom])
+        });
       }
     } else if (courant.profondeur >= maxProfondeur) {
       tronque = true;
@@ -321,13 +380,16 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
             continue;
           }
         }
-        if (!estDossierExcluRacineVeille_(meta.name, exclusSup)) {
+        if (fid !== racineId) {
           try {
             var dirObj = DriveApp.getFolderById(fid);
             var infoDir = cheminDossierVeille_(dirObj);
-            if (!estSousZoneIgnoreeVeille_(infoDir.ancetresEtNom) && !estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(dirObj))) {
+            var ancDir = nomsAncetresItemVeille_(dirObj);
+            if (infoDir.chemin && !estSousZoneSystemeVeille_(infoDir.ancetresEtNom) && !estSousZoneSystemeVeille_(ancDir)) {
+              var estLectureSeule = estZoneCatalogueLectureSeuleVeille_(infoDir.ancetresEtNom) ||
+                estZoneCatalogueLectureSeuleVeille_(ancDir);
               var sync = syncRestant > 0 && !garde()
-                ? synchroniserArborescenceDossierVeille_(dirObj, infoDir.chemin, syncRestant, garde)
+                ? synchroniserArborescenceDossierVeille_(dirObj, infoDir.chemin, syncRestant, garde, estLectureSeule)
                 : { maj: 0, tronque: syncRestant <= 0 };
               syncRestant = Math.max(0, syncRestant - sync.maj);
               var libDir = infoDir.chemin || meta.name;
@@ -341,12 +403,26 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
         continue;
       }
 
-      var epingle = typeof indexContient_ === 'function' && indexContient_('epingle|' + fid);
-      if (!estFichierNouveauAClasserVeille_(meta.name, fid, false, epingle)) continue;
+      if (estFichierExcluVeille_(meta.name)) continue;
       try {
         var fObj = DriveApp.getFileById(fid);
-        if (proteges && typeof aParentProtege_ === 'function' && aParentProtege_(fObj, proteges, true)) continue;
-        if (estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(fObj))) continue;
+        var anc = nomsAncetresItemVeille_(fObj);
+        if (estSousZoneSystemeVeille_(anc)) continue;
+        if ((proteges && typeof aParentProtege_ === 'function' && aParentProtege_(fObj, proteges, true)) ||
+            estZoneCatalogueLectureSeuleVeille_(anc)) {
+          if (syncRestant > 0) {
+            var chParent = cheminParentFichierVeille_(fObj);
+            if (cataloguerLectureSeuleVeille_(fid, meta.name, chParent)) {
+              syncRestant--;
+              try {
+                journalInfo_('VeilleDrive', 'Document catalogué (lecture seule) : ' + meta.name + ' → ' + (chParent || 'Mon Drive'));
+              } catch (eLog2) { }
+            }
+          }
+          continue;
+        }
+        var epingle = typeof indexContient_ === 'function' && indexContient_('epingle|' + fid);
+        if (!estFichierNouveauAClasserVeille_(meta.name, fid, false, epingle)) continue;
         if (deplacerObjetVeille_(fObj, aTrier, false, 'Veille directe changement → 00 · À trier')) deplaces++;
       } catch (eFich) {
         journaliserErreurVeille_('Fichier change inaccessible', eFich);
