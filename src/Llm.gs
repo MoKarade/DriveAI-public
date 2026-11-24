@@ -64,6 +64,7 @@ var REGLES_V2 =
   '      - sinon ÉMETTEUR (organisation qui a produit/envoyé) — « …_Facture_Hydro-Québec » ;\n' +
   '      - sinon DESCRIPTEUR (2 à 6 mots PRÉCIS : nature + sujet + auteur si repérable).\n' +
   '   3. `type_doc` PRÉCIS (« Bulletin de paie », « Police habitation », « Avis modification compte », « Suivi budgétaire »… jamais « Document »).\n' +
+  '   4. JAMAIS de libellé « Document non identifié », « sans contenu lisible » ni « illisible » : si le fichier est binaire, hexadécimal ou dépourvu de texte et d\'indice documentaire, réponds impérativement estNonDocument=true et routageHorsDomaine="_Technique".\n' +
   'B) AIGUILLAGE STRICT (ADR-0080) :\n' +
   '   - RÈGLE STRICTE DES FACTURES : TOUTE facture et TOUT reçu de paiement (énergie, télécom, santé/optométrie/pharmacie, achats, amendes payées, SaaS/API) → 02 · Finances (jamais 03, 07 ou 01). Baux, contrats, garanties, immatriculations, rapports d\'inspection restent en 03/01 ; ordonnances, analyses et décomptes hors factures restent en 07.\n' +
   '   - ASSURANCES (5 destinations selon l\'objet assuré) : Habitation → 03 · Logement & véhicule (lire impérativement « Emplacement du risque assuré », JAMAIS l\'adresse postale !) ; Auto & remplacement → 03 · Véhicule (« Marque Modèle ») ; Voyage → 09 · Voyages ; Santé/RAMQ/décomptes hors factures → 07 · Santé ; Prévoyance/vie/crédit/carte → 02 · Finances.\n' +

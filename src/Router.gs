@@ -253,10 +253,20 @@ function dossierRacineParNom_(nom, cleProp) {
   return dossier;
 }
 
-/** Vrai si le fichier est TECHNIQUE (code/CAO) d'après son extension — écarté du classement documentaire. */
+/** Vrai si un nom de fichier sans extension correspond à un fichier technique (hash hex, fichier caché ou Git). PUR. */
+function estNomTechniqueSansExtension_(nom) {
+  var propre = String(nom || '').trim();
+  if (!propre) return false;
+  if (/^\.[A-Za-z0-9._-]+$/.test(propre)) return true;
+  if (extension_(propre)) return false;
+  return /^[0-9a-f]{16,}$/i.test(propre) ||
+    /^(HEAD|FETCH_HEAD|ORIG_HEAD|COMMIT_EDITMSG|packed-refs|description|exclude|config|index)$/.test(propre);
+}
+
+/** Vrai si le fichier est TECHNIQUE (extension connue ou nom technique sans extension) — écarté du classement documentaire. */
 function estTechnique_(nom) {
   var ext = (extension_(nom) || '').toLowerCase();
-  return !!ext && CONFIG.EXT_TECHNIQUES.indexOf(ext) !== -1;
+  return (!!ext && CONFIG.EXT_TECHNIQUES.indexOf(ext) !== -1) || estNomTechniqueSansExtension_(nom);
 }
 
 /**
@@ -435,13 +445,58 @@ function decisionNonDocument_(classif, meta) {
 var SENTINELLES_VIDES = ['inconnu', 'inconnue', 'unknown', 'null', 'undefined', 'na', 'none',
   'aucun', 'aucune', 'so', 'vide', 'nc', 'indetermine'];
 
-/** Vrai si un champ de classification est réellement RENSEIGNÉ : non vide ET pas une sentinelle. PUR. */
+var EXTENSIONS_DOCUMENTAIRES_ = {
+  '.pdf': 1, '.doc': 1, '.docx': 1, '.odt': 1, '.rtf': 1, '.txt': 1, '.csv': 1,
+  '.xls': 1, '.xlsx': 1, '.ods': 1, '.ppt': 1, '.pptx': 1, '.odp': 1,
+  '.jpg': 1, '.jpeg': 1, '.png': 1, '.webp': 1, '.heic': 1, '.tif': 1, '.tiff': 1,
+  '.html': 1, '.htm': 1
+};
+
+/** Vrai si l'extension correspond à un format documentaire ou bureautique usuel. PUR. */
+function estExtensionDocumentaire_(ext) {
+  return !!EXTENSIONS_DOCUMENTAIRES_[String(ext || '').toLowerCase()];
+}
+
+/** Vrai si un libellé LLM décrit l'absence de lecture ou d'identification plutôt qu'un vrai nom. PUR. */
+function estLibelleIllisible_(v) {
+  var brut = String(v == null ? '' : v).trim().toLowerCase();
+  if (!brut) return false;
+  if (typeof brut.normalize === 'function') {
+    brut = brut.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+  brut = brut.replace(/\s+/g, ' ');
+  return /(non[- ]?identifi|sans contenu|illisible|non[- ]?lisible|sans texte|contenu non|non exploitable|a identifier|a verifier|nature indeterminee|nom hexadecimal|sans extension)/.test(brut) ||
+    /^depot manuel\b/.test(brut);
+}
+
+/** Vrai si un champ de classification est réellement RENSEIGNÉ : non vide ET pas une sentinelle ni un refus de lecture. PUR. */
 function estRenseigne_(v) {
   if (v == null) return false;
   var s = String(v).trim();
   if (!s || !champ_(v)) return false;
+  if (estLibelleIllisible_(s)) return false;
   var k = s.toLowerCase().replace(/[^a-z0-9]/g, ''); // 'N/A'→'na', '-'→'', 'Inconnu'→'inconnu'
   return k !== '' && SENTINELLES_VIDES.indexOf(k) === -1;
+}
+
+/** Vrai si la classification est un refus/échec illisible ou confiance très faible sans OCR/émetteur/entité. PUR. */
+function estResultatIllisible_(classif, meta) {
+  if (!classif || estDocumentIdentitePersonnel_(classif)) return false;
+  var aIllisible = estLibelleIllisible_(classif.type_doc) ||
+    estLibelleIllisible_(classif.descripteur) ||
+    estLibelleIllisible_(classif.emetteur) ||
+    estLibelleIllisible_(classif.entite);
+  var aucunContenu = !estRenseigne_(classif.emetteur) &&
+    !estRenseigne_(classif.type_doc) &&
+    !estRenseigne_(classif.entite) &&
+    !estRenseigne_(classif.descripteur);
+  if (aIllisible && aucunContenu) return true;
+  var ocr = String((meta && meta.extraitOcr) || '').trim();
+  return typeof classif.confiance === 'number' &&
+    classif.confiance <= 0.15 &&
+    !ocr &&
+    !estRenseigne_(classif.emetteur) &&
+    !estRenseigne_(classif.entite);
 }
 
 /**
@@ -479,10 +534,13 @@ function dossierAVerifier_() {
  * @param {string} ext
  * @return {{statut:string, domaine:string, chemin:string, nom:string, dossierId:string, autresEntites:string[]}}
  */
-function routageAVerifier_(classif, date, ext) {
+function routageAVerifier_(classif, date, ext, nomOriginal) {
+  var garderNom = typeof nomOriginal === 'string' && nomOriginal.trim() !== '' &&
+    !estRenseigne_(classif && classif.type_doc) &&
+    !estRenseigne_(classif && classif.emetteur);
   return {
     statut: 'à vérifier', domaine: '', chemin: '00 · À vérifier',
-    nom: nommerDocument_(classif, date, ext),
+    nom: garderNom ? nomOriginal.trim() : nommerDocument_(classif, date, ext),
     dossierId: dossierAVerifier_().getId(), autresEntites: []
   };
 }
@@ -570,6 +628,12 @@ function planRoutageV2_(classif, meta, date, ext, validees) {
   // (2) FAIL-SAFE (ADR-0016) : analyse TOUT-NULL → `00 · À vérifier` (une pièce d'identité a un
   // type/titulaire → jamais vide → jamais déviée). Ultra-strict, donc rare.
   if (!estDocumentIdentitePersonnel_(c) && estClassificationVide_(c)) return { type: 'à vérifier' };
+  if (estResultatIllisible_(c, meta)) {
+    if (!String((meta && meta.extraitOcr) || '').trim() && !estExtensionDocumentaire_(ext)) {
+      return { type: 'non-doc', routage: '_Technique' };
+    }
+    return { type: 'à vérifier', conserverNomOriginal: true };
+  }
 
   // (3) Domaine introuvable (LLM hors-liste/malformé) → domaine par défaut (jamais de limbo).
   if (!domaineConnu_(c.domaine)) c.domaine = CONFIG.DOMAINE_DEFAUT;
@@ -676,7 +740,7 @@ function deciderRoutageV2_(classif, meta, dateReference, ext) {
       ? routageTechnique_(meta.nomFichier, dateReference, ext)
       : routageMedia_(meta.nomFichier);
   }
-  if (plan.type === 'à vérifier') return routageAVerifier_(classif, date, ext); // fail-safe (ADR-0016)
+  if (plan.type === 'à vérifier') return routageAVerifier_(classif, date, ext, meta && meta.nomFichier); // fail-safe (ADR-0016)
 
   var dom = DriveApp.getFolderById(idDomaine_(plan.domaine));
   // ADR-0023 : sous-dossier VIDE = classement à PLAT à la racine du domaine (plus de repli
