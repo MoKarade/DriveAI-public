@@ -328,3 +328,122 @@ test('intégration Pipeline + Llm + Main + DossiersVie : injecte les dossiers ex
   assert.ok(!payloadsLlm[1].includes('Dossiers de vie existants'));
   assert.ok(payloadsLlm[1].includes('Sujet : Note diverse\nExtrait du contenu'));
 });
+
+
+test('construireDossiersVie_ : inclut déplacé/manuel et déduplique dernière ligne gagnante (hors epingle|)', () => {
+  const c = load(['Journal.gs', 'DossiersVie.gs']);
+  const lignes = [
+    ['drive|FID1', '2026-08-01', 'doc1.pdf', '02 · Finances', '02 · Finances/AncienDossier', 'classé', '', '', 'FID1'],
+    ['drive|FID1', '2026-10-05', 'doc1.pdf', '05 · Carrière', '05 · Carrière/Alphatek', 'déplacé', '', '', 'FID1'],
+    ['epingle|FID1', '2026-10-05', 'doc1.pdf', '05 · Carrière', '05 · Carrière/Alphatek', 'épinglé', '', '', 'FID1'],
+    ['drive|FID2', '2026-09-10', 'doc2.pdf', '03 · Logement', '03 · Logement/Bellerives', 'manuel', '', '', 'FID2'],
+    ['drive|FID3', '2026-09-11', 'doc3.pdf', '02 · Finances', '02 · Finances/BanqueFictive', 'classé', '', '', 'FID3'],
+    ['drive|FID3', '2026-10-12', 'doc3.pdf', '02 · Finances', '02 · Finances/BanqueFictive', 'corbeillé', '', '', 'FID3'],
+  ];
+
+  const dossiers = plain(c.construireDossiersVie_(lignes));
+  assert.strictEqual(dossiers.length, 2);
+  assert.strictEqual(dossiers[0].chemin, '05 · Carrière/Alphatek');
+  assert.strictEqual(dossiers[0].nbDocs, 1);
+  assert.strictEqual(dossiers[1].chemin, '03 · Logement/Bellerives');
+  assert.strictEqual(dossiers[1].nbDocs, 1);
+});
+
+test('enregistrerDossierVieDirect_ : adoption immédiate dossier vide, fusion nbDocs réel, maj à chaud et plafond 80 LRU', () => {
+  const props = new Map();
+  const store = fakeSheetStore({
+    Index: [
+      ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut'],
+      ['drive|F1', '2026-10-01', '2026-10-01_Contrat_Alphatek.pdf', '05 · Carrière', '05 · Carrière/Alphatek', 'classé'],
+    ],
+  });
+  const c = load(['DossiersVie.gs'], {
+    ss_: () => store.ss,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  // 1) Rejet des dossiers système / invalides
+  assert.strictEqual(c.enregistrerDossierVieDirect_('_Technique', 'Scripts', '_Technique/Scripts'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('02 · Finances', '', '02 · Finances'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('02 · Finances', '2026', '02 · Finances/2026'), false);
+
+  // 2) Charge cache initial puis adopte à chaud un nouveau dossier vide
+  c.reinitialiserDossiersVieCache_();
+  assert.strictEqual(c.dossiersVieCache_().length, 1);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('05 · Carrière', 'Betatek', '05 · Carrière/Betatek', '2026-11-24'), true);
+  const chaud = plain(c.dossiersVieCache_());
+  assert.strictEqual(chaud.length, 2, 'visible immédiatement dans _dossiersVieCache au même tick');
+  assert.strictEqual(chaud[1].chemin, '05 · Carrière/Betatek');
+  assert.strictEqual(chaud[1].nbDocs, 0);
+
+  // Le dossier vide est déjà trouvable par chercherDossiersVie_ et formatable
+  const trouves = plain(c.chercherDossiersVie_({ expediteur: 'rh@betatek.test', sujet: 'Offre', nom: 'offre.pdf' }, chaud, 3));
+  assert.strictEqual(trouves.length, 1);
+  assert.strictEqual(trouves[0].chemin, '05 · Carrière/Betatek');
+  assert.ok(c.formaterContexteDossiersVie_(trouves).includes('05 · Carrière/Betatek (0 doc(s)'));
+
+  // 3) Rechargement à froid : conserve nbDocs réel pour Alphatek + ajoute Betatek
+  assert.strictEqual(c.enregistrerDossierVieDirect_('05 · Carrière', 'Alphatek', '05 · Carrière/Alphatek', '2026-11-24'), true);
+  c.reinitialiserDossiersVieCache_();
+  const recharge = plain(c.dossiersVieCache_());
+  const alph = recharge.find((d) => d.chemin === '05 · Carrière/Alphatek');
+  assert.strictEqual(alph.nbDocs, 1, 'nbDocs réel conservé');
+  assert.strictEqual(alph.dernierDate, '2026-11-24');
+
+  // 4) Plafond LRU à 80 entrées
+  props.delete('DriveAI_DOSSIERS_VIE_DIRECTS');
+  for (let i = 1; i <= 85; i++) {
+    c.enregistrerDossierVieDirect_('08 · Perso & projets', 'Projet' + i, '08 · Perso & projets/Projet' + i, '2026-11-24');
+  }
+  const stockes = JSON.parse(props.get('DriveAI_DOSSIERS_VIE_DIRECTS'));
+  assert.strictEqual(stockes.length, 80, 'plafonné à 80 entrées');
+  assert.strictEqual(stockes[0][0], '08 · Perso & projets/Projet6', 'les 5 plus anciens évincés (LRU)');
+  assert.strictEqual(stockes[79][0], '08 · Perso & projets/Projet85');
+
+  // JSON corrompu toléré sans lever
+  props.set('DriveAI_DOSSIERS_VIE_DIRECTS', '{corrompu');
+  c.reinitialiserDossiersVieCache_();
+  assert.strictEqual(c.dossiersVieCache_().length, 1);
+});
+
+test('dossiersVieCache_ : lit 9 colonnes (FileId col I) pour dédupliquer PJ Gmail corbeillée/déplacée et rejette zones protégées', () => {
+  const props = new Map();
+  const store = fakeSheetStore({
+    Index: [
+      ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId'],
+      ['msg-100|0|facture.pdf|512', '2026-10-01', '2026-10-01_Facture_Ancienne.pdf', '02 · Finances', '02 · Finances/AncienDossier', 'classé', 'h1', 90, 'FID_PJ_GMAIL_01'],
+      ['drive|FID_PJ_GMAIL_01', '2026-11-20', '2026-10-01_Facture_Ancienne.pdf', '02 · Finances', '02 · Finances/AncienDossier', 'corbeillé', 'h1', '', 'FID_PJ_GMAIL_01'],
+      ['msg-200|0|releve.pdf|640', '2026-10-05', '2026-10-05_Releve_Vivant.pdf', '05 · Carrière', '05 · Carrière/Alphatek', 'classé', 'h2', 95, 'FID_PJ_GMAIL_02'],
+    ],
+  });
+  const c = load(['DossiersVie.gs'], {
+    ss_: () => store.ss,
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  c.reinitialiserDossiersVieCache_();
+  const dossiers = plain(c.dossiersVieCache_());
+  assert.strictEqual(dossiers.length, 1, 'AncienDossier corbeillé via drive|fid doit être dédupliqué');
+  assert.strictEqual(dossiers[0].chemin, '05 · Carrière/Alphatek');
+
+  // Garde autonome zones protégées/système dans enregistrerDossierVieDirect_
+  assert.strictEqual(c.enregistrerDossierVieDirect_('04 · Immigration', 'MIFI', '04 · Immigration/MIFI'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('Anna', 'Factures', 'Anna/Factures'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('00 · À trier', 'Sub', '00 · À trier/Sub'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('', '', '00 · A trier/Sub'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('', '', '00 · A verifier/Sub'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('08 · Perso & projets', 'Données & exports', '08 · Perso & projets/Données & exports'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('08 · Perso & projets', 'Takeout', '08 · Perso & projets/Donnees & exports/Takeout'), false);
+  assert.strictEqual(c.enregistrerDossierVieDirect_('08 · Perso & projets', 'Vacances', '08 · Perso & projets/_Medias/Vacances'), false);
+  assert.strictEqual(props.has('DriveAI_DOSSIERS_VIE_DIRECTS'), false);
+});

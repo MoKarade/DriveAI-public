@@ -635,3 +635,286 @@ test('VeilleDrive + Journal : dossier modifié sous 04 · Immigration et Anna su
   assert.ok(infos.some((x) => x.msg.includes('04 · Immigration/MIFI') && x.msg.includes('2 document(s) mis à jour dans le catalogue')));
   assert.ok(infos.some((x) => x.msg.includes('Anna/Factures') && x.msg.includes('2 document(s) mis à jour dans le catalogue')));
 });
+
+
+test('VeilleDrive : extraction pure émetteur/type et exclusion zones protégées/système', () => {
+  const c = load(['Config.gs', 'Entites.gs', 'Reset.gs', 'VeilleDrive.gs']);
+
+  assert.strictEqual(c.extraireTypeNomVeille_('2026-03-01_Releve_Banque_Exemple.pdf'), 'Releve');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-03-01_Releve_Banque_Exemple.pdf'), 'Banque Exemple');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-05_Facture_Hydro-Exemple (2).pdf'), 'Hydro-Exemple');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-05-01_Contrat.pdf'), '');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-01-01_Facture_Inconnu.pdf'), '');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-01-01_Facture_Document.pdf'), '');
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-01-01_Facture_Banque.pdf'), ''); // générique
+  assert.strictEqual(c.extraireEmetteurNomVeille_('2026-01-01_Facture_Marc_Exemple.pdf'), ''); // propriétaire
+
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('04 · Immigration/MIFI', '04 · Immigration'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('Anna/Factures', 'Anna'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('00 · À trier', ''), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('_Technique/Scripts', '_Technique'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('_Doublons/Hydro-Exemple', '_Doublons'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('_Médias/Photos', '_Médias'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('08 · Perso & projets/Données & exports', '08 · Perso & projets'), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('05 · Carrière/Alphatek', '05 · Carrière'), false);
+});
+
+test('VeilleDrive + Corrections : apprentissage auto sur déplacement manuel et exclusions strictes', () => {
+  const indexRows = [
+    ['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+    ['drive|F_APPRENDRE', '2026-10-01', '2026-10-01_Contrat_Alphatek.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h1', 90, 'F_APPRENDRE', 100, ''],
+    ['drive|F_EPINGLE', '2026-10-01', '2026-10-01_Facture_Betatek.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h2', 90, 'F_EPINGLE', 100, ''],
+    ['epingle|F_EPINGLE', '2026-10-02', '2026-10-01_Facture_Betatek.pdf', '02 · Finances', '02 · Finances/2026', 'épinglé', '', '', 'F_EPINGLE', '', ''],
+    ['drive|F_RENOMME', '2026-10-01', '2026-10-01_Facture_Gamma.pdf', '05 · Carrière', '05 · Carrière/Gamma', 'classé', 'h3', 90, 'F_RENOMME', 100, ''],
+    ['drive|F_MANUEL', '2026-10-01', '2026-10-01_Recu_Delta.pdf', '08 · Perso & projets', '08 · Perso & projets/Delta', 'manuel', 'h4', '', 'F_MANUEL', 100, ''],
+    ['drive|F_VERS_04', '2026-10-01', '2026-10-01_Lettre_Epsilon.pdf', '01 · Administratif & identité', '01 · Administratif & identité/Epsilon', 'classé', 'h5', 90, 'F_VERS_04', 100, ''],
+    ['drive|F_DEPUIS_04', '2026-10-01', '2026-10-01_Lettre_Zeta.pdf', '04 · Immigration', '04 · Immigration/Zeta', 'classé', 'h6', 90, 'F_DEPUIS_04', 100, ''],
+    ['drive|F_VERS_ANNA', '2026-10-01', '2026-10-01_Facture_Eta.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h7', 90, 'F_VERS_ANNA', 100, ''],
+    ['drive|F_VERS_TRIER', '2026-10-01', '2026-10-01_Facture_Theta.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h8', 90, 'F_VERS_TRIER', 100, ''],
+    ['drive|F_VERS_DOUBLON', '2026-10-01', '2026-10-01_Facture_Iota.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h9', 90, 'F_VERS_DOUBLON', 100, ''],
+    ['drive|F_CORBEILLE', '2026-10-01', '2026-10-01_Facture_Kappa.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h10', 90, 'F_CORBEILLE', 100, ''],
+  ];
+  const corrRows = [
+    ['Fichier', 'Émetteur', 'Domaine', 'Catégorie', 'Entité', 'Type', 'Corrigé le'],
+  ];
+  const makeSheet = (rows) => ({
+    getLastRow: () => rows.length,
+    getLastColumn: () => rows[0].length,
+    getRange: (r, c, nr = 1, nc = 1) => ({
+      getValue: () => (rows[r - 1] && rows[r - 1][c - 1] !== undefined ? rows[r - 1][c - 1] : ''),
+      setValue: (v) => { rows[r - 1][c - 1] = v; },
+      getValues: () => rows.slice(r - 1, r - 1 + nr).map((l) => Array.from({ length: nc }, (_, k) => (l[c - 1 + k] !== undefined ? l[c - 1 + k] : ''))),
+    }),
+    appendRow: (arr) => rows.push([...arr]),
+  });
+
+  const c = load(['Config.gs', 'Entites.gs', 'Corrections.gs', 'DossiersVie.gs', 'Journal.gs', 'Maintenance.gs', 'Reset.gs', 'VeilleDrive.gs']);
+  c.reinitialiserIndexCache_();
+  c.reinitialiserCorrectionsCache_();
+  c.feuille_ = (nom) => (nom === 'Corrections' ? makeSheet(corrRows) : makeSheet(indexRows));
+  c.journalInfo_ = () => {};
+  c.journalErreur_ = (src, msg) => { throw new Error(src + ': ' + msg); };
+
+  // 1) Déplacement manuel d'un doc classé vers 05 · Carrière/Alphatek → apprend !
+  const rOk = c.synchroniserFichierIndexVeille_('F_APPRENDRE', '2026-10-01_Contrat_Alphatek.pdf', 'Mon Drive/Marc/05 · Carrière/Alphatek', false);
+  assert.strictEqual(rOk.statut, 'déplacé');
+  assert.strictEqual(corrRows.length, 2, 'une seule correction enregistrée');
+  assert.strictEqual(corrRows[1][1], 'Alphatek');
+  assert.strictEqual(corrRows[1][2], '05 · Carrière');
+  assert.strictEqual(corrRows[1][4], 'Alphatek');
+  assert.strictEqual(corrRows[1][5], 'Contrat');
+  assert.ok(c.indexContient_('epingle|F_APPRENDRE'));
+
+  // 2) Un re-déplacement ultérieur du même fichier est ignoré (déjà épinglé + statut déplacé)
+  c.synchroniserFichierIndexVeille_('F_APPRENDRE', '2026-10-01_Contrat_Alphatek.pdf', 'Mon Drive/Marc/08 · Perso & projets/Autre', false);
+  assert.strictEqual(corrRows.length, 2);
+
+  // 3) Cas exclus : déjà épinglé, renommage même dossier, statut manuel, source/cible 04/Anna/À trier/_Doublons, corbeille
+  c.synchroniserFichierIndexVeille_('F_EPINGLE', '2026-10-01_Facture_Betatek.pdf', 'Mon Drive/Marc/05 · Carrière/Betatek', false);
+  c.synchroniserFichierIndexVeille_('F_RENOMME', '2026-10-01_Facture_Gamma_v2.pdf', 'Mon Drive/Marc/05 · Carrière/Gamma', false);
+  c.synchroniserFichierIndexVeille_('F_MANUEL', '2026-10-01_Recu_Delta.pdf', 'Mon Drive/Marc/05 · Carrière/Delta', false);
+  c.synchroniserFichierIndexVeille_('F_VERS_04', '2026-10-01_Lettre_Epsilon.pdf', 'Mon Drive/Marc/04 · Immigration/Epsilon', false);
+  c.synchroniserFichierIndexVeille_('F_DEPUIS_04', '2026-10-01_Lettre_Zeta.pdf', 'Mon Drive/Marc/01 · Administratif & identité/Zeta', false);
+  c.synchroniserFichierIndexVeille_('F_VERS_ANNA', '2026-10-01_Facture_Eta.pdf', 'Mon Drive/Anna/Eta', false);
+  c.synchroniserFichierIndexVeille_('F_VERS_TRIER', '2026-10-01_Facture_Theta.pdf', 'Mon Drive/Marc/00 · À trier', false);
+  c.synchroniserFichierIndexVeille_('F_VERS_DOUBLON', '2026-10-01_Facture_Iota.pdf', 'Mon Drive/Marc/_Doublons/Iota', false);
+  c.synchroniserFichierIndexVeille_('F_CORBEILLE', '2026-10-01_Facture_Kappa.pdf', 'Mon Drive/Marc/02 · Finances/2026', true);
+  assert.strictEqual(corrRows.length, 2, 'aucun des cas exclus ne doit écrire dans Corrections');
+
+  // Vérifie que le few-shot exploite immédiatement la correction apprise
+  const fs = c.exemplesFewShot_({ nomFichier: 'avenant_alphatek.pdf', expediteur: 'rh@alphatek.test', sujet: 'Avenant' });
+  assert.ok(fs.includes('Alphatek') && fs.includes('05 · Carrière'));
+});
+
+test('VeilleDrive + DossiersVie + Entites : dossier vide adopté à chaud et renommage d entité propagé', () => {
+  const entRows = [
+    ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'],
+    ['Alphatek', '05 · Carrière', 'Emploi & Carrière', 'Employeur', 'validée', 'DIR_RENOMME', '2026-10-01', '', 2],
+    ['MIFI', '04 · Immigration', '', '', 'validée', 'DIR_04_MIFI', '2026-10-01', '', 1],
+  ];
+  const idxRows = [
+    ['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+  ];
+  const makeSheet = (rows) => ({
+    getLastRow: () => rows.length,
+    getLastColumn: () => rows[0].length,
+    getRange: (r, c, nr = 1, nc = 1) => ({
+      getValue: () => (rows[r - 1] && rows[r - 1][c - 1] !== undefined ? rows[r - 1][c - 1] : ''),
+      setValue: (v) => { rows[r - 1][c - 1] = v; },
+      getValues: () => rows.slice(r - 1, r - 1 + nr).map((l) => Array.from({ length: nc }, (_, k) => (l[c - 1 + k] !== undefined ? l[c - 1 + k] : ''))),
+    }),
+    appendRow: (arr) => rows.push([...arr]),
+  });
+
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_MARC', { id: 'FICTIF_MARC', name: 'Marc', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_DOSSIERS_A_TRIER', { id: 'FICTIF_DOSSIERS_A_TRIER', name: '00 · À trier', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_D05', { id: 'FICTIF_D05', name: '05 · Carrière', parents: ['FICTIF_MARC'] }],
+    ['DIR_RENOMME', { id: 'DIR_RENOMME', name: 'Betatek', parents: ['FICTIF_D05'] }],
+    ['DIR_VIDE_NEUF', { id: 'DIR_VIDE_NEUF', name: 'ClientVide', parents: ['FICTIF_D05'] }],
+    ['FICTIF_D04', { id: 'FICTIF_D04', name: '04 · Immigration', parents: ['FICTIF_MARC'] }],
+    ['DIR_04_MIFI', { id: 'DIR_04_MIFI', name: 'MIFI_Renomme', parents: ['FICTIF_D04'] }],
+  ]);
+  const props = new Map([['DriveAI_CHANGES_TOKEN', '500']]);
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const foldW = (id) => {
+    const d = folders.get(id);
+    return {
+      getId: () => d.id,
+      getName: () => d.name,
+      getParents: () => iter(d.parents.map(foldW)),
+      getFiles: () => iter([]),
+      getFolders: () => iter([]),
+      getFoldersByName: () => iter([]),
+    };
+  };
+
+  const c = load(['Config.gs', 'Entites.gs', 'DossiersVie.gs', 'Journal.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          changes: [
+            { fileId: 'DIR_RENOMME', file: { id: 'DIR_RENOMME', name: 'Betatek', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_D05'], trashed: false } },
+            { fileId: 'DIR_VIDE_NEUF', file: { id: 'DIR_VIDE_NEUF', name: 'ClientVide', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_D05'], trashed: false } },
+            { fileId: 'DIR_04_MIFI', file: { id: 'DIR_04_MIFI', name: 'MIFI_Renomme', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_D04'], trashed: false } },
+          ],
+          newStartPageToken: '501',
+        }),
+      }),
+    },
+    DriveApp: { getRootFolder: () => foldW('FICTIF_ROOT'), getFolderById: (id) => foldW(id) },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  c.reinitialiserIndexCache_();
+  c.reinitialiserEntitesCache_();
+  c.reinitialiserDossiersVieCache_();
+  c.feuille_ = (nom) => (nom === 'Entités' ? makeSheet(entRows) : makeSheet(idxRows));
+  c.journalInfo_ = () => {};
+  c.journalErreur_ = (src, msg) => { throw new Error(src + ': ' + msg); };
+  c.dossierTechnique_ = () => foldW('FICTIF_DOSSIERS_A_TRIER');
+
+  // Pré-charge le cache dossiers de vie AVANT le changement pour prouver la mise à jour à chaud
+  assert.strictEqual(c.dossiersVieCache_().length, 0);
+
+  c.veillerDrive_(() => false);
+
+  // 1) DossiersVie adoptés à chaud (y compris ClientVide, jamais MIFI_Renomme de 04 · Immigration)
+  const dv = JSON.parse(JSON.stringify(c.dossiersVieCache_()));
+  assert.ok(dv.some((d) => d.chemin === '05 · Carrière/Betatek'));
+  assert.ok(dv.some((d) => d.chemin === '05 · Carrière/ClientVide' && d.nbDocs === 0));
+  assert.ok(!dv.some((d) => d.chemin.includes('04 · Immigration')));
+
+  // 2) Entités renommée Alphatek → Betatek + variante anti-doublon ; MIFI de 04 intouchée
+  assert.strictEqual(entRows[1][0], 'Betatek');
+  assert.strictEqual(entRows[2][0], 'MIFI');
+  assert.strictEqual(entRows[3][0], 'Alphatek');
+  assert.strictEqual(entRows[3][4], 'variante de : Betatek');
+});
+
+test('VeilleDrive : ignore déplacement hors domaine et variantes sans accent/majuscule (0 correction, 0 epingle, 0 dossier, 0 entité)', () => {
+  const indexRows = [
+    ['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+    ['drive|F_HORS_DOM', '2026-10-01', '2026-10-01_Facture_Alphatek.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h1', 90, 'F_HORS_DOM', 100, ''],
+    ['drive|F_A_TRIER_NOACC', '2026-10-01', '2026-10-01_Facture_Betatek.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h2', 90, 'F_A_TRIER_NOACC', 100, ''],
+    ['drive|F_A_TRIER_MAJ', '2026-10-01', '2026-10-01_Facture_Gamma.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h3', 90, 'F_A_TRIER_MAJ', 100, ''],
+    ['drive|F_A_VERIF_NOACC', '2026-10-01', '2026-10-01_Facture_Delta.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h4', 90, 'F_A_VERIF_NOACC', 100, ''],
+    ['drive|F_MEDIAS_NOACC', '2026-10-01', '2026-10-01_Facture_Epsilon.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h5', 90, 'F_MEDIAS_NOACC', 100, ''],
+    ['drive|F_EXP_NOACC', '2026-10-01', '2026-10-01_Facture_Zeta.pdf', '02 · Finances', '02 · Finances/2026', 'classé', 'h6', 90, 'F_EXP_NOACC', 100, ''],
+  ];
+  const corrRows = [['Fichier', 'Émetteur', 'Domaine', 'Catégorie', 'Entité', 'Type', 'Corrigé le']];
+  const entRows = [
+    ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'],
+    ['DonneesSub', '08 · Perso & projets', '', '', 'validée', 'DIR_EXP_NOACC', '2026-10-01', '', 1],
+  ];
+  const makeSheet = (rows) => ({
+    getLastRow: () => rows.length,
+    getLastColumn: () => rows[0].length,
+    getRange: (r, c, nr = 1, nc = 1) => ({
+      getValue: () => (rows[r - 1] && rows[r - 1][c - 1] !== undefined ? rows[r - 1][c - 1] : ''),
+      setValue: (v) => { rows[r - 1][c - 1] = v; },
+      getValues: () => rows.slice(r - 1, r - 1 + nr).map((l) => Array.from({ length: nc }, (_, k) => (l[c - 1 + k] !== undefined ? l[c - 1 + k] : ''))),
+    }),
+    appendRow: (arr) => rows.push([...arr]),
+  });
+
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_MARC', { id: 'FICTIF_MARC', name: 'Marc', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_DOSSIERS_A_TRIER', { id: 'FICTIF_DOSSIERS_A_TRIER', name: '00 · À trier', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_D08', { id: 'FICTIF_D08', name: '08 · Perso & projets', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_EXP_NOACC_PARENT', { id: 'FICTIF_EXP_NOACC_PARENT', name: 'Donnees & exports', parents: ['FICTIF_D08'] }],
+    ['DIR_EXP_NOACC', { id: 'DIR_EXP_NOACC', name: 'TakeoutNoAcc', parents: ['FICTIF_EXP_NOACC_PARENT'] }],
+    ['FICTIF_MED_NOACC_PARENT', { id: 'FICTIF_MED_NOACC_PARENT', name: '_Medias', parents: ['FICTIF_D08'] }],
+    ['DIR_MED_NOACC', { id: 'DIR_MED_NOACC', name: 'PhotosNoAcc', parents: ['FICTIF_MED_NOACC_PARENT'] }],
+  ]);
+  const props = new Map([['DriveAI_CHANGES_TOKEN', '600']]);
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const foldW = (id) => {
+    const d = folders.get(id);
+    return {
+      getId: () => d.id, getName: () => d.name,
+      getParents: () => iter(d.parents.map(foldW)),
+      getFiles: () => iter([]), getFolders: () => iter([]), getFoldersByName: () => iter([]),
+    };
+  };
+
+  const c = load(['Config.gs', 'Entites.gs', 'Corrections.gs', 'DossiersVie.gs', 'Journal.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          changes: [
+            { fileId: 'DIR_EXP_NOACC', file: { id: 'DIR_EXP_NOACC', name: 'TakeoutNoAcc', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_EXP_NOACC_PARENT'], trashed: false } },
+            { fileId: 'DIR_MED_NOACC', file: { id: 'DIR_MED_NOACC', name: 'PhotosNoAcc', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_MED_NOACC_PARENT'], trashed: false } },
+          ],
+          newStartPageToken: '601',
+        }),
+      }),
+    },
+    DriveApp: { getRootFolder: () => foldW('FICTIF_ROOT'), getFolderById: (id) => foldW(id) },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  c.reinitialiserIndexCache_();
+  c.reinitialiserCorrectionsCache_();
+  c.reinitialiserEntitesCache_();
+  c.reinitialiserDossiersVieCache_();
+  c.feuille_ = (nom) => (nom === 'Corrections' ? makeSheet(corrRows) : (nom === 'Entités' ? makeSheet(entRows) : makeSheet(indexRows)));
+  c.journalInfo_ = () => {};
+  c.journalErreur_ = (src, msg) => { throw new Error(src + ': ' + msg); };
+  c.dossierTechnique_ = () => foldW('FICTIF_DOSSIERS_A_TRIER');
+
+  // 1) Déplacements fichiers hors domaine et vers variantes sans accent/majuscule
+  c.synchroniserFichierIndexVeille_('F_HORS_DOM', '2026-10-01_Facture_Alphatek.pdf', 'Mon Drive/PersoAutre/MesFactures', false);
+  c.synchroniserFichierIndexVeille_('F_A_TRIER_NOACC', '2026-10-01_Facture_Betatek.pdf', 'Mon Drive/Marc/00 · A trier', false);
+  c.synchroniserFichierIndexVeille_('F_A_TRIER_MAJ', '2026-10-01_Facture_Gamma.pdf', 'Mon Drive/Marc/00 · À TRIER', false);
+  c.synchroniserFichierIndexVeille_('F_A_VERIF_NOACC', '2026-10-01_Facture_Delta.pdf', 'Mon Drive/Marc/00 · A verifier', false);
+  c.synchroniserFichierIndexVeille_('F_MEDIAS_NOACC', '2026-10-01_Facture_Epsilon.pdf', 'Mon Drive/Marc/_Medias/Vacances', false);
+  c.synchroniserFichierIndexVeille_('F_EXP_NOACC', '2026-10-01_Facture_Zeta.pdf', 'Mon Drive/Marc/08 · Perso & projets/Donnees & exports', false);
+
+  assert.strictEqual(corrRows.length, 1, '0 correction écrite');
+  assert.strictEqual(c.indexContient_('epingle|F_A_TRIER_NOACC'), false, '0 epingle sur 00 · A trier');
+  assert.strictEqual(c.indexContient_('epingle|F_A_TRIER_MAJ'), false, '0 epingle sur 00 · À TRIER');
+
+  // 2) Changements de dossiers sous Donnees & exports et _Medias
+  c.veillerDrive_(() => false);
+  assert.strictEqual(props.has('DriveAI_DOSSIERS_VIE_DIRECTS'), false, '0 dossier direct adopté');
+  assert.strictEqual(entRows[1][0], 'DonneesSub', '0 renommage dans Entités');
+});
