@@ -629,6 +629,7 @@ test('lignesTelemetrie_ : clés STABLES (contrat app), plafonds dérivés des CO
   // Contrat avec interpreterTelemetrie (PR3) : ces clés ne doivent JAMAIS changer sans migration app.
   assert.deepStrictEqual(Object.keys(parCle).sort(), [
     'gmail_histo_fils_jour', 'llm_appels_mois', 'llm_cout_mois', 'quota_gmail_etat',
+    'rangement_temps_jour_min', 'tick_temps_jour_min',
     'tri_anciens_fils_jour', 'tri_archives_jour', 'tri_boite_fils_jour',
     'tri_cyclique_fils_jour', 'tri_fond_fils_jour', 'tri_histo_fils_jour',
   ]);
@@ -711,13 +712,13 @@ test('majTelemetrie_ : publie tri_anciens_fils_jour, tri_fond_fils_jour (via fil
   });
 
   c.majTelemetrie_();
-  assert.strictEqual(ecrit.vals.length, 10);
+  assert.strictEqual(ecrit.vals.length, 12);
   const parCle = Object.fromEntries(ecrit.vals.map((l) => [l[0], l]));
   assert.strictEqual(parCle.gmail_histo_fils_jour[1], 0, 'compteur de la veille ignoré');
   assert.strictEqual(parCle.tri_anciens_fils_jour[1], 15);
   assert.strictEqual(parCle.tri_fond_fils_jour[1], 50, '10 + 20 + 5 + 15 via filsFondLusJour_');
   assert.strictEqual(parCle.tri_archives_jour[1], 8);
-  assert.deepStrictEqual(efface, { row: 12, numRows: 4 }, 'reliquat de lignes effacé');
+  assert.deepStrictEqual(efface, { row: 14, numRows: 2 }, 'reliquat de lignes effacé');
 
   // Passage à minuit : tous les compteurs du jour retombent à 0.
   jourCourant = '2026/07/16';
@@ -818,6 +819,8 @@ test('GAP-6 — compteurFilsJour_, lignesTelemetrie_ et majTelemetrie_ bornent l
     tri_archives_jour: 0,
     llm_cout_mois: 0,
     llm_appels_mois: 0,
+    tick_temps_jour_min: 0,
+    rangement_temps_jour_min: 0,
   });
 
   // Repli fondFilsJour omis avec mix sain + corrompu : seule la composante saine est sommée.

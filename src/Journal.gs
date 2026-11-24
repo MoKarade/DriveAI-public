@@ -830,6 +830,8 @@ function lignesTelemetrie_(d) {
   var archives = nombreTelemetrieOuZero_(d.archivesJour);
   var coutDollars = nombreTelemetrieOuZero_(d.coutDollars);
   var coutAppels = nombreTelemetrieOuZero_(d.coutAppels);
+  var tickTempsJourMin = nombreTelemetrieOuZero_(d.tickTempsJourMin);
+  var rangementTempsJourMin = nombreTelemetrieOuZero_(d.rangementTempsJourMin);
   return [
     ['quota_gmail_etat', d.quotaSuspendu ? 'suspendu' : 'actif', '',
       d.quotaSuspendu ? (d.reprise || '') : ''],
@@ -842,7 +844,9 @@ function lignesTelemetrie_(d) {
     ['tri_fond_fils_jour', fond, 'fils/jour', 'Plafond commun ' + CONFIG.TRI_FOND_MAX_FILS_JOUR + '/j'],
     ['tri_archives_jour', archives, 'fils/jour', 'Fils archivés par le moteur aujourd\'hui'],
     ['llm_cout_mois', coutDollars, '$', 'Frein campagnes à ' + CONFIG.LLM_BUDGET_CAMPAGNES + ' $'],
-    ['llm_appels_mois', coutAppels, 'appels', '']
+    ['llm_appels_mois', coutAppels, 'appels', ''],
+    ['tick_temps_jour_min', tickTempsJourMin, 'min/jour', 'Plafond Google 90 min/j'],
+    ['rangement_temps_jour_min', rangementTempsJourMin, 'min/jour', 'Plafond 60 min/j']
   ];
 }
 
@@ -940,6 +944,19 @@ function majTelemetrie_() {
     : cycliqueFilsJour + boiteFilsJour + histoTriFilsJour + anciensFilsJour;
   var archivesJour = compteurFilsJour_(props, 'DriveAI_TRI_ARCHIVES', aujourdhui);
   var cout = syntheseCoutMois_();
+  var lireMsJour = function (cle) {
+    if (typeof lireBudgetMsJour_ === 'function') return lireBudgetMsJour_(props, cle, aujourdhui);
+    if (!props) return 0;
+    try {
+      var brut = String(props.getProperty(cle) || '');
+      var sep = brut.indexOf('|');
+      if (sep === -1 || brut.slice(0, sep) !== aujourdhui) return 0;
+      var n = Number(brut.slice(sep + 1));
+      return isFinite(n) && n > 0 ? n : 0;
+    } catch (e) { return 0; }
+  };
+  var tickTempsJourMin = Math.round((lireMsJour('DriveAI_TICK_JOUR_MS') / 60000) * 10) / 10;
+  var rangementTempsJourMin = Math.round((lireMsJour('DriveAI_RANGEMENT_JOUR_MS') / 60000) * 10) / 10;
   var lignes = lignesTelemetrie_({
     quotaSuspendu: suspendu,
     reprise: reprise,
@@ -951,7 +968,9 @@ function majTelemetrie_() {
     fondFilsJour: fondFilsJour,
     archivesJour: archivesJour,
     coutDollars: cout.dollars,
-    coutAppels: cout.appels
+    coutAppels: cout.appels,
+    tickTempsJourMin: tickTempsJourMin,
+    rangementTempsJourMin: rangementTempsJourMin
   });
   var f = feuille_('Télémétrie');
   f.getRange(2, 1, lignes.length, COLONNES_TELEMETRIE.length).setValues(lignes);

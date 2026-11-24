@@ -88,6 +88,7 @@ const CONTRAT = [
   'majProgressions_', 'majProgressionsFinTick_', 'registreApresProgression_', 'lignesProgression_', 'assurerEnteteProgression_',
   // télémétrie coûts & quotas (C28-24) : rendu centralisé (tick finally), lu par l'app (PR3)
   'majTelemetrie_', 'lignesTelemetrie_', 'compteurFilsJour_',
+  'lireBudgetMsJour_', 'ajouterBudgetMsJour_', 'estQuotaTickJourAtteint_', 'estBudgetRangementJourAtteint_',
   // résumé hub (C28-27) : pré-calcul au tick finally (Main.gs) des 4 métriques du widget du hub
   'majResumeHub_', 'compterMetriquesHub_', 'compterMetriquesHubBorne_', 'fenetreCouvre7j_', 'compterDossierRevue_', 'cleDocumentIndex_', 'tsCellule_',
   'compterRestantMigration_', 'compterRestantReanalyse_', 'compterCampagneDossier_',
