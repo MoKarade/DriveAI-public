@@ -626,7 +626,7 @@ test('INVENTAIRE des étapes : chaque `etapeSuivie_` a un budget QUOTIDIEN class
   [
     'rejeu-version', 'dequarantaine', 'seed-entites', 'entites-auto-validation', 'entites-dossiers',
     'entites-curation', 'relances-quarantaine', 'corrections', 'intake-gmail', 'intake-depots',
-    'intake-partages', 'tri-gmail', 'fiche-apprentissage', 'reorg', 'hub-resume', 'journal-borne',
+    'intake-partages', 'tri-gmail', 'fiche-apprentissage', 'reorg', 'copilote', 'hub-resume', 'journal-borne',
     'progression', 'sante', 'telemetrie',
   ].forEach((n) => { CLASSEES[n] = { exception: FLUX }; });
 
@@ -707,7 +707,7 @@ function ctxTickMain(opts) {
     'assurerTriggerChienDeGarde_', 'assurerNomsDomaines_', 'appliquerRejeuSiNouvelleVersion_',
     'dequarantainerLignes_', 'seedEntitesMarc_', 'creerDossiersEntitesValidees_',
     'appliquerCurationEntites_', 'appliquerRelancesQuarantaine_', 'lireEtAppliquerCorrections_',
-    'appliquerCorrectionsManuelles_', 'appliquerRangementInitial_', 'majProgressions_',
+    'appliquerCorrectionsManuelles_', 'appliquerRangementInitial_', 'executerEtapeCopilote_', 'majProgressions_',
     'majTelemetrie_', 'majCouts_', 'majResumeHub_', 'majHistoriqueVrac_',
     'majValidationDoublons_', 'bornerJournal_', 'majProgressionsFinTick_', 'flushUsage_',
   ]) {
@@ -728,7 +728,7 @@ function ctxTickMain(opts) {
   return { c, props, journaux, skips, lockCalls };
 }
 
-test('tickDriveAI() : verrou occupé → skip sans releaseLock ; panne API R2 → 27 suiviSkip_ ; finally releaseLock garanti même si majSante_ lève', () => {
+test('tickDriveAI() : verrou occupé → skip sans releaseLock ; panne API R2 → 28 suiviSkip_ ; finally releaseLock garanti même si majSante_ lève', () => {
   // 1. Contention de verrou : tryLock(5000) === false → retour immédiat, aucun releaseLock.
   const occupe = ctxTickMain({ lockOk: false });
   occupe.c.tickDriveAI();
@@ -736,14 +736,14 @@ test('tickDriveAI() : verrou occupé → skip sans releaseLock ; panne API R2 �
   assert.strictEqual(occupe.lockCalls.releaseLock, 0);
   assert.ok(occupe.journaux.info.some((j) => j.m.includes('Run précédent encore actif')));
 
-  // 2. Suspension R2 (estPannePlateforme_() === true) + exception dans majSante_() → 27 skips + releaseLock toujours exécuté.
+  // 2. Suspension R2 (estPannePlateforme_() === true) + exception dans majSante_() → 28 skips + releaseLock toujours exécuté.
   const r2 = ctxTickMain({
     pannePlateforme: true,
     majSante: () => { throw new Error('Sheet Santé indisponible'); },
   });
   r2.c.tickDriveAI();
   const skipsPanne = r2.skips.filter((s) => s.raison === 'panne API (compte)');
-  assert.strictEqual(skipsPanne.filter((s) => s.cle !== 'rangement').length, 27, 'les 27 étapes suspendues sous R2 sont toutes enregistrées');
+  assert.strictEqual(skipsPanne.filter((s) => s.cle !== 'rangement').length, 28, 'les 28 étapes suspendues sous R2 sont toutes enregistrées');
   assert.ok(r2.journaux.erreur.some((j) => j.m.includes('MàJ Santé impossible')));
   assert.strictEqual(r2.lockCalls.releaseLock, 1, 'verrou libéré même si majSante_ lève');
   assert.ok('DriveAI_LAST_TICK' in r2.props, 'heartbeat écrit dans finally');

@@ -1593,7 +1593,12 @@ var CONFIG = {
   INCIDENT_SHEET: {
     ancienne: 'FICTIF_INCIDENT_SHEET_ANCIENNE',
     nouvelle: 'FICTIF_INCIDENT_SHEET_NOUVELLE'
-  }
+  },
+  // Copilote proactif (Lot 2A, #5/#6) : plafonds par run sans ajouter de budget quotidien fixe.
+  COPILOTE_ACTIF: true,                   // active l'étape copilote du tick (false → skip)
+  COPILOTE_BUDGET_MS: 15000,              // borne par run (15 s max) pour préserver le quota tick
+  COPILOTE_MAX_PAR_RUN: 15,               // cartes créées/traitées max par tick
+  COPILOTE_SEUIL_AUTO: 3                  // validations manuelles avant proposition du mode auto
 };
 
 /* ---------- Profil privé : les valeurs propres au Drive de Marc, hors du dépôt (#497, #515) ----------

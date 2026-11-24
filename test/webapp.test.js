@@ -873,3 +873,47 @@ test('actionGardesApp_ : repère fictif ou manquant → ok:false (jamais un iden
     { '03 · Logement & véhicule': { 'Logement': 'ID_LOG' } });
   assert.strictEqual(plat(sansVehicule.actionGardesApp_()).erreur, 'reperes-incomplets');
 });
+
+/* ---------- action=copilote-executer (Lot 2A, #5/#6) ---------- */
+
+test('doPost action=copilote-executer : secret, validation, verrou, mémo requestId et ok:false non mémorisé', () => {
+  const c = load(['Config.gs', 'WebApp.gs']);
+  const cache = {};
+  let lockOk = true;
+  let releaseCalls = 0;
+  let appels = 0;
+  c.CacheService = { getScriptCache: () => ({ get: (k) => cache[k] || null, put: (k, v) => { cache[k] = v; } }) };
+  c.PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k === 'DriveAI_WEBAPP_SECRET' ? 'SECRET' : null), setProperty: () => {} }) };
+  c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  c.LockService = { getScriptLock: () => ({ tryLock: () => lockOk, releaseLock: () => { releaseCalls++; } }) };
+  c.poserOperationCourante_ = () => {};
+  c.executerDecisionCopilote_ = (corps) => {
+    appels++;
+    if (corps.id === 'cop-err') return { ok: false, erreur: 'carte introuvable' };
+    return { ok: true, id: corps.id, statut: 'appliqué', actionIds: ['act-123456'], nbValidations: 1, proposerAuto: false, message: 'ok' };
+  };
+
+  const post = (secret, body) => JSON.parse(c.doPost({
+    parameter: { action: 'copilote-executer', secret },
+    postData: { contents: JSON.stringify(body) },
+  }));
+
+  assert.strictEqual(post('MAUVAIS', { id: 'cop-abc-123', decision: 'executer' }).erreur, 'refusé');
+  assert.strictEqual(post('SECRET', { id: 'bad|id', decision: 'executer' }).erreur, 'id invalide');
+  assert.strictEqual(post('SECRET', { id: 'cop-abc-123', decision: 'supprimer' }).erreur, 'decision invalide');
+
+  lockOk = false;
+  assert.match(post('SECRET', { id: 'cop-abc-123', decision: 'executer', requestId: 'reqCopilote01' }).erreur, /moteur occupé/);
+  assert.strictEqual(Object.keys(cache).length, 0, 'ok:false verrou occupé non mémorisé');
+
+  lockOk = true;
+  assert.strictEqual(post('SECRET', { id: 'cop-err', decision: 'executer', requestId: 'reqCopilote02' }).ok, false);
+  assert.strictEqual(Object.keys(cache).length, 0, 'ok:false non mémorisé');
+
+  const r1 = post('SECRET', { id: 'cop-abc-123', decision: 'executer', requestId: 'reqCopilote03' });
+  const r2 = post('SECRET', { id: 'cop-abc-123', decision: 'executer', requestId: 'reqCopilote03' });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.memo, true);
+  assert.strictEqual(appels, 2); // cop-err (1) + cop-abc-123 (1, rejeu servi par mémo)
+  assert.strictEqual(releaseCalls, 2);
+});

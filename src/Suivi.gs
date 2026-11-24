@@ -82,6 +82,7 @@ var REGISTRE_OPERATIONS = [
   // — À la demande + fond perpétuel
   { cle: 'reorg', libelle: 'Réorg IA (validations & plans demandés)', unite: 'actions', type: 'demande' },
   { cle: 'reconciliation-index', libelle: 'Réconciliation Index ↔ Drive', unite: 'lignes', type: 'campagne' },
+  { cle: 'copilote', libelle: 'Copilote proactif (cascade & corbeille)', unite: 'cartes', type: 'flux' },
   // — Observabilité (finally du tick). Le flush du suivi lui-même n'est PAS listé : il ne peut pas
   // s'auto-observer (son échec se persiste au tick suivant ; `Santé` reste le filet).
   { cle: 'sante', libelle: 'Santé (heartbeat)', unite: '', type: 'observabilite' },

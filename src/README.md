@@ -9,9 +9,10 @@
 |--------|------|
 | `Config.gs` | Configuration centrale (aucun secret — la clé API vit en Script Properties) |
 | `Version.gs` | Identifiant du commit déployé (injecté par la CI au déploiement) |
-| `Main.gs` | Orchestration du tick (`tickDriveAI`, 41 étapes) + déclencheurs + chien de garde |
-| `Suivi.gs` | Registre des 41 étapes et suivi LIVE (`Progression`, ventilation des coûts) |
+| `Main.gs` | Orchestration du tick (`tickDriveAI`, 43 étapes) + déclencheurs + chien de garde |
+| `Suivi.gs` | Registre des 43 étapes et suivi LIVE (`Progression`, ventilation des coûts) |
 | `WebApp.gs` | Pont HTTP (`doGet`/`doPost`) entre l'app web / GitHub Actions et le moteur |
+| `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons, vides et corbeille sensible (#6) |
 | `Pipeline.gs` | Traitement unifié d'un document (doublon → technique → média → OCR → LLM → routage) |
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
 | `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps) |

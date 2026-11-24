@@ -792,6 +792,10 @@ function tickDriveAI() {
       function () { synchroniserIndex_(estBudgetDepasse); },
       function (e) { journalErreur_('Maintenance', 'Réconciliation Index différée : ' + e); });
 
+    etapeSuivie_('copilote', [gQuotaJour, gBudgetStandard, gResetEnCours],
+      function () { executerEtapeCopilote_(estBudgetDepasseStandard); },
+      function (e) { journalErreur_('Copilote', 'Étape Copilote différée : ' + e); });
+
     // (Consolidation C28-26 : REMONTÉE juste après le flux vivant — voir bloc « BUDGET TAIL » plus
     // haut. Elle était ici EN DERNIER et se faisait affamer par la réconciliation + les campagnes
     // legacy, incident 2026-07-23.)
@@ -807,7 +811,7 @@ function tickDriveAI() {
         'mission-paies', 'mission-carriere', 'mission-annees-02', 'mission-impots',
         'fusion-exec', 'reset-rassemblement',
         'reset-placement', 'reset-04-interne', 'reset-llm', 'histo-gmail', 'migration',
-        'reanalyse', 'dryrun-v2', 'dryrun-cmp', 'reorg', 'reconciliation-index'
+        'reanalyse', 'dryrun-v2', 'dryrun-cmp', 'reorg', 'reconciliation-index', 'copilote'
       ].forEach(function (cle) { suiviSkip_(cle, 'panne API (compte)'); });
     } // fin de la suspension R2 (panne de compte API)
   } finally {
