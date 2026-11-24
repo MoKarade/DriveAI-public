@@ -692,3 +692,69 @@ test('Maintenance (ADR-0080) : collecterAReclasser_ et compterVracDossier_ saute
   ctx.compterVracDossier_(racine, etat, () => false);
   assert.strictEqual(etat.n, 2);
 });
+
+test('placerAvecJournalAction_ (ADR-0081, vague 4b) : no-op si identique, journalise Actions et permet annulerAction_', () => {
+  const actionsRows = [['Id', 'Horodatage', 'Type', 'Cible', 'Avant', 'Après', 'Statut', 'Détail']];
+  const sheetActions = {
+    getLastRow: () => actionsRows.length,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => actionsRows.slice(r - 1, r - 1 + nr).map((l) => l.slice(c - 1, c - 1 + nc)),
+      setValue: (v) => { actionsRows[r - 1][c - 1] = v; },
+    }),
+    appendRow: (row) => { actionsRows.push([...row]); },
+  };
+  const appelsDrive = [];
+  const ctx = load(['Config.gs', 'Actions.gs', 'Migration.gs'], {
+    feuille_: () => sheetActions,
+    journalInfo_: () => {},
+    journalErreur_: () => {},
+    renommer_: (id, nom) => { appelsDrive.push(['renommer', id, nom]); return nom !== 'ECHEC.pdf'; },
+    deplacerEtRenommer_: (id, dest, src, nom) => { appelsDrive.push(['deplacer', id, dest, src, nom]); return dest !== 'DEST_KO'; },
+  });
+
+  // 1. No-op exact → zéro appel Drive, zéro ligne Actions
+  assert.strictEqual(ctx.placerAvecJournalAction_('F1', 'P1', 'identique.pdf', 'P1', 'identique.pdf', 'reanalyse-ancien'), 'F1');
+  assert.strictEqual(appelsDrive.length, 0);
+  assert.strictEqual(actionsRows.length, 1);
+
+  // 2. Échec Drive → retourne '' sans écrire Actions
+  assert.strictEqual(ctx.placerAvecJournalAction_('F1', 'P1', 'avant.pdf', 'P1', 'ECHEC.pdf', 'reanalyse-ancien'), '');
+  assert.strictEqual(ctx.placerAvecJournalAction_('F1', 'P1', 'avant.pdf', 'DEST_KO', 'apres.pdf', 'reanalyse-ancien'), '');
+  assert.strictEqual(actionsRows.length, 1);
+
+  // 3. Renommage réussi → drive-renommer journalisé puis annulable en 1 clic
+  assert.strictEqual(ctx.placerAvecJournalAction_('F2', 'P1', 'ancien.pdf', 'P1', 'nouveau.pdf', 'migration-taxonomie'), 'F2');
+  assert.strictEqual(actionsRows.length, 2);
+  assert.strictEqual(actionsRows[1][2], 'drive-renommer');
+  assert.strictEqual(actionsRows[1][7], 'migration-taxonomie');
+  const ann1 = ctx.annulerAction_(actionsRows[1][0]);
+  assert.strictEqual(ann1.ok, true);
+  assert.deepStrictEqual(appelsDrive[appelsDrive.length - 1], ['renommer', 'F2', 'ancien.pdf']);
+
+  // 4. Déplacement + renommage réussi → drive-deplacer journalisé puis annulable en 1 clic
+  assert.strictEqual(ctx.placerAvecJournalAction_('F3', 'SRC1', '2026_vieux.pdf', 'DST2', '2024-01-10_Relevé_Alphatek.pdf', 'reanalyse-ancien'), 'F3');
+  assert.strictEqual(actionsRows.length, 3);
+  assert.strictEqual(actionsRows[2][2], 'drive-deplacer');
+  assert.strictEqual(actionsRows[2][7], 'reanalyse-ancien');
+  const ann2 = ctx.annulerAction_(actionsRows[2][0]);
+  assert.strictEqual(ann2.ok, true);
+  assert.deepStrictEqual(appelsDrive[appelsDrive.length - 1], ['deplacer', 'F3', 'SRC1', 'DST2', '2026_vieux.pdf']);
+});
+
+test('reanalyserFichier_ : source reanalyse-ancien consignée dans Actions lors du placement', () => {
+  const actionsLogs = [];
+  const { ctx, calls } = ctxMigrerFichier({ protege: false });
+  ctx.enregistrerAction_ = (type, cible, avant, apres, detail) => {
+    actionsLogs.push({ type, cible, avant: JSON.parse(JSON.stringify(avant)), apres: JSON.parse(JSON.stringify(apres)), detail });
+    return 'act-test-1';
+  };
+  assert.strictEqual(ctx.reanalyserFichier_('F9', {}), true);
+  assert.strictEqual(calls.traites[0].placer('DST9', '2024-05-01_Diplôme_Exemple.pdf'), 'F9');
+  assert.deepStrictEqual(actionsLogs, [{
+    type: 'drive-deplacer',
+    cible: 'F9',
+    avant: { parentId: 'PARENT', nom: 'doc 2024.pdf' },
+    apres: { parentId: 'DST9', nom: '2024-05-01_Diplôme_Exemple.pdf' },
+    detail: 'reanalyse-ancien',
+  }]);
+});
