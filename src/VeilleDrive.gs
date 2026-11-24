@@ -78,6 +78,141 @@ function estSousZoneIgnoreeVeille_(nomsAncetres) {
   return false;
 }
 
+/** Formate un chemin logique d'arborescence (retire `Mon Drive` puis `Marc` en tête, segments joints par `/`). PURE. */
+function formaterCheminLogiqueVeille_(segments) {
+  var propre = [];
+  var liste = segments || [];
+  for (var i = 0; i < liste.length; i++) {
+    var seg = String(liste[i] == null ? '' : liste[i]).trim();
+    if (seg) propre.push(seg);
+  }
+  if (propre.length && propre[0].toLowerCase() === 'mon drive') propre.shift();
+  if (propre.length && propre[0].toLowerCase() === 'marc') propre.shift();
+  return propre.join('/');
+}
+
+/** Extrait le nom de domaine en tête d'un chemin logique (`05 · Carrière/...` → `'05 · Carrière'`). PURE. */
+function domaineDeCheminVeille_(chemin) {
+  var parts = String(chemin == null ? '' : chemin).split('/');
+  var tete = String(parts[0] || '').trim();
+  return /^0[1-9]\s*·/.test(tete) ? tete : '';
+}
+
+/** Vrai si le statut d'Index autorise une mise à jour automatique vers `déplacé`/`corbeillé`. PURE. */
+function statutSyncVeilleAutorise_(statut) {
+  var s = String(statut == null ? '' : statut).trim();
+  if (!s || s === 'quarantaine' || s === 'à vérifier') return false;
+  if (typeof STATUTS_SYNC_INDEX !== 'undefined') return STATUTS_SYNC_INDEX[s] === true;
+  return { 'classé': true, 'doublon': true, 'média': true, 'technique': true, 'déplacé': true, 'manuel': true, 'corbeillé': true }[s] === true;
+}
+
+function cheminDossierVeille_(dirObj) {
+  var segments = [];
+  try {
+    var vus = {};
+    var did = dirObj.getId();
+    if (did) vus[did] = true;
+    var courant = null;
+    var parents = dirObj.getParents();
+    courant = parents.hasNext() ? parents.next() : null;
+    for (var n = 0; courant && n < 8; n++) {
+      var cid = courant.getId();
+      if (cid && vus[cid]) break;
+      if (cid) vus[cid] = true;
+      segments.unshift(courant.getName());
+      var ps = courant.getParents();
+      courant = ps.hasNext() ? ps.next() : null;
+    }
+    segments.push(dirObj.getName());
+  } catch (e) { }
+  return { chemin: formaterCheminLogiqueVeille_(segments), ancetresEtNom: segments };
+}
+
+function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu) {
+  if (!fid || typeof lireLigneIndex_ !== 'function' || typeof decisionSyncIndex_ !== 'function' ||
+      typeof indexAjouter_ !== 'function') return null;
+  var cle = typeof derniereCleIndexPourFileId_ === 'function' ? derniereCleIndexPourFileId_(fid) : '';
+  if (!cle && typeof indexContient_ === 'function' && indexContient_('drive|' + fid)) cle = 'drive|' + fid;
+  if (!cle) return null;
+
+  var lig = lireLigneIndex_(cle);
+  if (!lig || !statutSyncVeilleAutorise_(lig.statut)) return null;
+
+  var dec = decisionSyncIndex_(
+    { nom: lig.nom, chemin: lig.chemin, statut: lig.statut },
+    { existe: !disparu, corbeille: Boolean(disparu), nom: nomActuel, chemin: cheminConstat }
+  );
+  if (!dec) return null;
+
+  var cheminBrut = String(dec.chemin || cheminConstat || '');
+  var cheminFinal = formaterCheminLogiqueVeille_(cheminBrut.split('/')) || dec.chemin || lig.chemin;
+  var domaineFinal = domaineDeCheminVeille_(cheminFinal) || lig.domaine || '';
+  var nomFinal = dec.nom || nomActuel || lig.nom;
+
+  indexAjouter_('drive|' + fid, {
+    statut: dec.statut,
+    domaine: domaineFinal,
+    chemin: cheminFinal,
+    nom: nomFinal,
+    fileId: fid
+  });
+  if (dec.statut === 'déplacé' && typeof indexContient_ === 'function' && !indexContient_('epingle|' + fid) &&
+      String(cheminFinal).indexOf('00 · À trier') !== 0) {
+    indexAjouter_('epingle|' + fid, {
+      statut: 'épinglé',
+      nom: nomFinal,
+      domaine: domaineFinal,
+      chemin: cheminFinal,
+      fileId: fid
+    });
+  }
+  return { statut: dec.statut, chemin: cheminFinal, nom: nomFinal };
+}
+
+function synchroniserArborescenceDossierVeille_(dirObj, cheminBase, maxSync, garde) {
+  var maxProfondeur = 6;
+  var maxSousDossiers = (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_DOSSIER_MAX_SOUS_DOSSIERS) || 30;
+  var plafondSync = maxSync > 0 ? maxSync : 0;
+  var maj = 0;
+  var tronque = false;
+  if (!dirObj || plafondSync <= 0) return { maj: 0, tronque: plafondSync <= 0 };
+
+  var file = [{ dossier: dirObj, chemin: cheminBase, profondeur: 0 }];
+  var vus = {};
+  var sousDossiersVus = 0;
+
+  while (file.length && sousDossiersVus < maxSousDossiers && maj < plafondSync && !garde()) {
+    var courant = file.shift();
+    var did = courant.dossier.getId();
+    if (vus[did]) continue;
+    vus[did] = true;
+    sousDossiersVus++;
+
+    var itF = courant.dossier.getFiles();
+    while (itF.hasNext() && maj < plafondSync && !garde()) {
+      var f = itF.next();
+      try { if (f.isTrashed && f.isTrashed()) continue; } catch (eTr) { }
+      if (synchroniserFichierIndexVeille_(f.getId(), f.getName(), courant.chemin, false)) maj++;
+    }
+    if (itF.hasNext()) tronque = true;
+
+    if (courant.profondeur < maxProfondeur && maj < plafondSync && !garde()) {
+      var itD = courant.dossier.getFolders();
+      while (itD.hasNext() && !garde()) {
+        var sd = itD.next();
+        var sdNom = sd.getName();
+        if (estSousZoneIgnoreeVeille_([sdNom]) || vus[sd.getId()]) continue;
+        var sdChemin = courant.chemin ? courant.chemin + '/' + sdNom : sdNom;
+        file.push({ dossier: sd, chemin: sdChemin, profondeur: courant.profondeur + 1 });
+      }
+    } else if (courant.profondeur >= maxProfondeur) {
+      tronque = true;
+    }
+  }
+  if (file.length > 0 || sousDossiersVus >= maxSousDossiers) tronque = true;
+  return { maj: maj, tronque: tronque };
+}
+
 function nomsAncetresItemVeille_(item) {
   var noms = [];
   var vus = {};
@@ -134,6 +269,7 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
 
   var idsIgnores = idsIgnoresChangementsVeille_();
   var exclusSup = (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_DRIVE_EXCLUS) || [];
+  var syncRestant = (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_SYNC_MAX_FICHIERS_PAR_RUN) || 40;
   var racineId = racineDrive.getId();
   var deplaces = 0;
 
@@ -146,31 +282,22 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
       if (estChangementDriveIgnorable_(ch, idsIgnores)) continue;
       var meta = ch.file;
       var fid = String(meta.id);
-      var cleIndex = 'drive|' + fid;
-      var dejaIndexe = typeof indexContient_ === 'function' && indexContient_(cleIndex);
+      var cleExist = (typeof derniereCleIndexPourFileId_ === 'function' && derniereCleIndexPourFileId_(fid)) ||
+        (typeof indexContient_ === 'function' && indexContient_('drive|' + fid) ? 'drive|' + fid : '');
 
-      if (dejaIndexe) {
-        if (typeof lireLigneIndex_ === 'function' && typeof constaterEtatDrive_ === 'function' &&
-            typeof decisionSyncIndex_ === 'function') {
-          var lig = lireLigneIndex_(cleIndex);
-          if (lig) {
-            var constat = constaterEtatDrive_(fid);
-            var dec = decisionSyncIndex_({ nom: lig.nom, chemin: lig.chemin, statut: lig.statut }, constat);
-            if (dec) {
-              indexAjouter_(cleIndex, dec);
-              if (dec.statut === 'déplacé' && !indexContient_('epingle|' + fid) &&
-                  String(dec.chemin || '').indexOf('00 · À trier') !== 0) {
-                indexAjouter_('epingle|' + fid, {
-                  statut: 'épinglé',
-                  nom: constat.nom || lig.nom,
-                  domaine: '',
-                  chemin: dec.chemin || ''
-                });
-              }
-              try {
-                journalInfo_('VeilleDrive', 'Changement direct détecté : ' + (constat.nom || fid) + ' → ' + (dec.chemin || dec.statut));
-              } catch (eLog) { }
-            }
+      if (cleExist) {
+        if (typeof constaterEtatDrive_ === 'function') {
+          var constat = constaterEtatDrive_(fid);
+          var resFich = synchroniserFichierIndexVeille_(
+            fid,
+            constat.nom || meta.name,
+            constat.chemin,
+            !constat.existe || constat.corbeille
+          );
+          if (resFich) {
+            try {
+              journalInfo_('VeilleDrive', 'Changement direct détecté : ' + resFich.nom + ' → ' + (resFich.chemin || resFich.statut));
+            } catch (eLog) { }
           }
         }
         continue;
@@ -197,8 +324,17 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
         if (!estDossierExcluRacineVeille_(meta.name, exclusSup)) {
           try {
             var dirObj = DriveApp.getFolderById(fid);
-            if (!estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(dirObj))) {
-              journalInfo_('VeilleDrive', 'Dossier modifié détecté : ' + meta.name);
+            var infoDir = cheminDossierVeille_(dirObj);
+            if (!estSousZoneIgnoreeVeille_(infoDir.ancetresEtNom) && !estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(dirObj))) {
+              var sync = syncRestant > 0 && !garde()
+                ? synchroniserArborescenceDossierVeille_(dirObj, infoDir.chemin, syncRestant, garde)
+                : { maj: 0, tronque: syncRestant <= 0 };
+              syncRestant = Math.max(0, syncRestant - sync.maj);
+              var libDir = infoDir.chemin || meta.name;
+              var msgDir = sync.maj > 0
+                ? 'Dossier modifié : ' + libDir + ' (' + sync.maj + ' document(s) mis à jour dans le catalogue' + (sync.tronque ? ', plafond atteint' : '') + ')'
+                : 'Dossier modifié : ' + libDir + ' (arborescence à jour)';
+              journalInfo_('VeilleDrive', msgDir);
             }
           } catch (eInfoDir) { }
         }
