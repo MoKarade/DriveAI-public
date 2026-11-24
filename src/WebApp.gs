@@ -171,6 +171,8 @@ function doPost(e) {
           reponse = actionGardesApp_();
         } else if (action === 'annuler-action') {
           reponse = actionAnnulerAction_(e);
+        } else if (action === 'copilote-executer') {
+          reponse = actionCopiloteExecuter_(e);
         } else {
           reponse = actionTickPonctuel_();
         }
@@ -379,6 +381,23 @@ function actionAnnulerAction_(e) {
   } finally {
     verrou.releaseLock();
   }
+}
+
+/** Exécute une décision Copilote (`action=copilote-executer`), sérialisée par verrou script. */
+function actionCopiloteExecuter_(e) {
+  var corps;
+  try { corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
+  catch (err) { return { ok: false, erreur: 'corps JSON invalide' }; }
+  var id = corps && typeof corps.id === 'string' ? corps.id.trim() : '';
+  var decision = corps && typeof corps.decision === 'string' ? corps.decision.trim() : '';
+  if (!id || !/^[A-Za-z0-9_-]{3,64}$/.test(id)) return { ok: false, erreur: 'id invalide' };
+  if (!{ 'executer': 1, 'restaurer': 1, 'ignorer': 1, 'passer-auto': 1, 'desactiver-auto': 1 }[decision]) {
+    return { ok: false, erreur: 'decision invalide' };
+  }
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
+  try { return executerDecisionCopilote_({ id: id, decision: decision }); }
+  finally { verrou.releaseLock(); }
 }
 
 /* ---------- Résumé pour le hub perso (C28-27, CLAUDE.md §6 bis) ---------- */

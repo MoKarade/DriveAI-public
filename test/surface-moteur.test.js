@@ -302,6 +302,9 @@ const CONTRAT = [
   'appliquerPlanFusion_', 'fusionsAExecuter_', 'ligneFusionAAppliquer_', 'budgetJourFusionExec_',
   'cibleFusionValide_', 'idDomaineFusion_', 'deplacerFichierFusion_', 'fondreSourceFichiers_',
   'appliquerUneSourceFusion_',
+  // Copilote proactif (Lot 2A, #5/#6 — Copilote.gs / WebApp.gs / DriveRest.gs)
+  'executerEtapeCopilote_', 'executerDecisionCopilote_', 'actionCopiloteExecuter_',
+  'restaurerFichierRest_', 'candidatsCascade_', 'proposerCascadeDossier_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

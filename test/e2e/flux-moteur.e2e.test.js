@@ -63,6 +63,7 @@ const MODULES_MOTEUR = [
   'Reorg.gs',
   'ResolutionFileId.gs',
   'RetourOrphelins.gs',
+  'Copilote.gs',
   'WebApp.gs',
   'Actions.gs',
   'Journal.gs',
@@ -955,6 +956,7 @@ function creerWorkspaceE2E(opts) {
             if (payloadStr) {
               const body = JSON.parse(payloadStr);
               if (body.name) f.name = body.name;
+              if (typeof body.trashed === 'boolean') f.trashed = body.trashed;
             }
             return reponseHttp(200, { id: f.id });
           }
@@ -2921,4 +2923,57 @@ test('P0-4 [Contrat M1] Plafond commun <= 300/j respecté entre campagnes de fon
   assert.strictEqual(ancien.inInbox, true, 'ancien fil non lu hors quota reste en boîte');
   const telem = Object.fromEntries(ws.lireOnglet('Télémétrie').slice(1).map((r) => [r[0], r]));
   assert.strictEqual(telem.tri_fond_fils_jour[1], 300);
+});
+
+test('Lot 2A [E2E] : Copilote cascade + action=copilote-executer + annuler-action + alerte-corbeille restaurer sans déplacer', () => {
+  const ws = creerWorkspaceE2E();
+  const idDom02 = ws.c.CONFIG.DOMAINES['02 · Finances'];
+  const idDom08 = ws.c.CONFIG.DOMAINES['08 · Perso & projets'];
+  const dCible = ws.ajouterDossier('FICTIF_E2E_COP_CIBLE_01', 'FournisseurZ', [idDom02]);
+  const dVrac = ws.ajouterDossier('FICTIF_E2E_COP_VRAC_01', 'Vrac', [idDom08]);
+  const f1 = ws.ajouterFichier({ id: 'FICTIF_E2E_COP_FILE_01', name: '2025-05-01_Facture_FournisseurZ.pdf', parents: [dVrac.id], contenu: 'facture fictive' });
+  const fImmiTrash = ws.ajouterFichier({ id: 'FICTIF_E2E_COP_IMMI_02', name: '2026-01-10_Permis_IRCC.pdf', parents: [ws.c.CONFIG.DOMAINES['04 · Immigration']], trashed: true, contenu: 'permis fictif' });
+
+  ws.c.indexAjouter_('drive|' + f1.id, { statut: 'classé', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets/Vrac', nom: f1.name, fileId: f1.id });
+  ws.c.indexAjouter_('drive|' + fImmiTrash.id, { statut: 'corbeillé', domaine: '04 · Immigration', chemin: '04 · Immigration/Permis', nom: fImmiTrash.name, fileId: fImmiTrash.id });
+
+  const idCascade = ws.c.proposerCascadeDossier_({
+    domaine: '02 · Finances',
+    chemin: '02 · Finances/FournisseurZ',
+    parentId: dCible.id,
+    emetteurOuSujet: 'FournisseurZ',
+  });
+  assert.ok(idCascade, 'carte cascade créée en E2E');
+
+  ws.props.DriveAI_WEBAPP_SECRET = 'SECRET_E2E';
+  ws.c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  const repExec = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-executer', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eCopilote01', id: idCascade, decision: 'executer' }) },
+  }));
+  assert.strictEqual(repExec.ok, true);
+  assert.strictEqual(repExec.actionIds.length, 1);
+  assert.deepStrictEqual(f1.parents, [dCible.id]);
+
+  // Annulation 1-clic via action=annuler-action
+  const repUndo = JSON.parse(ws.c.doPost({
+    parameter: { action: 'annuler-action', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eCopiloteUndo01', actionId: repExec.actionIds[0] }) },
+  }));
+  assert.strictEqual(repUndo.ok, true);
+  assert.deepStrictEqual(f1.parents, [dVrac.id]);
+
+  // Tick détecte alerte-corbeille sur 04 · Immigration et action=copilote-executer restaurer la remet vivante sans déplacer
+  ws.c.executerEtapeCopilote_(() => false);
+  const cartes = ws.lireOnglet('Copilote').slice(1);
+  const cCorb = cartes.find((r) => r[3] === 'alerte-corbeille');
+  assert.ok(cCorb, 'carte alerte-corbeille créée sur 04 · Immigration');
+  const repRest = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-executer', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eCopiloteRest01', id: cCorb[0], decision: 'restaurer' }) },
+  }));
+  assert.strictEqual(repRest.ok, true);
+  assert.deepStrictEqual(repRest.actionIds, []);
+  assert.strictEqual(fImmiTrash.trashed, false);
+  assert.deepStrictEqual(fImmiTrash.parents, [ws.c.CONFIG.DOMAINES['04 · Immigration']]);
 });

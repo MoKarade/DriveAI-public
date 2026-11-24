@@ -44,7 +44,7 @@ test('tripwire : la suspension R2 enregistre un skip pour CHAQUE étape du bloc 
     'mission-paies', 'mission-carriere', 'mission-annees-02', 'mission-impots',
     'fusion-exec', 'reset-rassemblement',
     'reset-placement', 'reset-04-interne', 'reset-llm', 'histo-gmail', 'migration',
-    'reanalyse', 'dryrun-v2', 'dryrun-cmp', 'reorg', 'reconciliation-index'];
+    'reanalyse', 'dryrun-v2', 'dryrun-cmp', 'reorg', 'reconciliation-index', 'copilote'];
   const bloc = MAIN.match(/\[([^\]]+)\]\.forEach\(function \(cle\) \{ suiviSkip_\(cle, 'panne API \(compte\)'\); \}\);/);
   assert.ok(bloc, 'le lot de skips R2 existe dans Main.gs');
   const clesBloc = [...bloc[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);

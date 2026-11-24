@@ -157,6 +157,21 @@ function renommer_(fileId, nouveauNom) {
   return false;
 }
 
+/** Restaure un fichier hors corbeille via Drive REST PATCH ({ trashed: false }), sans déplacer ni renommer. */
+function restaurerFichierRest_(fileId) {
+  if (!fileId) return false;
+  var rep = fetchDriveAvecRetry_('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,trashed&supportsAllDrives=true', {
+    method: 'patch',
+    contentType: 'application/json',
+    payload: JSON.stringify({ trashed: false }),
+    headers: { Authorization: 'Bearer ' + jetonDrive_() },
+    muteHttpExceptions: true
+  });
+  if (rep.getResponseCode() === 200) return true;
+  journalErreur_('Drive', 'Restauration HTTP ' + rep.getResponseCode() + ' : ' + tronquer_(rep.getContentText(), 300));
+  return false;
+}
+
 /**
  * Crée un raccourci Drive vers un fichier, dans un dossier donné.
  * Sert au multi-entités (jamais de copie physique).
