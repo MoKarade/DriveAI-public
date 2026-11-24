@@ -3,7 +3,7 @@
  * rendu réel via react-dom/server de Etat.tsx (état sain, panne/erreurs, télémétrie P0-4,
  * gardes de division P2-2, Sheet vide sans chiffre inventé), Reglages.tsx (préférences et thème
  * P2-1), AujourdHui.tsx (2 sections préservées + visibilité Réorg/vides P0-3), zéro #hex hors
- * blocs :root, barre-basse à 3 colonnes et zéro emoji UI.
+ * blocs :root, barre-basse à 4 colonnes et zéro emoji UI.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -374,13 +374,13 @@ describe('AujourdHui.tsx & conformité visuelle R2/R4', () => {
     expect(htmlArretTri).toContain('Tri Gmail : À l’arrêt');
   });
 
-  it('styles.css n’a aucun #hex littéral hors blocs :root, déclare le thème clair et passe barre-basse à 3 colonnes', () => {
+  it('styles.css n’a aucun #hex littéral hors blocs :root, déclare le thème clair et passe barre-basse à 4 colonnes', () => {
     const css = lire('../src/styles.css');
     const sansRoot = css.replace(/:root(?:\[data-theme="[^"]+"\])?\s*\{[\s\S]*?\n\}/g, '');
     expect(sansRoot.length, 'suppression :root trop agressive — scan vacueux').toBeGreaterThan(css.length * 0.5);
     expect(sansRoot.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).toEqual([]);
     expect(css).toContain(':root[data-theme="clair"]');
-    expect(css).toMatch(/nav\.barre-basse\s*\{[^}]*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+    expect(css).toMatch(/nav\.barre-basse\s*\{[^}]*repeat\(4,\s*minmax\(0,\s*1fr\)\)/);
   });
 
   it('aucun emoji brut dans composants/ ni vues/', () => {
@@ -391,6 +391,7 @@ describe('AujourdHui.tsx & conformité visuelle R2/R4', () => {
       '../src/vues/Reorg.tsx',
       '../src/vues/Explorateur.tsx',
       '../src/vues/AujourdHui.tsx',
+      '../src/vues/Copilote.tsx',
       '../src/vues/Etat.tsx',
       '../src/vues/Reglages.tsx',
     ];

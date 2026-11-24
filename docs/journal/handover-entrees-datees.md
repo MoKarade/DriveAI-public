@@ -3,7 +3,17 @@
 > Déplacé tel quel depuis le haut de `HANDOVER.md` (PR b du plan #468, 21/10/2026). Plus récent en haut.
 > Le texte est conservé, pas réécrit : pour l'état courant, lire `HANDOVER.md`.
 > Entrées du 28/10/2026 déplacées le 29/10/2026 (HANDOVER.md au plafond de 300 lignes, DriveAI#814).
-> Entrées du 29/10/2026 déplacées le 05/11/2026 (même plafond, ADR-0074 étape 3) ; entrée « étape 1 » du 05/11 déplacée le 05/11 (ADR-0077). Entrées « étape 3 » et « étape 4 » du 05/11 déplacées le 06/11/2026 (étape 6b, #898). Entrée « étape 6a » du 05/11 déplacée le 18/11/2026 (même plafond, ADR-0078). Entrées « étape 6a bis » (05/11), « étape 7 » (05/11) et « étape 8 (#893) » (06/11) déplacées le 18/11/2026 (même plafond, ADR-0079 et mise à jour app/moteur).
+> Entrées du 29/10/2026 déplacées le 05/11/2026 (même plafond, ADR-0074 étape 3) ; entrée « étape 1 » du 05/11 déplacée le 05/11 (ADR-0077). Entrées « étape 3 » et « étape 4 » du 05/11 déplacées le 06/11/2026 (étape 6b, #898). Entrée « étape 6a » du 05/11 déplacée le 18/11/2026 (même plafond, ADR-0078). Entrées « étape 6a bis » (05/11), « étape 7 » (05/11) et « étape 8 (#893) » (06/11) déplacées le 18/11/2026 (même plafond, ADR-0079 et mise à jour app/moteur). Entrée « suite de l'étape 8 (#898) » (06/11) déplacée au Lot 1B (`#50`).
+
+## 06/11/2026 : relance sur une base épurée, suite de l'étape 8 — fileId sur les descripteurs de Migration, Reset et RetourOrphelins (#898)
+
+Les quatre descripteurs sous `ignorerDoublon` (`src/Migration.gs` ×2, `src/Reset.gs` reliquat, `src/RetourOrphelins.gs`) portent
+`fileId` : `metaDoublon_` lit taille et empreinte par `files.get` (ADR-0077), le blob n'est matérialisé que pour l'OCR, à toute
+taille ; les orphelins transmettent en plus le md5 déjà lu (`metaRest`), donc aucun second appel. Pas de drapeau `natif` : la
+migration exclut les natifs en amont, et pour un natif du reliquat de reset le md5 REST est vide, donc repli sur l'export
+haché comme avant (comportement inchangé) ; un orphelin sans md5 est refusé avant le pipeline (`decisionRetourOrphelin_`). Aucun commentaire de `Reset.gs` ni `Consolidation.gs` ne décrivait le
+hachage local de ces chemins : rien à mettre au présent. Verrous : `test/migration.test.js`, `test/reset-llm.test.js`,
+`test/retour-orphelins.test.js` (« empreinte lue par REST, blob jamais téléchargé pour un gros fichier »).
 
 ## 06/11/2026 : relance sur une base épurée, étape 8 — un doublon n'est écarté que sur taille ET empreinte, avec la preuve (ADR-0077, #893)
 

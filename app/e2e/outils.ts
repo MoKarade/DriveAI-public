@@ -6,7 +6,7 @@
  */
 import { expect, type Locator, type Page, type TestInfo } from '@playwright/test';
 
-export type SectionFr = 'Aujourd’hui' | 'Documents' | 'État' | 'Réglages';
+export type SectionFr = 'Aujourd’hui' | 'Copilote' | 'Documents' | 'État' | 'Réglages';
 export type ThemeE2E = 'sombre' | 'clair';
 
 interface JournalErreurs {
@@ -102,7 +102,7 @@ export function verifierAucuneErreur(journal: JournalErreurs): void {
   expect(journal.reponsesHttpErreur, `Réponses HTTP >= 400 : ${journal.reponsesHttpErreur.join(' | ')}`).toEqual([]);
 }
 
-/** Navigue vers une des 4 sections en respectant la coquille PC (`rail`) ou mobile (`barre-basse` / `barre-haute`). */
+/** Navigue vers une des 5 sections en respectant la coquille PC (`rail`) ou mobile (`barre-basse` / `barre-haute`). */
 export async function allerSection(page: Page, testInfo: TestInfo, section: SectionFr): Promise<void> {
   const tel = testInfo.project.name === 'tel';
   if (tel && section === 'Réglages') {

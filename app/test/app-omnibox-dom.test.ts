@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * app-omnibox-dom.test.ts — tests d'interaction DOM (@testing-library/react + jsdom)
- * pour la coquille complète `<App />` : authentification, navigation à 3 onglets + engrenage
+ * pour la coquille complète `<App />` : authentification, navigation à 4 onglets + engrenage
  * `Réglages` (`P0-2`), barre de recherche globale `Omnibox` (`Ctrl+K`/`⌘K`, `P0-1`), saut vers
  * `Explorateur` avec fil d'Ariane exact (`P1-2`), bandeau d'erreur global et persistance du
  * thème clair/sombre (`P2-1`).
@@ -205,7 +205,7 @@ async function monterAppConnectee() {
   return rendu;
 }
 
-describe('App.tsx — coquille, Omnibox (P0-1), navigation 3 onglets (P0-2) et thème (P2-1)', () => {
+describe('App.tsx — coquille, Omnibox (P0-1), navigation 4 onglets (P0-2 / Lot 1B) et thème (P2-1)', () => {
   beforeAll(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   });
@@ -274,8 +274,8 @@ describe('App.tsx — coquille, Omnibox (P0-1), navigation 3 onglets (P0-2) et t
     });
   });
 
-  describe('P0-2 — Navigation à 3 onglets, engrenage Réglages et PastilleMoteur', () => {
-    it('affiche exactement 3 onglets principaux dans le rail et la barre basse, Réglages séparé via engrenage', async () => {
+  describe('P0-2 — Navigation à 4 onglets, engrenage Réglages et PastilleMoteur', () => {
+    it('affiche exactement 4 onglets principaux dans le rail et la barre basse, Réglages séparé via engrenage', async () => {
       const { container } = await monterAppConnectee();
 
       const rail = container.querySelector('nav.rail') as HTMLElement;
@@ -285,10 +285,19 @@ describe('App.tsx — coquille, Omnibox (P0-1), navigation 3 onglets (P0-2) et t
       const ongletsBasse = Array.from(barreBasse.querySelectorAll('button'));
       expect(ongletsBasse.map((b) => b.textContent?.trim())).toEqual([
         'Aujourd’hui',
+        'Copilote',
         'Documents',
         'État',
       ]);
       expect(within(barreBasse).queryByText('Réglages')).toBeNull();
+
+      // Bascule vers Copilote via la barre basse
+      fireEvent.click(within(barreBasse).getByRole('button', { name: 'Copilote' }));
+      await waitFor(() => {
+        expect(container.querySelector('.copilote-vue')).not.toBeNull();
+      });
+      expect(screen.getByRole('heading', { level: 1, name: 'Copilote' })).toBeDefined();
+      expect(within(barreBasse).getByRole('button', { name: 'Copilote' }).className).toContain('actif');
 
       // Bascule vers Documents via la barre basse
       fireEvent.click(within(barreBasse).getByRole('button', { name: 'Documents' }));
@@ -305,7 +314,7 @@ describe('App.tsx — coquille, Omnibox (P0-1), navigation 3 onglets (P0-2) et t
       expect(screen.getByRole('heading', { level: 1, name: 'État' })).toBeDefined();
       expect(within(rail).getByRole('button', { name: 'État' }).className).toContain('actif');
 
-      // Ouverture de Réglages via l’engrenage de la barre haute mobile : .actif quitte les 3 onglets principaux
+      // Ouverture de Réglages via l’engrenage de la barre haute mobile : .actif quitte les 4 onglets principaux
       const btnEngrenageMobile = within(barreHaute).getByRole('button', { name: 'Réglages' });
       fireEvent.click(btnEngrenageMobile);
       expect(screen.getByRole('heading', { level: 1, name: 'Réglages' })).toBeDefined();
@@ -431,6 +440,14 @@ describe('App.tsx — coquille, Omnibox (P0-1), navigation 3 onglets (P0-2) et t
       fireEvent.click(within(dialogue).getByRole('button', { name: 'État' }));
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(screen.getByRole('heading', { level: 1, name: 'État' })).toBeDefined();
+
+      // Saut vers l'écran Copilote depuis l'Omnibox
+      fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+      const diagCopilote = screen.getByRole('dialog');
+      fireEvent.change(within(diagCopilote).getByRole('searchbox'), { target: { value: 'copi' } });
+      fireEvent.click(within(diagCopilote).getByRole('button', { name: 'Copilote' }));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByRole('heading', { level: 1, name: 'Copilote' })).toBeDefined();
 
       // Saut vers le dossier "Relevés" dans Explorateur depuis l'Omnibox
       fireEvent.keyDown(window, { key: 'k', ctrlKey: true });

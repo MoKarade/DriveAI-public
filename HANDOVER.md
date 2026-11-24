@@ -6,6 +6,7 @@
 
 ## 19/11/2026 : synchro fiable, lancement de passage immédiat et refonte Réglages + État (`#949`, `#952`)
 
+- **Onglet « Copilote » & fil « Ce qui a bougé dans ton Drive » (Lot 1B, `#50`)** : passage de l'application à 4 onglets principaux (`Aujourd’hui · Copilote · Documents · État` + `Réglages` séparé), logique pure `app/src/copilote.ts` (`extraireMouvementsDrive`, `filtrerMouvementsDrive`, `syntheseSemaineCopilote` sur 7 jours glissants), vue `app/src/vues/Copilote.tsx` (socle « Actions utiles de la semaine » + fil Drive filtrable, bilingue FR/EN, thèmes sombre/clair).
 - **Apprentissage temps réel sur déplacement manuel & adoption des dossiers (Lot 1A, `#48`)** : `VeilleDrive.gs` apprend dans `Corrections` lors d'un déplacement manuel d'un doc `classé` (hors `epingle|` et zones protégées/système), adopte immédiatement les nouveaux dossiers (même vides) via `DossiersVie.gs` (`enregistrerDossierVieDirect_`, `DriveAI_DOSSIERS_VIE_DIRECTS` borné à 80 LRU, `construireDossiersVie_` sur `classé`/`déplacé`/`manuel`) et propage le renommage de dossier vers `Entités` (`renommerEntiteDepuisDossier_` avec variante anti-doublon).
 
 - **Bouton `Synchro` & passage immédiat (`#949`, PR `#950` fusionnée `df2f92a`)** : `etatGlobal.tsx` attend désormais la lecture réelle lors des rafraîchissements concurrents et réveille `useProgressionLive()` ; `ActionsMoteur.tsx` + `demanderPassageMoteur` (`action=tick`) ajoutent un retour horodaté à la seconde (`Actualisé à HH:MM:SS`) et le déclenchement immédiat d'un passage moteur ; `Reglages.tsx` est restructuré en 3 cartes (`Moteur et synchronisation`, `Apparence et langue`, `Compte et session`).
@@ -67,16 +68,6 @@ dit ce que DriveAI fait, où en est chaque étape de l'ADR-0074 §6, ce qui rest
 `.agents/rules/driveai.md` (règles toujours actives, format Antigravity) et `.agents/workflows/gate.md`,
 `livrer-une-tache.md` (slash-commandes) rendent le dépôt reprenable sans fil Claude ; `AGENTS.md` (Jules) reste. Non
 vérifié : la détection de `.agents/` par la version d'Antigravity de Marc (repli : copier la règle dans `GEMINI.md`).
-
-## 06/11/2026 : relance sur une base épurée, suite de l'étape 8 — fileId sur les descripteurs de Migration, Reset et RetourOrphelins (#898)
-
-Les quatre descripteurs sous `ignorerDoublon` (`src/Migration.gs` ×2, `src/Reset.gs` reliquat, `src/RetourOrphelins.gs`) portent
-`fileId` : `metaDoublon_` lit taille et empreinte par `files.get` (ADR-0077), le blob n'est matérialisé que pour l'OCR, à toute
-taille ; les orphelins transmettent en plus le md5 déjà lu (`metaRest`), donc aucun second appel. Pas de drapeau `natif` : la
-migration exclut les natifs en amont, et pour un natif du reliquat de reset le md5 REST est vide, donc repli sur l'export
-haché comme avant (comportement inchangé) ; un orphelin sans md5 est refusé avant le pipeline (`decisionRetourOrphelin_`). Aucun commentaire de `Reset.gs` ni `Consolidation.gs` ne décrivait le
-hachage local de ces chemins : rien à mettre au présent. Verrous : `test/migration.test.js`, `test/reset-llm.test.js`,
-`test/retour-orphelins.test.js` (« empreinte lue par REST, blob jamais téléchargé pour un gros fichier »).
 
 ## 06/11/2026 : relance sur une base épurée, suite de l'étape 8 — preuve de vie et empreinte en UN `files.get`, 403 de quota rejoués (#897)
 

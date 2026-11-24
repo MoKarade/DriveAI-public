@@ -14,9 +14,10 @@ import { BanniereErreur, IndicateurChargement } from './UI';
 
 const DELAI_DEBOUNCE_MS = 220;
 const LONGUEUR_MIN_RECHERCHE = 2;
-const ECRANS_DISPONIBLES: readonly Section[] = ['aujourdhui', 'documents', 'etat', 'reglages'];
+const ECRANS_DISPONIBLES: readonly Section[] = ['aujourdhui', 'copilote', 'documents', 'etat', 'reglages'];
 const ICONES_ECRANS: Record<Section, NomIcone> = {
   aujourdhui: 'aujourdhui',
+  copilote: 'copilote',
   documents: 'documents',
   etat: 'horloge',
   reglages: 'reglages',

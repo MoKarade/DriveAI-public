@@ -6,7 +6,7 @@
  * Couverture systématique en 4 niveaux (Tiers 1–4) sur `F-E2E-1..F-E2E-4` et `P0-1..P2-3` :
  *  - `@baseline` : invariants du socle (navigation, Ariane, zéro débordement, zéro appel Google/API, i18n).
  *  - `@contrat-r1` : recherche globale multi-dossiers & recherche récursive scopée, bascule de portée.
- *  - `@contrat-r2` : barre-basse 3 colonnes (`P0-2`), cibles tactiles >= 44×44 px, esthétique et 0 erreur stricte.
+ *  - `@contrat-r2` : barre-basse 4 colonnes (`P0-2` / Lot 1B), cibles tactiles >= 44×44 px, esthétique et 0 erreur stricte.
  *  - `@contrat-r3` : vue `État` lisible hors `<details class="avance">`, coûts sans `TOTAL LLM`, cohérence `Aujourd’hui ↔ État`.
  *  - `@lot-r4` : couverture Tiers 1–4 de `P0-1`..`P2-3` (Omnibox, `État`/`Réglages`, `Réorg` sur accueil,
  *    télémétrie `P0-4`, puces `.gf-chip`, Ariane `P1-2`, pastilles `Index`/copie lien/création dossier `P1-3`,
@@ -437,7 +437,7 @@ test.describe('F-E2E-2 — Contrats recherche dans chaque dossier (@contrat-r1)'
  * ============================================================================ */
 
 test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', () => {
-  test('F-E2E-3 @baseline — navigation 4 vues, coquille adaptative et zéro fuite réseau Google/API', async ({ page }, testInfo) => {
+  test('F-E2E-3 @baseline — navigation 5 vues, coquille adaptative et zéro fuite réseau Google/API', async ({ page }, testInfo) => {
     const journal = await preparerApp(page, testInfo);
     const tel = testInfo.project.name === 'tel';
 
@@ -464,7 +464,10 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
       }
     });
 
-    await test.step('[F-E2E-3][T1.1] Navigation complète entre Aujourd’hui, Documents, État et Réglages', async () => {
+    await test.step('[F-E2E-3][T1.1] Navigation complète entre Aujourd’hui, Copilote, Documents, État et Réglages', async () => {
+      await allerSection(page, testInfo, 'Copilote');
+      await expect(page.getByRole('heading', { level: 1, name: 'Copilote' })).toBeVisible();
+
       await allerSection(page, testInfo, 'Documents');
       await expect(page.getByRole('heading', { name: 'Documents' })).toBeVisible();
 
@@ -487,13 +490,13 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
     const journal = await preparerApp(page, testInfo);
     const tel = testInfo.project.name === 'tel';
 
-    await test.step('[F-E2E-3][T2.1] Zéro débordement horizontal sur les 4 vues (1440×900 PC / 390×844, 320×568 & 320×844 Mobile)', async () => {
+    await test.step('[F-E2E-3][T2.1] Zéro débordement horizontal sur les 5 vues (1440×900 PC / 390×844, 320×568 & 320×844 Mobile)', async () => {
       const fenetres = tel
         ? [{ w: 390, h: 844 }, { w: 320, h: 568 }, { w: 320, h: 844 }]
         : [{ w: 1440, h: 900 }];
       for (const { w, h } of fenetres) {
         await page.setViewportSize({ width: w, height: h });
-        for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+        for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
           await allerSection(page, testInfo, section);
           const m = await mesurerDebordement(page);
           expect(m.page, `${section} (${w}×${h}) déborde horizontalement de ${m.page}px`).toBeLessThanOrEqual(0);
@@ -504,7 +507,7 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
     await test.step('[F-E2E-3][T2.2] Police agrandie 24 px : zéro débordement page ni texte hors .carte', async () => {
       await page.setViewportSize({ width: tel ? 320 : 1440, height: tel ? 844 : 900 });
       await page.evaluate(() => { document.documentElement.style.fontSize = '24px'; });
-      for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+      for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
         await allerSection(page, testInfo, section);
         const m = await mesurerDebordement(page);
         expect(m.page, `${section} (police 24px) déborde de ${m.page}px`).toBeLessThanOrEqual(0);
@@ -531,11 +534,11 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
     verifierAucuneErreur(journal);
   });
 
-  test('F-E2E-3 @contrat-r2 — barre-basse 3 colonnes (P0-2), cibles tactiles >= 44×44 px et esthétique (2 thèmes)', async ({ page }, testInfo) => {
+  test('F-E2E-3 @contrat-r2 — barre-basse 4 colonnes (P0-2 / Lot 1B), cibles tactiles >= 44×44 px et esthétique (2 thèmes)', async ({ page }, testInfo) => {
     const journal = await preparerApp(page, testInfo);
     const tel = testInfo.project.name === 'tel';
 
-    await test.step('[F-E2E-3][T1.3] nav.barre-basse possède exactement 3 boutons et 3 colonnes (repeat(3, minmax(0, 1fr))) en mobile', async () => {
+    await test.step('[F-E2E-3][T1.3] nav.barre-basse possède exactement 4 boutons et 4 colonnes (repeat(4, minmax(0, 1fr))) en mobile', async () => {
       if (!tel) {
         await page.setViewportSize({ width: 390, height: 844 });
       }
@@ -546,18 +549,18 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
         const libelles = Array.from(el.querySelectorAll('button')).map((b) => (b.textContent ?? '').trim());
         return { nbPistes: cols.length, pistes: cols, nbBoutons: libelles.length, libelles };
       });
-      expect(infosGrille.nbBoutons).toBe(3);
-      expect(infosGrille.libelles).toEqual(['Aujourd’hui', 'Documents', 'État']);
-      expect(infosGrille.nbPistes, `Grille attendue à 3 colonnes, observé : ${infosGrille.pistes.join(' ')}`).toBe(3);
+      expect(infosGrille.nbBoutons).toBe(4);
+      expect(infosGrille.libelles).toEqual(['Aujourd’hui', 'Copilote', 'Documents', 'État']);
+      expect(infosGrille.nbPistes, `Grille attendue à 4 colonnes, observé : ${infosGrille.pistes.join(' ')}`).toBe(4);
       if (!tel) {
         await page.setViewportSize({ width: 1440, height: 900 });
       }
     });
 
-    await test.step('[F-E2E-3][T1.4] Toutes les cibles interactives visibles respectent >= 44×44 px sur les 4 vues dans les 2 thèmes', async () => {
+    await test.step('[F-E2E-3][T1.4] Toutes les cibles interactives visibles respectent >= 44×44 px sur les 5 vues dans les 2 thèmes', async () => {
       for (const theme of ['sombre', 'clair'] as ThemeE2E[]) {
         await choisirTheme(page, testInfo, theme);
-        for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+        for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
           await allerSection(page, testInfo, section);
           await auditerCiblesTactiles(page, `${testInfo.project.name}/${theme}/${section}`);
           if (section === 'Documents') {
@@ -583,7 +586,8 @@ test.describe('F-E2E-3 — Coquille, Viewports, Cibles >= 44 px & Esthétique', 
   test('F-E2E-3 @contrat-r2 — zéro erreur console et réseau strict (aucune exception analytics dev)', async ({ page }, testInfo) => {
     const journal = await preparerApp(page, testInfo, { autoriserAnalyticsDev: false });
 
-    await test.step('[F-E2E-3][T2.4] Parcours des 4 vues avec 0 console.error, 0 pageerror, 0 requestfailed et 0 HTTP >= 400', async () => {
+    await test.step('[F-E2E-3][T2.4] Parcours des 5 vues avec 0 console.error, 0 pageerror, 0 requestfailed et 0 HTTP >= 400', async () => {
+      await allerSection(page, testInfo, 'Copilote');
       await allerSection(page, testInfo, 'Documents');
       await allerSection(page, testInfo, 'État');
       await allerSection(page, testInfo, 'Réglages');
@@ -729,7 +733,7 @@ test.describe('P0-1 — Recherche globale rapide Omnibox (Ctrl+K) (@lot-r4)', ()
     const tel = testInfo.project.name === 'tel';
 
     await test.step('[P0-1][T1.1] Bouton recherche rapide visible sur toutes les vues et >= 44×44 px', async () => {
-      for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+      for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
         await allerSection(page, testInfo, section);
         const declencheur = tel
           ? page.locator('.barre-haute').getByRole('button', { name: 'Recherche rapide (Ctrl+K)', exact: true })
@@ -743,7 +747,7 @@ test.describe('P0-1 — Recherche globale rapide Omnibox (Ctrl+K) (@lot-r4)', ()
     });
 
     await test.step('[P0-1][T1.2] Ctrl+K ouvre la fenêtre avec pilule .gf-omnibox-pill focalisée depuis chaque écran', async () => {
-      for (const section of ['Aujourd’hui', 'État', 'Réglages', 'Documents'] as SectionFr[]) {
+      for (const section of ['Aujourd’hui', 'Copilote', 'État', 'Réglages', 'Documents'] as SectionFr[]) {
         await allerSection(page, testInfo, section);
         const { dialog } = await ouvrirOmniboxClavier(page);
         await expect(dialog.locator('form.gf-omnibox-pill')).toBeVisible();
@@ -869,9 +873,10 @@ test.describe('P0-2 — Onglet État séparé & Réglages recentré (@lot-r4)', 
     const journal = await preparerApp(page, testInfo);
     const tel = testInfo.project.name === 'tel';
 
-    await test.step('[P0-2][T1.1][T1.2][T1.3] 3 onglets principaux, contenu État complet et Réglages épuré', async () => {
+    await test.step('[P0-2][T1.1][T1.2][T1.3] 4 onglets principaux, contenu État complet et Réglages épuré', async () => {
       const nav = page.getByRole('navigation', { name: tel ? 'Sections (mobile)' : 'Sections', exact: true });
       await expect(nav.getByRole('button', { name: 'Aujourd’hui', exact: true })).toBeVisible();
+      await expect(nav.getByRole('button', { name: 'Copilote', exact: true })).toBeVisible();
       await expect(nav.getByRole('button', { name: 'Documents', exact: true })).toBeVisible();
       await expect(nav.getByRole('button', { name: 'État', exact: true })).toBeVisible();
 
@@ -962,8 +967,8 @@ test.describe('P0-2 — Onglet État séparé & Réglages recentré (@lot-r4)', 
             railAffiche: rail ? getComputedStyle(rail).display !== 'none' : false,
           };
         });
-        expect(coquillePaysage.nbBoutons).toBe(3);
-        expect(coquillePaysage.nbPistes).toBe(3);
+        expect(coquillePaysage.nbBoutons).toBe(4);
+        expect(coquillePaysage.nbPistes).toBe(4);
         expect(coquillePaysage.railAffiche).toBe(false);
         expect((await mesurerDebordement(page)).page).toBeLessThanOrEqual(0);
       } finally {
@@ -973,7 +978,7 @@ test.describe('P0-2 — Onglet État séparé & Réglages recentré (@lot-r4)', 
     });
 
     await test.step('[P0-2][T2.3] [P0-2][T2.4] [P0-2][T2.5] Aller-retour rapide, contraste 2 thèmes et cohérence Aujourd’hui ↔ État', async () => {
-      const sequence: SectionFr[] = ['Aujourd’hui', 'Documents', 'État', 'Réglages', 'État', 'Aujourd’hui'];
+      const sequence: SectionFr[] = ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages', 'État', 'Aujourd’hui'];
       for (const s of sequence) {
         await allerSection(page, testInfo, s);
       }
@@ -1445,7 +1450,7 @@ test.describe('P2-1 & P2-2 & P1-4 — Thème clair, persistance, robustesse & na
 
     await test.step('[P2-1][T2.2] [P2-1][T2.3] [P2-1][T2.4] Thème clair : cibles >= 44 px, contraste surfaces et 0 débordement multi-viewports + Omnibox', async () => {
       await choisirTheme(page, testInfo, 'clair');
-      for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+      for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
         await allerSection(page, testInfo, section);
         await auditerSurfacesEtIcones(page, `${testInfo.project.name}/P2-1-clair/${section}`);
         await auditerCiblesTactiles(page, `${testInfo.project.name}/P2-1-clair/${section}`);
@@ -1678,8 +1683,8 @@ test.describe('P2-1 & P2-2 & P1-4 — Thème clair, persistance, robustesse & na
       await expect(page.getByRole('heading', { name: /À faire/i })).toBeVisible();
     });
 
-    await test.step('[P1-4][T2.1] [P1-4][T2.2] Navigation rapide sur les 4 vues et préservation de l’état actif (.actif)', async () => {
-      const parcours: SectionFr[] = ['Documents', 'État', 'Réglages', 'Aujourd’hui', 'État', 'Documents', 'Aujourd’hui'];
+    await test.step('[P1-4][T2.1] [P1-4][T2.2] Navigation rapide sur les 5 vues et préservation de l’état actif (.actif)', async () => {
+      const parcours: SectionFr[] = ['Copilote', 'Documents', 'État', 'Réglages', 'Aujourd’hui', 'Copilote', 'État', 'Documents', 'Aujourd’hui'];
       for (const s of parcours) {
         await allerSection(page, testInfo, s);
         if (tel && s === 'Réglages') {
@@ -1691,7 +1696,7 @@ test.describe('P2-1 & P2-2 & P1-4 — Thème clair, persistance, robustesse & na
     });
 
     await test.step('[P1-4][T2.3] Sauts d’écran découplés depuis l’Omnibox Ctrl+K', async () => {
-      for (const cible of ['Documents', 'État', 'Réglages', 'Aujourd’hui'] as SectionFr[]) {
+      for (const cible of ['Copilote', 'Documents', 'État', 'Réglages', 'Aujourd’hui'] as SectionFr[]) {
         const { dialog } = await ouvrirOmniboxClavier(page);
         await dialog.getByRole('button', { name: cible, exact: true }).click();
         await expect(dialog).toHaveCount(0);
@@ -1892,8 +1897,8 @@ test.describe('Tier 3 — Interactions combinatoires par paires', () => {
     const journal = await preparerApp(page, testInfo, { theme: 'clair' });
     const tel = testInfo.project.name === 'tel';
 
-    await test.step('[Tier3][P7] Thème clair × 4 vues : surfaces distinctes, cibles >= 44 px et 0 débordement', async () => {
-      for (const section of ['Aujourd’hui', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
+    await test.step('[Tier3][P7] Thème clair × 5 vues : surfaces distinctes, cibles >= 44 px et 0 débordement', async () => {
+      for (const section of ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'] as SectionFr[]) {
         await allerSection(page, testInfo, section);
         await auditerSurfacesEtIcones(page, `${testInfo.project.name}/Tier3-P7/${section}`);
         await auditerCiblesTactiles(page, `${testInfo.project.name}/Tier3-P7/${section}`);
@@ -2171,7 +2176,7 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
     expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe('clair');
 
     const nav = page.getByRole('navigation', { name: tel ? 'Sections (mobile)' : 'Sections', exact: true });
-    for (const labelEn of ['Today', 'Documents', 'Status']) {
+    for (const labelEn of ['Today', 'Copilot', 'Documents', 'Status']) {
       const btn = nav.getByRole('button', { name: labelEn, exact: true });
       await btn.click();
       expect((await mesurerDebordement(page)).page).toBeLessThanOrEqual(0);
@@ -2234,6 +2239,14 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
           await page.keyboard.press('Escape');
           await expect(dialog).toHaveCount(0);
 
+          // 1b. Copilote (Lot 1B)
+          await allerSection(page, testInfo, 'Copilote');
+          await stabiliserRendu(page);
+          const mCopilote = await mesurerDebordement(page);
+          expect(mCopilote.page, `[S6][${theme}][${cfg.libelle}] Copilote déborde`).toBeLessThanOrEqual(0);
+          expect(mCopilote.horsCarte).toBeLessThanOrEqual(1);
+          await auditerCiblesTactiles(page, `S6/${theme}/${cfg.libelle}/Copilote`);
+
           // 2. Documents + filtrage .gf-chip
           await allerSection(page, testInfo, 'Documents');
           const barre = page.locator('.documents .filtres-rapides.gf-chips');
@@ -2271,6 +2284,37 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
       await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
       await page.setViewportSize(tel ? { width: 390, height: 844 } : { width: 1440, height: 900 });
     }
+
+    verifierAucuneErreur(journal);
+  });
+
+  test('Lot 1B @lot-1b — onglet Copilote, synthèse semaine, fil « Ce qui a bougé dans ton Drive » et filtres', async ({ page }, testInfo) => {
+    const journal = await preparerApp(page, testInfo);
+    await allerSection(page, testInfo, 'Copilote');
+
+    await expect(page.getByRole('heading', { level: 1, name: 'Copilote', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Actions utiles de la semaine' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Ce qui a bougé dans ton Drive/ })).toBeVisible();
+
+    const filtres = page.getByRole('group', { name: 'Filtrer les mouvements Drive' });
+    await expect(filtres.getByRole('button', { name: 'Tous', exact: true })).toHaveAttribute('aria-pressed', 'true');
+
+    await filtres.getByRole('button', { name: 'Dossiers', exact: true }).click();
+    await expect(page.locator('.copilote-vue .carte.lignes')).toContainText('02 · Finances/Bellerives/Relevés');
+
+    await filtres.getByRole('button', { name: 'Apprentissages', exact: true }).click();
+    await expect(page.locator('.copilote-vue .carte.lignes')).toContainText('Correction enregistrée');
+
+    await filtres.getByRole('button', { name: 'Fichiers', exact: true }).click();
+    await expect(page.locator('.copilote-vue .carte.lignes')).toContainText('2026-07-06_Devis_Garage Exemple.pdf');
+
+    await filtres.getByRole('button', { name: 'Tous', exact: true }).click();
+    await auditerCiblesTactiles(page, `${testInfo.project.name}/Lot1B/Copilote`);
+    expect((await mesurerDebordement(page)).page).toBeLessThanOrEqual(0);
+
+    await page.getByRole('button', { name: /Ouvrir Documents/ }).click();
+    await attendreListingPret(page);
+    await expect(page.getByRole('heading', { level: 1, name: 'Documents', exact: true })).toBeVisible();
 
     verifierAucuneErreur(journal);
   });

@@ -124,6 +124,27 @@ const CLES_REFONTE_REGLAGES_ETAT: CleTexte[] = [
   'ouvrirDocuments',
 ];
 
+const CLES_LOT_1B_COPILOTE: CleTexte[] = [
+  'copilote',
+  'sousTitreCopilote',
+  'copiloteSemaineTitre',
+  'copiloteSemaineNote',
+  'copiloteStatMouvements',
+  'copiloteStatDossiers',
+  'copiloteStatApprentissages',
+  'copiloteFilTitre',
+  'copiloteFiltresLabel',
+  'copiloteFiltreTous',
+  'copiloteFiltreDossiers',
+  'copiloteFiltreFichiers',
+  'copiloteFiltreApprentissages',
+  'copiloteBadgeDossier',
+  'copiloteBadgeFichier',
+  'copiloteBadgeApprentissage',
+  'copiloteAucunMouvement',
+  'copiloteAucunFiltre',
+];
+
 describe('i18n (FR / EN)', () => {
   it('chaque nouvelle clé F1/F2/R3 est renseignée et non vide en FR et EN', () => {
     for (const cle of NOUVELLES_CLES) {
@@ -204,6 +225,14 @@ describe('i18n (FR / EN)', () => {
       'logiqueGmailSecuriteTitre',
       'logiqueGmailSecuriteTexte',
     ] as const) {
+      expect(t(cle, 'fr').trim().length, `fr.${cle}`).toBeGreaterThan(0);
+      expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
+    }
+  });
+
+  it('les 18 clés Copilote Lot 1B sont non vides en FR et EN', () => {
+    expect(CLES_LOT_1B_COPILOTE).toHaveLength(18);
+    for (const cle of CLES_LOT_1B_COPILOTE) {
       expect(t(cle, 'fr').trim().length, `fr.${cle}`).toBeGreaterThan(0);
       expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
     }

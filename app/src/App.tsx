@@ -1,6 +1,6 @@
 /**
  * App.tsx — coquille v8 (P0-1, P0-2, P1-4, P2-1) : le téléphone d'abord.
- * TROIS sections dans la navigation principale (Aujourd’hui · Documents · État) ; Réglages est
+ * QUATRE sections dans la navigation principale (Aujourd’hui · Copilote · Documents · État) ; Réglages est
  * atteint par l'engrenage de la barre haute sur téléphone et par le bas du rail sur PC ;
  * recherche rapide globale (`Ctrl+K` / `⌘K`) accessible depuis le rail PC et la barre haute mobile.
  * Depuis C28-20 (ADR-0021) : pas d'écran de configuration — la config vient de /api/config
@@ -21,6 +21,7 @@ import { EtatMoteur, fraicheurMoteur, dernierPassageDepuisSante, interpreterSant
 import { type CibleNavigationExplorateur, type Section, SECTIONS_NAV } from './navigation';
 import { ThemeApp, appliquerThemeDom, enregistrerTheme, initialiserTheme } from './theme';
 import { AujourdHui } from './vues/AujourdHui';
+import { Copilote } from './vues/Copilote';
 import { Documents } from './vues/Documents';
 import type { NavigationExplorateurDemandee } from './vues/Explorateur';
 import { Etat } from './vues/Etat';
@@ -28,6 +29,7 @@ import { Reglages } from './vues/Reglages';
 
 const ICONES: Record<Section, NomIcone> = {
   aujourdhui: 'aujourdhui',
+  copilote: 'copilote',
   documents: 'documents',
   etat: 'horloge',
   reglages: 'reglages',
@@ -277,6 +279,7 @@ function Coquille({ langue, onLangue, onDeconnexion, theme, onTheme }: {
               </div>
             )}
             {section === 'aujourdhui' && <AujourdHui langue={langue} onAller={allerA} />}
+            {section === 'copilote' && <Copilote langue={langue} onAller={allerA} />}
             {section === 'documents' && (
               <Documents
                 langue={langue}
@@ -300,7 +303,7 @@ function Coquille({ langue, onLangue, onDeconnexion, theme, onTheme }: {
         </main>
       </div>
 
-      {/* Téléphone seulement : les trois sections principales, toujours au pouce. */}
+      {/* Téléphone seulement : les quatre sections principales, toujours au pouce. */}
       <nav className="barre-basse" aria-label="Sections (mobile)">
         {SECTIONS_NAV.map((s) => (
           <button key={s} className={section === s ? 'actif' : ''} onClick={() => allerA(s)}>
