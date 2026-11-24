@@ -230,6 +230,7 @@ const CONTRAT = [
   'deciderRoutageV2_', 'planRoutageV2_', 'nomsDansDossier_', 'budgetMsRun_',
   // fail-safe hybride ultra-strict (ADR-0016 — révision §2.1)
   'estClassificationVide_', 'estRenseigne_', 'routageAVerifier_', 'dossierAVerifier_',
+  'estNomTechniqueSansExtension_', 'estLibelleIllisible_', 'estResultatIllisible_', 'estExtensionDocumentaire_',
   // secret CI dédié des actions pousser-reset / assurer-trigger (WebApp.gs)
   'verifierSecretSync_',
   // entités auto-validées (#18)

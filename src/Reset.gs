@@ -580,7 +580,8 @@ function cheminImpotsReset_(seg) {
 function estExcluDuReset_(nom) {
   var propre = String(nom == null ? '' : nom).trim();
   return /^(DriveAI|Rapports agent|00 · Guide|00 · Raccourcis)/.test(propre) ||
-    /^(restic-pc|univers)$/.test(propre);
+    /^(restic-pc|univers)$/.test(propre) ||
+    /^(\.git|node_modules|__pycache__|\.venv|venv|Takeout|Sauvegardes|Colab Notebooks|Google AI Studio|_Archive)$/.test(propre);
 }
 
 /**
