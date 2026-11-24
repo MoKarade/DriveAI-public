@@ -6,10 +6,10 @@
  */
 
 /** Identifiant d'écran dans la coquille applicative. */
-export type Section = 'aujourdhui' | 'documents' | 'etat' | 'reglages';
+export type Section = 'aujourdhui' | 'copilote' | 'documents' | 'etat' | 'reglages';
 
-/** Trois onglets principaux de navigation (Aujourd’hui · Documents · État) ; Réglages reste à part. */
-export const SECTIONS_NAV: readonly Section[] = ['aujourdhui', 'documents', 'etat'] as const;
+/** Quatre onglets principaux de navigation (Aujourd’hui · Copilote · Documents · État) ; Réglages reste à part. */
+export const SECTIONS_NAV: readonly Section[] = ['aujourdhui', 'copilote', 'documents', 'etat'] as const;
 
 /** Cible d'ouverture directe d'un dossier dans Documents / Explorateur (ex. depuis la recherche globale). */
 export interface CibleNavigationExplorateur {

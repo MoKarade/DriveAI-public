@@ -52,6 +52,10 @@ const SANTE: string[][] = [
 
 const JOURNAL: string[][] = [
   // Horodatage | Niveau | Source | Message
+  ['2026-07-06T14:11:15', 'INFO', 'VeilleDrive', 'Changement direct détecté : 2026-07-06_Devis_Garage Exemple.pdf → 03 · Logement & véhicule/Véhicule/Voiture Exemple/Entretien & réparations'],
+  ['2026-07-06T14:09:30', 'INFO', 'VeilleDrive', 'Dossier modifié : 02 · Finances/Bellerives/Relevés (2 document(s) mis à jour dans le catalogue)'],
+  ['2026-07-06T14:08:50', 'INFO', 'Corrections', 'Correction enregistrée (émetteur « Bellerives »).'],
+  ['2026-07-06T14:06:10', 'INFO', 'Entités', 'Entité renommée depuis dossier : Auto Ancien → Voiture Exemple'],
   ['2026-07-06T14:02:11', 'INFO', 'Pipeline', 'classé : 2026-07-01_Facture_Hydro-Québec.pdf → 02 · Finances/2026'],
   ['2026-07-06T14:07:42', 'INFO', 'Pipeline', 'classé : 2026-06-28_Relevé_Bellerives.pdf → 02 · Finances/Bellerives/Relevés/2026'],
   ['2026-07-06T14:10:03', 'INFO', 'TriGmail', '3 fil(s) trié(s), 1 archivé(s)'],
@@ -126,6 +130,7 @@ const PROGRESSION: string[][] = [
 
 const ACTIONS: string[][] = [
   ['act-demo0001', '2026-07-06 14:05:00', 'drive-deplacer', 'f-100', '{"parentId":"dossier-a-trier","nom":"scan-sans-nom.pdf"}', '{"parentId":"dossier-finances","nom":"2026-07-06_Facture_Exemple.pdf"}', 'appliqué', 'Classement dépôt manuel'],
+  ['act-demo0003', '2026-07-06 14:04:00', 'drive-dossier', 'dossier-finances-2026', '', '{"nom":"2026","parentId":"dossier-finances"}', 'appliqué', 'Dossier créé (Réorg)'],
   ['act-demo0002', '2026-07-06 14:02:00', 'gmail-libelle', 'Voyages', '', 'Voyages', 'appliqué', 'Libellé Gmail créé automatiquement'],
 ];
 

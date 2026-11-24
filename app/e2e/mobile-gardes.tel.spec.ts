@@ -4,8 +4,8 @@
  *
  * Couvre :
  * - Absence de débordement horizontal et de texte hors `.carte` à 390×844, 320×568 et 320×844
- *   (polices 16px et 24px), sur les 4 vues + Omnibox ouverte, en thèmes sombre et clair.
- * - Téléphone couché 844×390 sur les 4 vues : barre basse 3 colonnes visible, rail masqué,
+ *   (polices 16px et 24px), sur les 5 vues + Omnibox ouverte, en thèmes sombre et clair.
+ * - Téléphone couché 844×390 sur les 5 vues : barre basse 4 colonnes visible, rail masqué,
  *   zéro débordement horizontal, en thèmes sombre et clair.
  */
 import { test, expect } from '@playwright/test';
@@ -21,7 +21,7 @@ import {
   type ThemeE2E,
 } from './outils';
 
-const SECTIONS: SectionFr[] = ['Aujourd’hui', 'Documents', 'État', 'Réglages'];
+const SECTIONS: SectionFr[] = ['Aujourd’hui', 'Copilote', 'Documents', 'État', 'Réglages'];
 const THEMES: ThemeE2E[] = ['sombre', 'clair'];
 
 test('téléphone : aucune section ni omnibox ne déborde en largeur (390×844, 320×568, 320×844, polices 16px/24px, sombre et clair)', async ({ page }, testInfo) => {
@@ -87,7 +87,7 @@ test('téléphone : aucune section ni omnibox ne déborde en largeur (390×844, 
   verifierAucuneErreur(journal);
 });
 
-test('téléphone couché 844×390 : barre d’onglets 3 colonnes visible, rail masqué, zéro débordement (sombre et clair)', async ({ page }, testInfo) => {
+test('téléphone couché 844×390 : barre d’onglets 4 colonnes visible, rail masqué, zéro débordement (sombre et clair)', async ({ page }, testInfo) => {
   const journal = await preparerApp(page, testInfo);
 
   for (const theme of THEMES) {
@@ -108,8 +108,8 @@ test('téléphone couché 844×390 : barre d’onglets 3 colonnes visible, rail 
       };
     });
 
-    expect(structureCoquille.nbBoutons, `[${theme}] 3 boutons attendus dans nav.barre-basse`).toBe(3);
-    expect(structureCoquille.nbPistes, `[${theme}] 3 colonnes CSS attendues dans nav.barre-basse`).toBe(3);
+    expect(structureCoquille.nbBoutons, `[${theme}] 4 boutons attendus dans nav.barre-basse`).toBe(4);
+    expect(structureCoquille.nbPistes, `[${theme}] 4 colonnes CSS attendues dans nav.barre-basse`).toBe(4);
     expect(structureCoquille.railAffiche, `[${theme}] le rail latéral PC est encore affiché en 844×390`).toBe(false);
 
     for (const section of SECTIONS) {

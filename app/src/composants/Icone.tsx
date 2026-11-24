@@ -6,7 +6,7 @@
  */
 
 export type NomIcone =
-  | 'aujourdhui' | 'documents' | 'reglages'
+  | 'aujourdhui' | 'copilote' | 'documents' | 'reglages'
   | 'plus' | 'chevron' | 'retour' | 'fermer' | 'menu' | 'rafraichir'
   | 'fichier' | 'dossier' | 'mail' | 'alerte' | 'externe' | 'horloge'
   | 'recherche' | 'deplacer' | 'cadenas' | 'coche' | 'corbeille' | 'bloque';
@@ -15,6 +15,7 @@ export type NomIcone =
 // courts (voir « menu », qui reçoit un trait plus épais pour former des points ronds).
 const TRACES: Record<NomIcone, string> = {
   aujourdhui: 'M7 3h10a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V7a4 4 0 0 1 4-4z M8 12l3 3 5-6',
+  copilote: 'M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z',
   documents: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   // Un livre ouvert : l'onglet dit où en est la LECTURE des papiers.
   reglages: 'M12 9a3 3 0 1 1 0 6a3 3 0 1 1 0-6 M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1',

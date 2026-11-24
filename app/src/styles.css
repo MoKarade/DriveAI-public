@@ -244,7 +244,7 @@ nav.barre-basse { display: none; }
   .barre-haute .pastille-moteur { padding: 0.3rem 0.45rem; font-size: 0.8rem; }
   .contenu { padding: 1rem 0.9rem calc(var(--barre-basse-h) + 1.7rem + env(safe-area-inset-bottom)); }
   nav.barre-basse {
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.25rem;
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.25rem;
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
     background: var(--fond-haut); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
     border-top: 1px solid var(--bord);
@@ -253,7 +253,7 @@ nav.barre-basse { display: none; }
   nav.barre-basse button {
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
     min-height: 44px; min-width: 44px;
-    border: none; background: none; border-radius: var(--r-m); padding: 0.25rem 0.5rem;
+    border: none; background: none; border-radius: var(--r-m); padding: 0.25rem 0.25rem;
     font-size: 0.72rem; font-weight: 700; letter-spacing: 0.01em; color: var(--texte-doux);
   }
   nav.barre-basse button span {
@@ -1007,3 +1007,11 @@ button.ligne.texte:not(:disabled):hover, .ligne button.t.texte:not(:disabled):ho
   text-transform: uppercase; letter-spacing: 0.08em; color: var(--texte-doux);
 }
 .omnibox-note { margin: 0.35rem 0.1rem 0; }
+
+/* ---------- Copilote (Lot 1B) ---------- */
+.copilote-vue .ligne { flex-wrap: wrap; gap: 0.45rem 0.7rem; }
+.copilote-vue .ligne .t { flex: 1 1 10rem; min-width: 0; }
+.copilote-pied { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.75rem; }
+.copilote-pied .explication { margin: 0; flex: 1 1 14rem; }
+.copilote-pied .bouton-ligne { white-space: normal; max-width: 100%; text-align: center; }
+.copilote-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-left: auto; }
