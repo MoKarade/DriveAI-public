@@ -126,6 +126,7 @@ const CONTRAT = [
   'compterStructureLibelles_', 'autoriserCreationLibelle_', 'obtenirOuCreerLibelleRemplacement_',
   'estLibelleSpecialTri_', 'validerPreuveRemplacement_', 'remplacerLibelle_',
   'planifierRemplacementLibelle_', 'traiterRemplacementLibelleEnCours_',
+  'reinitialiserAgendaRun_', 'extraireEcheanceAgenda_', 'construireTitreAgenda_', 'creerRappelEcheanceAgenda_',
   'reinitialiserDossiersVieCache_', 'dossiersVieCache_', 'chercherDossiersVie_',
   'formaterContexteDossiersVie_', 'enregistrerLienMailDrive_', 'placerAvecJournalAction_',
   'appliquerReorgInterne04Autonome_',

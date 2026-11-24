@@ -308,21 +308,25 @@ function promptTriFil_(libelles) {
     'partir sans lire), sers-t\'en d\'indice pour calibrer "aTraiter" sans contredire les règles ci-dessus.\n' +
     'Si "categorie"=null (aucun libellé existant ne convient), "suspect"=false et que ce mail relève d\'un ' +
     'thème récurrent absent de la liste, tu peux ajouter "nouveauLibelle": "<Principal/Sous ou nom 3-40 car.>" ' +
-    '(privilégie un sous-libellé sous un libellé principal existant) ; sinon omets-le.';
+    '(privilégie un sous-libellé sous un libellé principal existant) ; sinon omets-le.\n' +
+    'Si le mail indique une vraie échéance future exigeant un rappel (ex. paiement, rendez-vous, ' +
+    'renouvellement, date limite), tu peux ajouter "echeance": "AAAA-MM-JJ" ; sinon omets-le ou mets null.';
 }
 
 /**
  * PURE. Parse de l'analyse sujet + corps : la catégorie et le suspect comme `parserMiniCategorie_`,
  * plus `aTraiter` FERMÉ par défaut (seul un `true` JSON explicite l'ouvre — anti-bruit, décision Marc)
  * et `resume` court si `aTraiter` est vrai (fait dérivé, jamais de texte brut si faux).
- * Accepte un `nouveauLibelle` valide uniquement quand `categorie` vaut null et `suspect` est faux.
- * @return {{categorie:?string, suspect:boolean, aTraiter:boolean, resume:string, nouveauLibelle:(string|undefined)}}
+ * Accepte un `nouveauLibelle` valide uniquement quand `categorie` vaut null et `suspect` est faux,
+ * ainsi qu'une date `"echeance": "AAAA-MM-JJ"` optionnelle.
+ * @return {{categorie:?string, suspect:boolean, aTraiter:boolean, resume:string, nouveauLibelle:(string|undefined), echeance:(string|undefined)}}
  */
 function parserAnalyseFil_(texte, libellesValides) {
   var base = parserMiniCategorie_(texte, libellesValides);
   var aTraiter = false;
   var resume = '';
   var nouveauLibelle = '';
+  var echeance = '';
   if (texte) {
     var debut = texte.indexOf('{');
     var fin = texte.lastIndexOf('}');
@@ -338,11 +342,15 @@ function parserAnalyseFil_(texte, libellesValides) {
         if (base.categorie === null && !base.suspect && typeof obj.nouveauLibelle === 'string') {
           nouveauLibelle = validerNomNouveauLibelle_(obj.nouveauLibelle, libellesValides);
         }
-      } catch (e) { aTraiter = false; resume = ''; nouveauLibelle = ''; }
+        if (typeof obj.echeance === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(obj.echeance.trim())) {
+          echeance = obj.echeance.trim();
+        }
+      } catch (e) { aTraiter = false; resume = ''; nouveauLibelle = ''; echeance = ''; }
     }
   }
   var res = { categorie: base.categorie, suspect: base.suspect, aTraiter: aTraiter, resume: resume };
   if (nouveauLibelle) res.nouveauLibelle = nouveauLibelle;
+  if (echeance) res.echeance = echeance;
   return res;
 }
 
@@ -1837,6 +1845,17 @@ function trierFil_(fil, candidats, libelles, verifierBoite, horsBoite) {
             'Infolettre jamais lue — lien officiel repéré' + (lienDesabo.oneClick ? ' (1-clic RFC 8058)' : ''));
         }
       }
+    }
+    if (mc && mc.echeance && typeof creerRappelEcheanceAgenda_ === 'function') {
+      creerRappelEcheanceAgenda_(fil.getId(), mc, {
+        categorie: categorie,
+        zoneProtegee: zoneProtegee,
+        suspect: suspect,
+        promoDeterministe: promoDeterministe,
+        horsBoite: !!horsBoite,
+        freinBudget: freinBudget,
+        dateRef: new Date()
+      });
     }
     return decision.archiver && !horsBoite ? 'archive' : 'traite';
   } catch (e) {

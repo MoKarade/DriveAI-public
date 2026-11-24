@@ -46,6 +46,7 @@ const MODULES_MOTEUR = [
   'Partages.gs',
   'TriGmail.gs',
   'Libelles.gs',
+  'Agenda.gs',
   'Fiche.gs',
   'DossiersVie.gs',
   'Maintenance.gs',
