@@ -17,16 +17,16 @@
 | `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps) |
 | `Libelles.gs` | Bascule et remplacement avec preuves des libellés Gmail (sous 10 principaux / 50 max, ADR-0081) |
 | `Agenda.gs` | Rappels d'échéance automatiques dans Google Agenda (`CalendarApp`, idempotence `Index`, journal `Actions`, ADR-0081) |
-| `DossiersVie.gs` | Carte en mémoire des dossiers de vie existants et journalisation des liens mails ↔ Drive (`Liens`, ADR-0081) |
+| `DossiersVie.gs` | Carte des dossiers de vie existants (`Index` + cache direct `DriveAI_DOSSIERS_VIE_DIRECTS` borné à 80 LRU) et liens mails ↔ Drive (`Liens`, ADR-0081) |
 | `Intake.gs` | Source 2 : dépôt manuel `00 · À trier` (déplacement) |
-| `VeilleDrive.gs` | Veille automatique racine `Mon Drive`, suivi direct Changes API v3, propagation arborescence/catalogue (y compris `04` et `Anna` en lecture seule sur Drive) et nouveaux dépôts (hors dossiers système) |
+| `VeilleDrive.gs` | Veille automatique racine `Mon Drive`, suivi direct Changes API v3, apprentissage auto sur déplacement manuel, adoption/renommage dossiers et catalogue lecture seule (`04`, `Anna`) |
 | `Partages.gs` | Source 3 : fichiers partagés récents (copie, ADR-0005) |
 | `Migration.gs` | Campagne de re-classement de l'existant (#8, gatée par tag) |
 | `Ocr.gs` | Extraction de texte (conversion Drive + OCR, REST) |
 | `Llm.gs` | Classification V2 (2 passes Sonnet) et V1 (Haiku, escalade Sonnet bornée) + parsing strict |
 | `Gemini.gs` | Fournisseur Gemini (ADR-0073) : traduction Anthropic ↔ `generateContent` à la frontière réseau, clé `DriveAI_GEMINI_KEY`, sonde `sonderGemini` |
 | `Router.gs` | Décision de routage/nommage + dossiers spéciaux (`_Doublons`, `_Technique`, `_Médias`) |
-| `Entites.gs` | Référentiel d'entités (proposition filtrée, consolidation, validation, curation) |
+| `Entites.gs` | Référentiel d'entités (proposition filtrée, consolidation, validation, curation, propagation renommage dossier) |
 | `Corrections.gs` | Apprentissage few-shot depuis l'onglet `Corrections` (ADR-0003) |
 | `Formulaire.gs` | Formulaire Google de correction (find-or-create + lecture des réponses) |
 | `Journal.gs` | État Sheet : Index (idempotence), Journal borné, Santé, quarantaine, Télémétrie |

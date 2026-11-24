@@ -410,7 +410,7 @@ function chargerEntitesCache_() {
   // vide avant la lecture, un échec de la Sheet à mi-parcours laissait `_entitesCache` non-null mais
   // vide ou partiel : le reste du run croyait qu'une entité n'existait pas. Maintenant l'exception
   // sort et le cache reste `null` (« je ne sais pas ») : l'appelant suivant relit, ou échoue lui aussi.
-  var cache = { lignes: [], parCle: {} };
+  var cache = { lignes: [], parCle: {}, parCanonique: {} };
 
   var dern = f.getLastRow();
   if (dern < 2) { _entitesCache = cache; return; }
@@ -432,7 +432,10 @@ function chargerEntitesCache_() {
       vuNFois: Number(v[idx['Vu N fois']]) || 1          // #18 : signal de fréquence
     };
     cache.lignes.push(ligne);
-    cache.parCle[cleEntite_(ligne.domaine, ligne.entite)] = ligne;
+    var cleP = cleEntite_(ligne.domaine, ligne.entite), existP = cache.parCle[cleP];
+    if (!existP || !estValidee_(existP.statut) || estValidee_(ligne.statut)) cache.parCle[cleP] = ligne;
+    var cleCanP = cleCanoniqueEntite_(ligne.domaine, ligne.entite), existCanP = cleCanP ? cache.parCanonique[cleCanP] : null;
+    if (cleCanP && (!existCanP || (!estValidee_(existCanP.statut) && estValidee_(ligne.statut)))) cache.parCanonique[cleCanP] = ligne;
   }
   _entitesCache = cache;
 }
@@ -493,6 +496,12 @@ function construireEntitesValidees_() {
       // re-pointé par `repointerEntites_` lors d'une fusion : c'est LUI la vérité topologique.
       if (cle) validees[cle] = { nom: canoniserEntite_(l.entite), dossierId: l.dossierId || '' };
     }
+    cache.lignes.forEach(function (lv) {
+      var st = String(lv.statut || '');
+      if (st.indexOf('variante de :') !== 0) return;
+      var cleC = cleCanoniqueEntite_(lv.domaine, st.slice(13).trim()), cleV = cleCanoniqueEntite_(lv.domaine, lv.entite);
+      if (cleC && validees[cleC] && cleV && !validees[cleV]) validees[cleV] = { nom: validees[cleC].nom, dossierId: validees[cleC].dossierId };
+    });
   } catch (e) {
     journalErreur_('Entités', 'Référentiel illisible (aucun dossier d\'entité ce run — à plat) : ' + e);
     return { validees: validees, ok: false }; // PARTIEL, pas vide : ce qui a été lu reste utilisable
@@ -519,8 +528,16 @@ function resoudreEntite_(classif) {
   // Canonique null = générique ou le propriétaire lui-même : jamais une entité (doc au domaine).
   var nomCanonique = canoniserEntite_(classif.entite);
   if (!nomCanonique) return { etat: 'transverse' };
-  var ligne = entitesCache_().parCle[cleEntite_(classif.domaine, nomCanonique)];
+  var cache = entitesCache_(), cleCan = cleCanoniqueEntite_(classif.domaine, nomCanonique);
+  var ligneCan = cache.parCanonique && cleCan ? cache.parCanonique[cleCan] : null;
+  var ligne = cache.parCle[cleEntite_(classif.domaine, nomCanonique)] || cache.parCle[cleEntite_(classif.domaine, classif.entite)] || null;
+  if (ligneCan && (!ligne || (!estValidee_(ligne.statut) && estValidee_(ligneCan.statut)))) ligne = ligneCan;
   if (!ligne) return { etat: 'inconnue' };
+  if (String(ligne.statut || '').indexOf('variante de :') === 0) {
+    var cibleNom = String(ligne.statut).slice(13).trim(), cleCanCible = cleCanoniqueEntite_(classif.domaine, cibleNom);
+    var cibleLigne = cache.parCle[cleEntite_(classif.domaine, cibleNom)] || (cache.parCanonique && cleCanCible ? cache.parCanonique[cleCanCible] : null);
+    if (cibleLigne) ligne = cibleLigne;
+  }
   if (estValidee_(ligne.statut) && ligne.dossierId) {
     // On renvoie domaine/catégorie/entité DE LA LIGNE validée (source de vérité du
     // chemin), pas du classif du document (qui peut diverger d'un doc à l'autre).
@@ -530,6 +547,106 @@ function resoudreEntite_(classif) {
     };
   }
   return { etat: 'en_attente' };
+}
+
+function estZoneProtegeeEntites_(domaine) {
+  var d = normaliserCle_(domaine);
+  if (!d || d === 'anna' || d === '04 · immigration' || d.charAt(0) === '_' || /^00\s*·/.test(d)) return true;
+  var prot = typeof CONFIG !== 'undefined' && Array.isArray(CONFIG.DOMAINES_PROTEGES) ? CONFIG.DOMAINES_PROTEGES : [];
+  for (var i = 0; i < prot.length; i++) if (normaliserCle_(prot[i]) === d) return true;
+  return false;
+}
+
+function entiteValideeParDossierId_(dossierId) {
+  var id = String(dossierId || '').trim();
+  if (!id) return null;
+  if (_entitesCache === null && typeof feuille_ === 'function') {
+    var fTest = feuille_('Entités');
+    if (!fTest || typeof fTest.getLastColumn !== 'function') return null;
+    var nbCol = fTest.getLastColumn(), hdrs = nbCol >= 1 && fTest.getLastRow() >= 1 ? fTest.getRange(1, 1, 1, nbCol).getValues()[0] : [];
+    if (hdrs[0] && hdrs.indexOf('Entité') === -1) return null;
+  }
+  var lignes = entitesCache_().lignes;
+  for (var i = 0; i < lignes.length; i++) {
+    if (String(lignes[i].dossierId || '').trim() === id && estValidee_(lignes[i].statut) && !estZoneProtegeeEntites_(lignes[i].domaine)) return lignes[i];
+  }
+  return null;
+}
+
+/** Ajoute un ancien nom dédupliqué dans la colonne « Variante possible ? ». PURE. */
+function ajouterVarianteAntiDoublon_(existante, ancienNom) {
+  var propre = String(ancienNom == null ? '' : ancienNom).trim(), base = String(existante == null ? '' : existante).trim();
+  if (!propre) return base;
+  if (!base) return 'alias : ' + propre;
+  if (base.indexOf('alias :') === 0) {
+    var items = base.slice(7).split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    if (items.some(function (x) { return normaliserCle_(x) === normaliserCle_(propre); })) return base;
+    return 'alias : ' + items.concat([propre]).join(', ');
+  }
+  return normaliserCle_(base).indexOf(normaliserCle_(propre)) !== -1 ? base : base + ' | alias : ' + propre;
+}
+
+/** Propage le renommage d'un dossier d'entité validée vers `Entités` + garde anti-doublon. */
+function renommerEntiteDepuisDossier_(ancienNom, nouveauNom, domaine) {
+  var anc = String(ancienNom == null ? '' : ancienNom).trim(), nouv = String(nouveauNom == null ? '' : nouveauNom).trim(), dom = String(domaine == null ? '' : domaine).trim();
+  if (!anc || !nouv || !dom || anc === nouv || estZoneProtegeeEntites_(dom)) return false;
+  if (nouv.charAt(0) === '_' || /^00\s*·/.test(normaliserCle_(nouv)) || estEntiteGenerique_(nouv)) return false;
+
+  var cache = entitesCache_(), domNorm = normaliserCle_(dom), cleCA = cleCanoniqueEntite_(dom, anc), ligne = cache.parCle[cleEntite_(dom, anc)];
+  if (!ligne || !estValidee_(ligne.statut)) {
+    ligne = cache.lignes.filter(function (l) {
+      return normaliserCle_(l.domaine) === domNorm && estValidee_(l.statut) && (normaliserCle_(l.entite) === normaliserCle_(anc) || (cleCA && cleCanoniqueEntite_(dom, l.entite) === cleCA));
+    })[0] || null;
+  }
+  if (!ligne || !estValidee_(ligne.statut) || estZoneProtegeeEntites_(ligne.domaine)) return false;
+
+  var cleN = cleEntite_(ligne.domaine, nouv), cleCN = cleCanoniqueEntite_(ligne.domaine, nouv);
+  if (cache.lignes.some(function (a) {
+    return a !== ligne && normaliserCle_(a.domaine) === normaliserCle_(ligne.domaine) && estValidee_(a.statut) &&
+      (cleEntite_(a.domaine, a.entite) === cleN || (cleCN && cleCanoniqueEntite_(a.domaine, a.entite) === cleCN));
+  })) { journalInfo_('Entités', 'Renommage ignoré (collision avec entité validée) : ' + nouv); return false; }
+
+  var f = feuille_('Entités'), idx = colonnesEntites_(), ancienReel = String(ligne.entite).trim();
+  var memeCle = normaliserCle_(ancienReel) === normaliserCle_(nouv);
+  var nouvVar = memeCle ? (ligne.variante || '') : ajouterVarianteAntiDoublon_(ligne.variante, ancienReel);
+  f.getRange(ligne.ligneSheet, idx['Entité'] + 1).setValue(nouv);
+  if (nouvVar !== (ligne.variante || '')) f.getRange(ligne.ligneSheet, idx['Variante possible ?'] + 1).setValue(nouvVar);
+  var cleCanAnc = cleCanoniqueEntite_(ligne.domaine, ancienReel);
+  ligne.entite = nouv; ligne.variante = nouvVar; cache.parCle[cleN] = ligne;
+  if (cache.parCanonique) {
+    if (cleCanAnc && cleCanAnc !== cleCN && cache.parCanonique[cleCanAnc] === ligne) delete cache.parCanonique[cleCanAnc];
+    if (cleCN) cache.parCanonique[cleCN] = ligne;
+  }
+
+  if (!memeCle) {
+    var cleAnc = cleEntite_(ligne.domaine, ancienReel), existAnc = null;
+    for (var v = 0; v < cache.lignes.length; v++) {
+      var lv = cache.lignes[v];
+      if (lv === ligne || normaliserCle_(lv.domaine) !== normaliserCle_(ligne.domaine)) continue;
+      var cleLv = cleEntite_(lv.domaine, lv.entite), stLv = String(lv.statut || '');
+      if (cleLv === cleN && (stLv === 'en_attente' || stLv === 'en attente' || stLv.indexOf('variante de :') === 0)) {
+        f.getRange(lv.ligneSheet, idx['Statut'] + 1).setValue('refusée (remplacée par renommage)'); lv.statut = 'refusee (remplacee par renommage)';
+      } else if (cleLv === cleAnc) existAnc = lv;
+      else if (stLv === 'variante de : ' + normaliserCle_(ancienReel)) {
+        f.getRange(lv.ligneSheet, idx['Statut'] + 1).setValue('variante de : ' + nouv); lv.statut = 'variante de : ' + normaliserCle_(nouv);
+      }
+    }
+    if (existAnc) {
+      f.getRange(existAnc.ligneSheet, idx['Statut'] + 1).setValue('variante de : ' + nouv);
+      existAnc.statut = 'variante de : ' + normaliserCle_(nouv); cache.parCle[cleAnc] = existAnc;
+    } else {
+      var row = []; row[idx['Entité']] = ancienReel; row[idx['Domaine']] = ligne.domaine; row[idx['Catégorie']] = ligne.categorie || '';
+      row[idx['Type']] = ligne.type || ''; row[idx['Statut']] = 'variante de : ' + nouv; row[idx['Dossier ID']] = '';
+      row[idx['Ajoutée le']] = new Date(); row[idx['Variante possible ?']] = ''; row[idx['Vu N fois']] = 1;
+      for (var r = 0; r < row.length; r++) if (row[r] === undefined) row[r] = '';
+      f.appendRow(row);
+      cache.parCle[cleAnc] = { ligneSheet: f.getLastRow(), entite: ancienReel, domaine: ligne.domaine, categorie: ligne.categorie || '',
+        type: ligne.type || '', statut: 'variante de : ' + normaliserCle_(nouv), dossierId: '', variante: '', vuNFois: 1 };
+      cache.lignes.push(cache.parCle[cleAnc]);
+    }
+  }
+  journalInfo_('Entités', 'Entité renommée depuis dossier : ' + ancienReel + ' → ' + nouv);
+  return true;
 }
 
 /** Devine le type d'entité (→ schéma de sous-dossiers) d'après domaine/catégorie. */

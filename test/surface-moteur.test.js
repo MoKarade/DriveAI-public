@@ -31,6 +31,7 @@ const CONTRAT = [
   'entitesCache_', 'reinitialiserEntitesCache_', 'resoudreEntite_', 'entiteEnAttenteAjouter_',
   'creerDossiersEntitesValidees_', 'promouvoirEntiteValidee_', 'appliquerCurationEntites_',
   'estEntiteGenerique_', 'estFusionnableEntite_', 'incrementerVuEntite_',
+  'entiteValideeParDossierId_', 'renommerEntiteDepuisDossier_',
   // Identité : repli quand la table REFUSE d'attribuer (C28-72) — appelé par deciderRoutageV2_.
   'repliIdentite_',
   // canonicalisation & fusion d'entités (refonte 2026-07-07 ; branchée sur le chemin VIVANT P4/C28-10)
@@ -82,6 +83,7 @@ const CONTRAT = [
   'joursFenetreIntentions_', 'estHorsFenetreIntentions_',
   'traiterDepots_', 'ordonnerDepots_', 'veillerDrive_', 'suivreChangementsDrive_', 'collecterPartages_', 'appliquerMigrationTaxonomie_',
   'obtenirJetonChangementsDrive_', 'listerChangementsDrive_', 'derniereCleIndexPourFileId_',
+  'extraireEmetteurNomVeille_', 'extraireTypeNomVeille_',
   // re-analyse v2 ciblée (C26-08, ADR-0018)
   'estAReanalyser_', 'appliquerReanalyseCiblee_', 'reanalyserUnePage_', 'collecterAReanalyser_',
   'reanalyserFichier_',
@@ -132,6 +134,7 @@ const CONTRAT = [
   'reinitialiserAgendaRun_', 'extraireEcheanceAgenda_', 'construireTitreAgenda_', 'creerRappelEcheanceAgenda_',
   'reinitialiserDossiersVieCache_', 'dossiersVieCache_', 'chercherDossiersVie_',
   'formaterContexteDossiersVie_', 'enregistrerLienMailDrive_', 'placerAvecJournalAction_',
+  'enregistrerDossierVieDirect_',
   'appliquerReorgInterne04Autonome_',
   'estActionReorgAutoSure_', 'actionsProposeesAuto_', 'appliquerReorgAuto_', 'extraireLienDesabonnement_',
   'enregistrerAction_', 'annulerAction_', 'validerActionId_', 'actionAnnulerAction_',

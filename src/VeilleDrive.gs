@@ -59,18 +59,26 @@ function estChangementDriveIgnorable_(ch, idsIgnores) {
   return estFichierExcluVeille_(ch.file.name);
 }
 
+/** Normalise un segment/zone (minuscules, sans accents, espaces compactés). PURE. */
+function normaliserZoneVeille_(v) {
+  if (typeof normaliserCle_ === 'function') return normaliserCle_(v);
+  var t = String(v == null ? '' : v).toLowerCase();
+  if (t.normalize) t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return t.replace(/[’ʼ´']/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** Vrai si un ancêtre appartient à un dossier système technique/tampon exclu du suivi récursif. PURE. */
 function estSousZoneSystemeVeille_(nomsAncetres) {
   var zones = {
     '_technique': true,
     '_doublons': true,
-    '_médias': true,
-    '00 · à trier': true,
-    '00 · à vérifier': true
+    '_medias': true,
+    '00 · a trier': true,
+    '00 · a verifier': true
   };
   var liste = nomsAncetres || [];
   for (var i = 0; i < liste.length; i++) {
-    var k = String(liste[i] || '').trim().toLowerCase();
+    var k = normaliserZoneVeille_(liste[i]);
     if (zones[k]) return true;
   }
   return false;
@@ -81,11 +89,11 @@ function estZoneCatalogueLectureSeuleVeille_(nomsAncetres) {
   var zones = {
     'anna': true,
     '04 · immigration': true,
-    'données & exports': true
+    'donnees & exports': true
   };
   var liste = nomsAncetres || [];
   for (var i = 0; i < liste.length; i++) {
-    var k = String(liste[i] || '').trim().toLowerCase();
+    var k = normaliserZoneVeille_(liste[i]);
     if (zones[k]) return true;
   }
   return false;
@@ -124,6 +132,39 @@ function statutSyncVeilleAutorise_(statut) {
   if (!s || s === 'quarantaine' || s === 'à vérifier') return false;
   if (typeof STATUTS_SYNC_INDEX !== 'undefined') return STATUTS_SYNC_INDEX[s] === true;
   return { 'classé': true, 'doublon': true, 'média': true, 'technique': true, 'déplacé': true, 'manuel': true, 'corbeillé': true }[s] === true;
+}
+
+/** Extrait le type documentaire d'un nom classé `AAAA[-MM[-JJ]]_Type[_Tiers]`. PURE. */
+function extraireTypeNomVeille_(nom) {
+  var base = String(nom == null ? '' : nom).trim().replace(/\.[^./\\]+$/, '').replace(/\s*\(\d+\)$/, '').trim();
+  var m = base.match(/^(\d{4})(?:-\d{2})?(?:-\d{2})?_([^_]+)(?:_(.+))?$/);
+  return m ? String(m[2] || '').replace(/\s+/g, ' ').trim() : '';
+}
+
+/** Extrait l'émetteur d'un nom classé `AAAA[-MM[-JJ]]_Type_Tiers` ('' si sentinelle, générique ou propriétaire). PURE. */
+function extraireEmetteurNomVeille_(nom) {
+  var base = String(nom == null ? '' : nom).trim().replace(/\.[^./\\]+$/, '').replace(/\s*\(\d+\)$/, '').trim();
+  var m = base.match(/^(\d{4})(?:-\d{2})?(?:-\d{2})?_([^_]+)_(.+)$/);
+  if (!m) return '';
+  var tiers = String(m[3] || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  if (tiers.length < 2) return '';
+  var cle = typeof normaliserCle_ === 'function' ? normaliserCle_(tiers) : tiers.toLowerCase();
+  if (/^(inconnue?|n\/?a|n a|aucune?|autres?|document|sans|non identifie|non lisible)$/.test(cle)) return '';
+  if (typeof estEntiteGenerique_ === 'function' && estEntiteGenerique_(tiers)) return '';
+  if (typeof estProprietaireMarc_ === 'function' && estProprietaireMarc_(tiers)) return '';
+  return tiers;
+}
+
+/** Vrai si un chemin ou domaine appartient aux zones protégées/système exclues de l'apprentissage. PURE. */
+function estZoneExclueApprentissageVeille_(chemin, domaine) {
+  var segs = String(chemin || '').split('/').filter(Boolean);
+  if (segs.length && estSousZoneIgnoreeVeille_(segs)) return true;
+  var d = normaliserZoneVeille_(domaine);
+  if (!d) return false;
+  if (d === 'anna' || d === '04 · immigration' || d.charAt(0) === '_' || /^00\s*·/.test(d)) return true;
+  var prot = typeof CONFIG !== 'undefined' && Array.isArray(CONFIG.DOMAINES_PROTEGES) ? CONFIG.DOMAINES_PROTEGES : [];
+  for (var i = 0; i < prot.length; i++) if (normaliserZoneVeille_(prot[i]) === d) return true;
+  return false;
 }
 
 function cheminDossierVeille_(dirObj) {
@@ -182,6 +223,7 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
   var lig = lireLigneIndex_(cle);
   if (!lig || !statutSyncVeilleAutorise_(lig.statut)) return null;
 
+  var dejaEpingle = typeof indexContient_ === 'function' && indexContient_('epingle|' + fid);
   var dec = decisionSyncIndex_(
     { nom: lig.nom, chemin: lig.chemin, statut: lig.statut },
     { existe: !disparu, corbeille: Boolean(disparu), nom: nomActuel, chemin: cheminConstat }
@@ -190,7 +232,8 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
 
   var cheminBrut = String(dec.chemin || cheminConstat || '');
   var cheminFinal = formaterCheminLogiqueVeille_(cheminBrut.split('/')) || dec.chemin || lig.chemin;
-  var domaineFinal = domaineDeCheminVeille_(cheminFinal) || lig.domaine || '';
+  var domaineCible = domaineDeCheminVeille_(cheminFinal);
+  var domaineFinal = domaineCible || lig.domaine || '';
   var nomFinal = dec.nom || nomActuel || lig.nom;
 
   indexAjouter_('drive|' + fid, {
@@ -201,7 +244,7 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
     fileId: fid
   });
   if (dec.statut === 'déplacé' && typeof indexContient_ === 'function' && !indexContient_('epingle|' + fid) &&
-      String(cheminFinal).indexOf('00 · À trier') !== 0) {
+      normaliserZoneVeille_(cheminFinal).indexOf('00 · a trier') !== 0) {
     indexAjouter_('epingle|' + fid, {
       statut: 'épinglé',
       nom: nomFinal,
@@ -209,6 +252,34 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
       chemin: cheminFinal,
       fileId: fid
     });
+  }
+
+  var srcLogique = formaterCheminLogiqueVeille_(String(lig.chemin || '').split('/')) || String(lig.chemin || '');
+  var norm = normaliserZoneVeille_;
+  var vraiDeplacement = Boolean(norm(srcLogique) && norm(cheminFinal) && norm(srcLogique) !== norm(cheminFinal)) &&
+    !(typeof normaliserCle_ === 'function' && typeof cheminsSyncCompatibles_ === 'function' && cheminsSyncCompatibles_(srcLogique, cheminFinal));
+  if (lig.statut === 'classé' && dec.statut === 'déplacé' && !disparu && !dejaEpingle && vraiDeplacement &&
+      domaineCible && !estZoneExclueApprentissageVeille_(srcLogique, lig.domaine) &&
+      !estZoneExclueApprentissageVeille_(cheminFinal, domaineCible) && typeof enregistrerCorrection_ === 'function') {
+    var emetteur = extraireEmetteurNomVeille_(nomFinal || lig.nom);
+    if (emetteur) {
+      var segs = String(cheminFinal || '').split('/').filter(Boolean);
+      var cat = (segs.length >= 2 && typeof CONFIG !== 'undefined' && CONFIG.CATEGORIES &&
+        CONFIG.CATEGORIES[domaineCible] && CONFIG.CATEGORIES[domaineCible][segs[1]]) ? segs[1] : '';
+      var dv = typeof normaliserCleDossierVie_ === 'function' ? normaliserCleDossierVie_(cheminFinal) : null;
+      var ent = dv && dv.entite ? dv.entite : (segs.length >= 2 && !/^\d{4}$/.test(segs[segs.length - 1]) ? segs[segs.length - 1] : '');
+      if (ent && ((cat && norm(ent) === norm(cat)) || ent.length < 3 ||
+          (typeof estEntiteGenerique_ === 'function' && estEntiteGenerique_(ent)) ||
+          (typeof estProprietaireMarc_ === 'function' && estProprietaireMarc_(ent)))) ent = '';
+      try {
+        enregistrerCorrection_({
+          fichier: nomFinal, emetteur: emetteur, domaine: domaineCible,
+          categorie: cat, entite: ent, type: extraireTypeNomVeille_(nomFinal || lig.nom)
+        });
+      } catch (eCorr) {
+        journaliserErreurVeille_('Enregistrement correction impossible', eCorr);
+      }
+    }
   }
   return { statut: dec.statut, chemin: cheminFinal, nom: nomFinal };
 }
@@ -388,6 +459,22 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
             if (infoDir.chemin && !estSousZoneSystemeVeille_(infoDir.ancetresEtNom) && !estSousZoneSystemeVeille_(ancDir)) {
               var estLectureSeule = estZoneCatalogueLectureSeuleVeille_(infoDir.ancetresEtNom) ||
                 estZoneCatalogueLectureSeuleVeille_(ancDir);
+              var domDir = domaineDeCheminVeille_(infoDir.chemin);
+              if (!estLectureSeule && !estZoneExclueApprentissageVeille_(infoDir.chemin, domDir)) {
+                var nomDir = dirObj.getName() || meta.name;
+                if (typeof entiteValideeParDossierId_ === 'function' && typeof renommerEntiteDepuisDossier_ === 'function') {
+                  try {
+                    var entExist = entiteValideeParDossierId_(fid);
+                    if (entExist && nomDir && String(entExist.entite).trim() !== String(nomDir).trim()) {
+                      renommerEntiteDepuisDossier_(entExist.entite, nomDir, entExist.domaine || domDir);
+                    }
+                  } catch (eRen) { journaliserErreurVeille_('Propagation renommage entité impossible', eRen); }
+                }
+                if (typeof enregistrerDossierVieDirect_ === 'function') {
+                  try { enregistrerDossierVieDirect_(domDir, nomDir, infoDir.chemin); }
+                  catch (eDV) { journaliserErreurVeille_('Adoption dossier vie impossible', eDV); }
+                }
+              }
               var sync = syncRestant > 0 && !garde()
                 ? synchroniserArborescenceDossierVeille_(dirObj, infoDir.chemin, syncRestant, garde, estLectureSeule)
                 : { maj: 0, tronque: syncRestant <= 0 };
