@@ -959,6 +959,13 @@ var CONFIG = {
   REORG_04_INTERNE_TAG: 'v4c-04',
   REORG_04_INTERNE_MAX_PAR_RUN: 10,
 
+  // --- ADR-0081 §2.5 (vague 5, 24/11/2026) : rappels d'échéance Google Agenda (`Agenda.gs`) ---
+  // Activé avec l'accord explicite du propriétaire pour le scope `calendar.events` (plafond
+  // strict par tick, jamais de corps de courriel copié, coupé au frein budget 30 $).
+  AGENDA_ACTIF: true,
+  AGENDA_MAX_PAR_RUN: 3,
+  AGENDA_HORIZON_JOURS: 365,
+
   // --- C26-07 (ADR-0015) : PREUVE dry-run avant/après du pipeline v2, sur un échantillon RÉEL ---
   // Prérequis à la campagne C26-08 et à l'allumage de ANALYSE_V2. Interrupteur DÉDIÉ, distinct
   // d'ANALYSE_V2 : n'affecte JAMAIS le flux vivant (Haiku 1 passe reste actif tant qu'ANALYSE_V2

@@ -16,6 +16,7 @@
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
 | `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps) |
 | `Libelles.gs` | Bascule et remplacement avec preuves des libellés Gmail (sous 10 principaux / 50 max, ADR-0081) |
+| `Agenda.gs` | Rappels d'échéance automatiques dans Google Agenda (`CalendarApp`, idempotence `Index`, journal `Actions`, ADR-0081) |
 | `DossiersVie.gs` | Carte en mémoire des dossiers de vie existants et journalisation des liens mails ↔ Drive (`Liens`, ADR-0081) |
 | `Intake.gs` | Source 2 : dépôt manuel `00 · À trier` (déplacement) |
 | `Partages.gs` | Source 3 : fichiers partagés récents (copie, ADR-0005) |

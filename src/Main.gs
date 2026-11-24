@@ -296,6 +296,7 @@ function tickDriveAI() {
     reinitialiserEscaladeTri_();     // plafond d'escalades du tri par run (ADR-0081)
     reinitialiserBrouillonsTri_();   // plafond de brouillons de réponse du tri par run (ADR-0081)
     reinitialiserLibellesCrees_();   // plafond de libellés Gmail créés par run (ADR-0081)
+    if (typeof reinitialiserAgendaRun_ === 'function') reinitialiserAgendaRun_(); // plafond rappels Google Agenda (ADR-0081, vague 5)
     reinitialiserLibellesCache_();   // libellés Gmail de Marc, rechargés 1×/run
     reinitialiserPromoSetCache_();   // fils CATEGORY_PROMOTIONS (signal déterministe), 1×/run
     reinitialiserPanneEcriture_();   // panne d'ÉCRITURE Gmail : nouvelle chance à chaque run
