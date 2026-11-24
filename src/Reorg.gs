@@ -59,6 +59,9 @@ function etapeReorg_(estBudgetDepasse) {
   catch (e) { journalErreur_('Reorg', 'Filtre des propositions de corbeille : ' + e); }
   var reste = appliquerReorgValidee_(f, lignes, estBudgetDepasse);
   var resteAuto = (!reste && !estBudgetDepasse()) ? appliquerReorgAuto_(f, lignes, estBudgetDepasse) : false;
+  if (!reste && !resteAuto && !estBudgetDepasse() && typeof appliquerReorgInterne04Autonome_ === 'function') {
+    appliquerReorgInterne04Autonome_(estBudgetDepasse);
+  }
   if (!reste && !resteAuto && !estBudgetDepasse()) appliquerReorgIA_(f, lignes, estBudgetDepasse);
 }
 
