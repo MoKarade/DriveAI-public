@@ -1581,4 +1581,37 @@ describe('i18n R4 — parité FR/EN et jetons des 39 nouvelles clés', () => {
     expect(String(faux.mock.calls[0]?.[0])).toContain('action=annuler-action');
     vi.unstubAllGlobals();
   });
+
+  it('Phase 2 : interpreterTelemetrie et syntheseEtat lisent tick_temps_jour_min et rangement_temps_jour_min sans inventer 0', () => {
+    const t = interpreterTelemetrie([
+      ['tick_temps_jour_min', '12,4', 'min/jour', 'Plafond Google 90 min/j'],
+      ['rangement_temps_jour_min', '6.5', 'min/jour', 'Plafond 60 min/j'],
+    ]);
+    expect(t.tickTempsJourMin).toBe(12.4);
+    expect(t.tickPlafondJourMin).toBe(90);
+    expect(t.rangementTempsJourMin).toBe(6.5);
+    expect(t.rangementPlafondJourMin).toBe(60);
+
+    const tInvalide = interpreterTelemetrie([
+      ['tick_temps_jour_min', '-5', 'min/jour', ''],
+      ['rangement_temps_jour_min', 'n/a', 'min/jour', ''],
+    ]);
+    expect(tInvalide.tickTempsJourMin).toBeNull();
+    expect(tInvalide.rangementTempsJourMin).toBeNull();
+
+    const syn = syntheseEtat({
+      index: [],
+      santeBrut: [],
+      journalBrut: [],
+      reglagesBrut: [],
+      telemetrieBrut: [
+        ['tick_temps_jour_min', '79.2', 'min/jour', 'Plafond Google 90 min/j'],
+        ['rangement_temps_jour_min', '60', 'min/jour', 'Plafond 60 min/j'],
+      ],
+      coutsBrut: [],
+    });
+    expect(syn.quotasCouts.tickTempsJourMin).toBe(79.2);
+    expect(syn.quotasCouts.tickPlafondJourMin).toBe(90);
+    expect(syn.quotasCouts.rangementTempsJourMin).toBe(60);
+  });
 });

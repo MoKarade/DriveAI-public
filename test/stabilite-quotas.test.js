@@ -132,3 +132,40 @@ test('stabilite-quotas : rangement borné à 90s/tick ne bloque plus intake-depo
   assert.strictEqual(appels.tri, 2, 'tri-gmail reste actif jusqu à minuit');
   assert.strictEqual(appels.sante, 2, 'sante reste actif');
 });
+
+test('stabilite-quotas : purgerEchecsObsoletes_ retire uniquement llm-intention| et reanalyse|c26-08| en ordre décroissant', () => {
+  const c = load(['Config.gs', 'Journal.gs', 'Maintenance.gs']);
+  assert.strictEqual(c.estCleEchecObsolete_('llm-intention|abc'), true);
+  assert.strictEqual(c.estCleEchecObsolete_('reanalyse|c26-08|xyz'), true);
+  assert.strictEqual(c.estCleEchecObsolete_('drive|123'), false);
+  assert.strictEqual(c.estCleEchecObsolete_('tri|fil|abc|'), false);
+
+  const lignes = [
+    ['llm-intention|a'],
+    ['drive|keep1'],
+    ['reanalyse|c26-08|b'],
+    ['llm-intention|c'],
+    ['drive|keep2'],
+  ];
+  const deletes = [];
+  const infos = [];
+  c.reinitialiserIndexCache_ = () => {};
+  c.journalInfo_ = (s, m) => infos.push({ s, m });
+  c.feuille_ = () => ({
+    getLastRow: () => lignes.length + 1,
+    getRange: (row, col, num) => ({
+      getValues: () => lignes.slice(row - 2, row - 2 + num),
+    }),
+    deleteRow: (rowIdx) => {
+      deletes.push(rowIdx);
+      lignes.splice(rowIdx - 2, 1);
+    },
+  });
+
+  const nb = c.purgerEchecsObsoletes_();
+  assert.strictEqual(nb, 3);
+  assert.deepStrictEqual(deletes, [5, 4, 2], 'suppression en ordre décroissant sans décalage');
+  assert.deepStrictEqual(lignes, [['drive|keep1'], ['drive|keep2']]);
+  assert.ok(infos.some((x) => x.m.includes('3 ancienne(s) erreur(s) obsolète(s)')));
+  assert.strictEqual(c.purgerEchecsObsoletes_(), 0, 'idempotent au second passage');
+});

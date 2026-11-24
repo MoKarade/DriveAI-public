@@ -1254,6 +1254,29 @@ describe('Vues principales — interactions DOM (P0-3, P0-4, P1-1..P1-3, P2-1)',
       expect(screen.getByRole('button', { name: /3 masquée\(s\) — réafficher/i })).toBeDefined();
     });
 
+    it('Phase 2 : affiche Temps Google aujourd’hui (X / 90 min) et lève une alerte si >= 75 min ou moteur bloqué', () => {
+      mockEtat.progression = [];
+      mockEtat.donnees = donneesBase({
+        santeBrut: [
+          ['Dernier passage OK : 2026-07-01 10:00'],
+          ['Compte LLM : actif'],
+          ['Tri Gmail : ✅ normal'],
+        ],
+        telemetrieBrut: [
+          ['tick_temps_jour_min', '78.5', 'min/jour', 'Plafond Google 90 min/j'],
+          ['rangement_temps_jour_min', '60', 'min/jour', 'Plafond 60 min/j'],
+        ],
+      });
+      render(createElement(Etat, { langue: 'fr' }));
+
+      expect(screen.getAllByText('Temps Google aujourd’hui').length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText(/78,5 \/ 90 min/).length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/dont 60 min rangement/)).toBeDefined();
+      const regionAlertes = screen.getByRole('region', { name: 'Points d’attention' });
+      expect(within(regionAlertes).getByText(/Plafond quotidien Google proche/)).toBeDefined();
+      expect(within(regionAlertes).getByText(/moteur n’a pas répondu depuis plus d’une heure/i)).toBeDefined();
+    });
+
     it('ADR-0081 (vague 3b) : affiche les actions récentes, annule en 1 clic les actions réversibles et gère une erreur', async () => {
       mockEtat.progression = [];
       mockEtat.donnees = donneesBase({

@@ -172,11 +172,16 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
     return f === 'encours' || f === 'recensement';
   });
 
+  const quotaJourProche = syn.quotasCouts.tickTempsJourMin !== null && syn.quotasCouts.tickTempsJourMin >= 75;
+  const moteurBloque = etat === 'mort';
+
   const aAlertesActives =
     syn.moteur.compteLlm.statut === 'panne'
     || syn.moteur.triGmailSante.statut === 'arret'
     || syn.gmail.quotaSuspendu
     || syn.erreurs.quotaGmailJournalAujourdhui
+    || quotaJourProche
+    || moteurBloque
     || nbErreursVisibles > 0
     || (syn.erreurs.nbReorgRefus ?? 0) > 0
     || operationsEnDifficulte.length > 0;
@@ -281,6 +286,26 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
                 <span className="etat-valeur">
                   <span className="pastille attn">{t('quotaEtatSuspendu', langue)}</span>
                   <span className="variante">{syn.gmail.quotaDetail || t('noteQuota', langue)}</span>
+                </span>
+              </div>
+            )}
+            {moteurBloque && (
+              <div className="etat-ligne">
+                <span>{t('etat', langue)}</span>
+                <span className="etat-valeur">
+                  <span className="pastille crit">{t('moteurCourtMort', langue)}</span>
+                  <span className="variante">{t('moteurBloqueAlerte', langue)}</span>
+                </span>
+              </div>
+            )}
+            {quotaJourProche && (
+              <div className="etat-ligne">
+                <span>{t('rythmeJourLibelle', langue)}</span>
+                <span className="etat-valeur">
+                  <span className="pastille attn">
+                    {`${syn.quotasCouts.tickTempsJourMin!.toLocaleString(locale)} / ${(syn.quotasCouts.tickPlafondJourMin ?? 90).toLocaleString(locale)} min`}
+                  </span>
+                  <span className="variante">{t('quotaJourProcheAlerte', langue)}</span>
                 </span>
               </div>
             )}
@@ -409,6 +434,25 @@ export function Etat({ langue, onAller }: { langue: Langue; onAller?: (s: Sectio
             <span>{t('freinCampagnes', langue)}</span>
             <span className="etat-valeur">
               <b>{syn.quotasCouts.freinDollars !== null && Number.isFinite(syn.quotasCouts.freinDollars) ? formaterMontant(syn.quotasCouts.freinDollars, locale, 0) : '—'}</b>
+            </span>
+          </div>
+          <div className="etat-ligne">
+            <span>{t('rythmeJourLibelle', langue)}</span>
+            <span className="etat-valeur">
+              {syn.quotasCouts.tickTempsJourMin !== null ? (
+                <>
+                  <span className={`pastille ${quotaJourProche ? 'attn' : 'ok'}`}>
+                    {`${syn.quotasCouts.tickTempsJourMin.toLocaleString(locale)} / ${(syn.quotasCouts.tickPlafondJourMin ?? 90).toLocaleString(locale)} min`}
+                  </span>
+                  {syn.quotasCouts.rangementTempsJourMin !== null && syn.quotasCouts.rangementTempsJourMin > 0 && (
+                    <span className="variante">
+                      {t('rangementJourCourt', langue).replace('{n}', syn.quotasCouts.rangementTempsJourMin.toLocaleString(locale))}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <b>—</b>
+              )}
             </span>
           </div>
           {syn.quotasCouts.totalCouts && (

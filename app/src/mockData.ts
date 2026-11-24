@@ -102,6 +102,8 @@ const TELEMETRIE: string[][] = [
   ['tri_archives_jour', '18', 'fils/jour', 'Fils archivés par le moteur aujourd’hui'],
   ['llm_cout_mois', '16.42', '$', 'Frein campagnes à 110 $'],
   ['llm_appels_mois', '5210', 'appels', ''],
+  ['tick_temps_jour_min', '12.4', 'min/jour', 'Plafond Google 90 min/j'],
+  ['rangement_temps_jour_min', '6.5', 'min/jour', 'Plafond 60 min/j'],
 ];
 
 const COUTS: string[][] = [

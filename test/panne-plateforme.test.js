@@ -212,7 +212,7 @@ test('panne durable : le rétablissement APRÈS la panne ré-arme la dé-quarant
     c.signalerPannePlateforme_(529, 'overloaded', 'claude-haiku-5-5');
   }
   assert.ok(calls.props.DriveAI_LLM_PANNE, 'panne posée');
-  calls.props.DriveAI_DEQUARANTAINE = 'q1';                       // dé-quarantaine déjà consommée avant
+  calls.props.DriveAI_DEQUARANTAINE = 'q2';                       // dé-quarantaine déjà consommée avant
   c.signalerRetablissement_();
   assert.strictEqual(calls.props.DriveAI_LLM_PANNE, undefined, 'panne effacée');
   assert.strictEqual(calls.props.DriveAI_DEQUARANTAINE, undefined,

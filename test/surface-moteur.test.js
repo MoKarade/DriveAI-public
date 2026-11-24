@@ -96,6 +96,7 @@ const CONTRAT = [
   'exporterTexteNatif_', 'exportNatifMime_', // natifs Google lisibles (R3)
   'budgetCampagnesAtteint_', 'reinitialiserFreinBudget_', // frein budget campagnes (R3, §2.6)
   'appliquerRangementInitial_', 'appliquerRejeuSiNouvelleVersion_', 'rangementTermine_',
+  'estCleEchecObsolete_', 'purgerEchecsObsoletes_',
   'appliquerRelancesQuarantaine_',
   'estAReclasserLeger_', 'collecterAReclasser_', 'deplacerVersATrier_',
   'aParentProtege_', 'ensembleDomainesProteges_', 'nbFichiersATrier_',

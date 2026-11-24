@@ -429,6 +429,7 @@ function tickDriveAI() {
           ? 'déjà fait (one-shot)' : null;
       } catch (e) { return 'état illisible (blip)'; }
     }], function () {
+      if (typeof purgerEchecsObsoletes_ === 'function') purgerEchecsObsoletes_();
       dequarantainerLignes_('drive|');
       PropertiesService.getScriptProperties().setProperty('DriveAI_DEQUARANTAINE', CONFIG.DEQUARANTAINE_TAG);
     }, function (e) { journalErreur_('Maintenance', 'Dé-quarantaine automatique différée : ' + e); });
