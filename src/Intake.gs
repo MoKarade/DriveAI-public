@@ -24,6 +24,10 @@
  * @param {function():boolean} estBudgetDepasse  garde-temps partagé du run
  */
 function traiterDepots_(estBudgetDepasse) {
+  if (typeof veillerDrive_ === 'function') {
+    try { veillerDrive_(estBudgetDepasse); }
+    catch (e) { journalErreur_('VeilleDrive', String(e)); }
+  }
   var dossier = DriveApp.getFolderById(CONFIG.DOSSIERS.A_TRIER);
 
   // Collecte LECTURE SEULE (le déplacement pendant l'itération invaliderait l'itérateur),
