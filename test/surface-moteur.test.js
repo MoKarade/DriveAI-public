@@ -127,7 +127,7 @@ const CONTRAT = [
   'estLibelleSpecialTri_', 'validerPreuveRemplacement_', 'remplacerLibelle_',
   'planifierRemplacementLibelle_', 'traiterRemplacementLibelleEnCours_',
   'reinitialiserDossiersVieCache_', 'dossiersVieCache_', 'chercherDossiersVie_',
-  'formaterContexteDossiersVie_', 'enregistrerLienMailDrive_',
+  'formaterContexteDossiersVie_', 'enregistrerLienMailDrive_', 'placerAvecJournalAction_',
   'estActionReorgAutoSure_', 'actionsProposeesAuto_', 'appliquerReorgAuto_', 'extraireLienDesabonnement_',
   'enregistrerAction_', 'annulerAction_', 'validerActionId_', 'actionAnnulerAction_',
   'doitCreerBrouillon_', 'parserBrouillon_', 'genererBrouillonReponse_', 'lireCorpsEtHistorique_',

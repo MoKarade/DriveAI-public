@@ -933,7 +933,9 @@ var CONFIG = {
   // délibéré, sur la mesure du 21/09 — elle consommait 57,5 % du budget LLM du mois (2,33 $ /
   // 216 appels) pour +2 documents en 14 h, sur des documents DÉJÀ classés. Rallumer = remettre
   // ce flag à true ET lui rendre du budget quotidien (le verrou refuse l'un sans l'autre).
-  REANALYSE_ACTIF: false,
+  // Reprise encadrée le 24/11/2026 (ADR-0081, vague 4b) : 8 min/j sous le frein budget 30 $, chaque
+  // renommage/déplacement journalisé dans Actions avec Annuler 1-clic, 04 · Immigration toujours exclu.
+  REANALYSE_ACTIF: true,
   REANALYSE_TAG: 'c28-92',                // bumper le tag relance une campagne complète (re-facture)
   REANALYSE_CIBLES: ['06 · Études & diplômes'],
   // ⚠️ RACINE SEULE (🔴 revue sécurité ADR-0056). `REANALYSE_CIBLES` borne le DOMAINE, jamais la
@@ -946,18 +948,9 @@ var CONFIG = {
   REANALYSE_RACINE_SEULE: true,
   REANALYSE_BUDGET_MS: 2 * 60 * 1000,     // sous-budget PAR TICK (même famille que MIGRATION_BUDGET_MS) ;
                                           // la page réutilise MIGRATION_MAX_PAR_RUN (docs lourds/run)
-  // Budget QUOTIDIEN, en ms RÉELLES persistées (ADR-0056). Il MANQUAIT : la campagne n'avait qu'un
-  // plafond par tick, donc rien ne bornait sa journée, et elle était invisible de l'invariant
-  // d'enveloppe. PRÉLEVÉ, jamais ajouté (§9 « réallouer, jamais augmenter ») : 8 min reprises à
-  // `GMAIL_HISTO_BUDGET_JOUR_MS` (20 → 12), dont le moteur DIT lui-même « terminée ✅ — ses 20 min/j
-  // sont RÉALLOUABLES ». C'est la réallocation que C28-70 attendait faute de preuve : la preuve est
-  // désormais écrite par le moteur, pas supposée. La somme de l'enveloppe restait EXACTEMENT 63 min/j (12 depuis l'ADR-0074).
-  // ⚠️ C49-3 a ESSAYÉ de prendre 4 min ici et a reculé, sur la foi d'un test : à 4 min de plafond,
-  // la marge de démarrage (`PILOTE_MARGE_DOC_MS`, 1 min) devient 25 % du budget au lieu de 12,5 %,
-  // et le reliquat perdu chaque jour double. Le commentaire du code le disait — « ≤ 1 min sur 8 » —
-  // et il serait devenu faux en silence. Un budget ne se coupe pas en deux sans relire ce que sa
-  // taille garantissait ailleurs.
-  REANALYSE_BUDGET_JOUR_MS: 0 * 60 * 1000,
+  // Budget QUOTIDIEN, en ms RÉELLES persistées (ADR-0056 / ADR-0081 vague 4b : 8 min/j rendues).
+  // Ralloué depuis la marge de l'ADR-0074 (total reset-OFF : 12 + 8 = 20 min/j << mur ~90 min/j).
+  REANALYSE_BUDGET_JOUR_MS: 8 * 60 * 1000,
 
   // --- C26-07 (ADR-0015) : PREUVE dry-run avant/après du pipeline v2, sur un échantillon RÉEL ---
   // Prérequis à la campagne C26-08 et à l'allumage de ANALYSE_V2. Interrupteur DÉDIÉ, distinct

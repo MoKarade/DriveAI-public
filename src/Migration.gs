@@ -262,6 +262,41 @@ function collecterAMigrer_(dossier, ids, max, estBudgetDepasse) {
 }
 
 /**
+ * Exécute le placement en place d'un document déjà classé (renommage seul ou déplacement+renommage)
+ * et consigne l'opération réversible dans l'onglet `Actions` (ADR-0081, vague 4b).
+ * @param {string} fileId
+ * @param {string} parentId
+ * @param {string} nomAvant
+ * @param {string} dossierId
+ * @param {string} nouveauNom
+ * @param {string} source
+ * @return {string} fileId si réussi, sinon ''
+ */
+function placerAvecJournalAction_(fileId, parentId, nomAvant, dossierId, nouveauNom, source) {
+  if (dossierId === parentId && nouveauNom === nomAvant) return fileId;
+  var ok = false;
+  var typeAction = '';
+  var avant = null;
+  var apres = null;
+  if (dossierId === parentId) {
+    ok = !!renommer_(fileId, nouveauNom);
+    typeAction = 'drive-renommer';
+    avant = { nom: nomAvant };
+    apres = { nom: nouveauNom };
+  } else {
+    ok = !!deplacerEtRenommer_(fileId, dossierId, parentId, nouveauNom);
+    typeAction = 'drive-deplacer';
+    avant = { parentId: parentId, nom: nomAvant };
+    apres = { parentId: dossierId, nom: nouveauNom };
+  }
+  if (!ok) return '';
+  if (typeof enregistrerAction_ === 'function') {
+    enregistrerAction_(typeAction, fileId, avant, apres, source || '');
+  }
+  return fileId;
+}
+
+/**
  * Re-passe UN document classé au pipeline complet. Défense en profondeur (§1) : la zone protégée
  * est revérifiée en STRICT juste avant — un fichier multi-parents accroché à `04 · Immigration`
  * n'est JAMAIS touché ; on l'inscrit « zone protégée » sous la clé de migration pour que la
@@ -313,8 +348,7 @@ function migrerFichier_(fileId, proteges) {
     ignorerDoublon: true, // son empreinte est déjà dans l'Index (il est classé) — pas « doublon de lui-même »
     blob: blobUneFois_,
     placer: function (dossierId, nouveauNom) {
-      if (dossierId === parentId) return renommer_(fileId, nouveauNom) ? fileId : ''; // déjà au bon endroit
-      return deplacerEtRenommer_(fileId, dossierId, parentId, nouveauNom) ? fileId : '';
+      return placerAvecJournalAction_(fileId, parentId, nom, dossierId, nouveauNom, 'migration-taxonomie');
     }
   });
   return true;
@@ -661,8 +695,7 @@ function reanalyserFichier_(fileId, proteges) {
     ignorerDoublon: true, // son empreinte est déjà dans l'Index (il est classé) — pas « doublon de lui-même »
     blob: blobUneFois_,
     placer: function (dossierId, nouveauNom) {
-      if (dossierId === parentId) return renommer_(fileId, nouveauNom) ? fileId : ''; // déjà au bon endroit
-      return deplacerEtRenommer_(fileId, dossierId, parentId, nouveauNom) ? fileId : '';
+      return placerAvecJournalAction_(fileId, parentId, nom, dossierId, nouveauNom, 'reanalyse-ancien');
     }
   });
   return true;

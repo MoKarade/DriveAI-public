@@ -230,7 +230,8 @@ test('ENVELOPPE des campagnes : la somme reste EXACTEMENT 12 min/j depuis l\'ADR
   // elles retournent à la marge sous le mur, et chaque campagne neuve de l'ADR-0074 les prendra
   // PAR SON NOM, dans sa PR, en remontant ce total. Baisser l'enveloppe n'est pas une décision de
   // Marc (c'est moins de runtime) ; la remonter au-delà de 63 le resterait.
-  assert.strictEqual(total / 60000, 12,
+  // ADR-0081 vague 4b (24/11/2026) : REANALYSE_BUDGET_JOUR_MS retrouve ses 8 min/j (total = 12 + 8 = 20 min/j << 65 min/j).
+  assert.strictEqual(total / 60000, 20,
     'la somme des budgets quotidiens des 9 campagnes doit rester = 12 min/j. Pour accélérer une ' +
     'campagne, PRENDRE à une autre — jamais ajouter des minutes : au-delà du mur runtime ' +
     '~90 min/j, TOUS les déclencheurs gèlent, chien de garde inclus (C28-29). Relever ce total ' +
