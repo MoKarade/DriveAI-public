@@ -314,3 +314,173 @@ test('VeilleDrive Changes API : initialisation jeton, détection déplacement Ma
   assert.ok(!ajoutsIndex.some((x) => x.cle === 'epingle|f_idx_moteur'));
   assert.strictEqual(actions.length, 1);
 });
+
+test('VeilleDrive : prédicats purs de chemin logique, domaine et statut synchronisable', () => {
+  const c = load(['Config.gs', 'Reset.gs', 'VeilleDrive.gs']);
+
+  assert.strictEqual(c.formaterCheminLogiqueVeille_(['Mon Drive', 'Marc', '05 · Carrière', 'Employeurs']), '05 · Carrière/Employeurs');
+  assert.strictEqual(c.formaterCheminLogiqueVeille_(['mon drive', 'marc', '02 · Finances', ' ', 'Banque']), '02 · Finances/Banque');
+  assert.strictEqual(c.formaterCheminLogiqueVeille_(['Mon Drive', 'Perso']), 'Perso');
+
+  assert.strictEqual(c.domaineDeCheminVeille_('05 · Carrière/Employeurs/EntrepriseFictive'), '05 · Carrière');
+  assert.strictEqual(c.domaineDeCheminVeille_('Autre/Sous'), '');
+
+  assert.strictEqual(c.statutSyncVeilleAutorise_('classé'), true);
+  assert.strictEqual(c.statutSyncVeilleAutorise_('déplacé'), true);
+  assert.strictEqual(c.statutSyncVeilleAutorise_('quarantaine'), false);
+  assert.strictEqual(c.statutSyncVeilleAutorise_('à vérifier'), false);
+});
+
+test('VeilleDrive + Journal : dossier modifié propage arborescence et catalogue en lecture seule sur Drive', () => {
+  const F1 = 'FICTIF_ID_FICHIER_0001'; // drive|
+  const F2 = 'FICTIF_ID_FICHIER_0002'; // tri33p|v2|
+  const F3 = 'FICTIF_ID_FICHIER_0003'; // déjà à jour
+  const F4 = 'FICTIF_ID_FICHIER_0004'; // quarantaine
+  const F5 = 'FICTIF_ID_FICHIER_0005'; // non indexé brut dans le dossier déplacé
+
+  const indexRows = [
+    ['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+    ['drive|' + F1, '2026-11-01', '2025-05-01_Contrat.pdf', '02 · Finances', '02 · Finances/Employeurs', 'classé', 'aaa', 95, F1, 100, ''],
+    ['drive|' + F2, '2026-11-01', '2024-02-01_Paie.pdf', '02 · Finances', '02 · Finances/Employeurs/EntrepriseFictive', 'classé', 'bbb', 90, F2, 200, ''],
+    ['tri33p|v2|' + F2, '2026-11-02', '2024-02-01_Paie.pdf', '02 · Finances', '02 · Finances/Employeurs/EntrepriseFictive', 'classé', 'bbb', 92, F2, 200, ''],
+    ['drive|' + F3, '2026-11-03', '2026-01-01_Attestation.pdf', '05 · Carrière', '05 · Carrière/Employeurs', 'classé', 'ccc', 98, F3, 150, ''],
+    ['drive|' + F4, '2026-11-04', 'Brouillon_Q.pdf', '05 · Carrière', '02 · Finances/Employeurs', 'quarantaine', '', '', F4, 50, ''],
+  ];
+
+  const sheetMock = {
+    getLastRow: () => indexRows.length,
+    getRange: (r, c, nr, nc) => ({
+      getValue: () => (indexRows[r - 1] && indexRows[r - 1][c - 1] !== undefined ? indexRows[r - 1][c - 1] : ''),
+      setValue: (v) => { indexRows[r - 1][c - 1] = v; },
+      getValues: () => {
+        const out = [];
+        for (let rr = r - 1; rr < r - 1 + nr; rr++) {
+          const row = indexRows[rr] || [];
+          out.push(Array.from({ length: nc }, (_, k) => (row[c - 1 + k] !== undefined ? row[c - 1 + k] : '')));
+        }
+        return out;
+      },
+    }),
+    appendRow: (arr) => { indexRows.push(arr); },
+  };
+
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_MARC', { id: 'FICTIF_MARC', name: 'Marc', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_DOSSIERS_A_TRIER', { id: 'FICTIF_DOSSIERS_A_TRIER', name: '00 · À trier', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_TECH', { id: 'FICTIF_TECH', name: '_Technique', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_D05', { id: 'FICTIF_D05', name: '05 · Carrière', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_EMP', { id: 'FICTIF_EMP', name: 'Employeurs', parents: ['FICTIF_D05'] }],
+    ['FICTIF_EMP_ROBO', { id: 'FICTIF_EMP_ROBO', name: 'EntrepriseFictive', parents: ['FICTIF_EMP'] }],
+    ['FICTIF_EMP_IMMIG', { id: 'FICTIF_EMP_IMMIG', name: '04 · Immigration', parents: ['FICTIF_EMP'] }],
+  ]);
+  const files = new Map([
+    [F1, { id: F1, name: '2025-05-01_Contrat.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP'], trashed: false }],
+    [F2, { id: F2, name: '2024-02-01_Paie.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP_ROBO'], trashed: false }],
+    [F3, { id: F3, name: '2026-01-01_Attestation.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP'], trashed: false }],
+    [F4, { id: F4, name: 'Brouillon_Q.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP'], trashed: false }],
+    [F5, { id: F5, name: 'BrutNonIndexe.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP'], trashed: false }],
+    ['FICTIF_ID_FICHIER_04PROTECT', { id: 'FICTIF_ID_FICHIER_04PROTECT', name: '2025-01-01_RP.pdf', mimeType: 'application/pdf', parents: ['FICTIF_EMP_IMMIG'], trashed: false }],
+  ]);
+  const moves = [];
+  const infos = [];
+  const props = new Map([['DriveAI_CHANGES_TOKEN', '200']]);
+
+  const iter = (arr) => {
+    let i = 0;
+    return { hasNext: () => i < arr.length, next: () => arr[i++] };
+  };
+  const foldW = (id) => {
+    const d = folders.get(id);
+    if (!d) throw new Error('Dossier absent ' + id);
+    return {
+      getId: () => d.id,
+      getName: () => d.name,
+      getParents: () => iter(d.parents.map(foldW)),
+      getFiles: () => iter([...files.values()].filter((f) => f.parents.includes(d.id)).map((f) => fileW(f.id))),
+      getFolders: () => iter([...folders.values()].filter((x) => x.parents.includes(d.id)).map((x) => foldW(x.id))),
+      getFoldersByName: () => iter([]),
+      moveTo: (dest) => { moves.push({ id: d.id, dest: dest.getId() }); d.parents = [dest.getId()]; },
+    };
+  };
+  const fileW = (id) => {
+    const f = files.get(id);
+    if (!f) throw new Error('Fichier absent ' + id);
+    return {
+      getId: () => f.id,
+      getName: () => f.name,
+      getMimeType: () => f.mimeType,
+      isTrashed: () => f.trashed,
+      getParents: () => iter(f.parents.map(foldW)),
+      moveTo: (dest) => { moves.push({ id: f.id, dest: dest.getId() }); f.parents = [dest.getId()]; },
+    };
+  };
+  const httpRep = (code, obj) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(obj) });
+
+  const c = load(['Config.gs', 'Entites.gs', 'Journal.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: () => httpRep(200, {
+        changes: [
+          {
+            fileId: 'FICTIF_EMP',
+            file: { id: 'FICTIF_EMP', name: 'Employeurs', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_D05'], trashed: false },
+          },
+        ],
+        newStartPageToken: '201',
+      }),
+    },
+    DriveApp: {
+      getRootFolder: () => foldW('FICTIF_ROOT'),
+      getFolderById: (id) => foldW(id),
+      getFileById: (id) => fileW(id),
+    },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  c.reinitialiserIndexCache_();
+  c.feuille_ = () => sheetMock;
+  c.journalInfo_ = (src, msg) => infos.push({ src, msg });
+  c.journalErreur_ = (src, msg) => { throw new Error('Erreur inattendue: ' + src + ' ' + msg); };
+  c.enregistrerAction_ = () => 'act-1';
+  c.dossierExportsVeille_ = () => foldW('FICTIF_TECH');
+  c.dossierTechnique_ = () => foldW('FICTIF_TECH');
+
+  assert.strictEqual(c.derniereCleIndexPourFileId_(F2), 'tri33p|v2|' + F2);
+
+  const depl = c.veillerDrive_(() => false);
+  assert.strictEqual(depl, 0, 'aucun déplacement Drive déclenché lors de la propagation d arborescence');
+  assert.strictEqual(moves.length, 0);
+  assert.strictEqual(props.get('DriveAI_CHANGES_TOKEN'), '201');
+  assert.deepStrictEqual(files.get(F5).parents, ['FICTIF_EMP'], 'fichier brut non déplacé vers À trier');
+
+  const ajoutF1 = indexRows.find((r, i) => i >= 6 && r[0] === 'drive|' + F1);
+  assert.ok(ajoutF1, 'F1 mis à jour sous drive|F1');
+  assert.strictEqual(ajoutF1[3], '05 · Carrière');
+  assert.strictEqual(ajoutF1[4], '05 · Carrière/Employeurs');
+  assert.strictEqual(ajoutF1[5], 'déplacé');
+  assert.strictEqual(ajoutF1[8], F1);
+
+  const ajoutF2 = indexRows.find((r, i) => i >= 6 && r[0] === 'drive|' + F2);
+  assert.ok(ajoutF2, 'F2 (tri33p) propagé sous drive|F2');
+  assert.strictEqual(ajoutF2[3], '05 · Carrière');
+  assert.strictEqual(ajoutF2[4], '05 · Carrière/Employeurs/EntrepriseFictive');
+  assert.strictEqual(ajoutF2[5], 'déplacé');
+  assert.strictEqual(ajoutF2[8], F2);
+
+  assert.ok(indexRows.some((r, i) => i >= 6 && r[0] === 'epingle|' + F1 && r[5] === 'épinglé'));
+  assert.ok(indexRows.some((r, i) => i >= 6 && r[0] === 'epingle|' + F2 && r[5] === 'épinglé'));
+  assert.ok(!indexRows.some((r, i) => i >= 6 && (r[0] === 'drive|' + F3 || r[0] === 'drive|' + F4 || r[0] === 'drive|FICTIF_ID_FICHIER_04PROTECT')));
+
+  assert.strictEqual(c.derniereCleIndexPourFileId_(F2), 'drive|' + F2, 'cache mis à jour après indexAjouter_');
+  c.reinitialiserIndexCache_();
+  assert.strictEqual(c.derniereCleIndexPourFileId_(F2), 'drive|' + F2, 'cache rechargé pointe vers la nouvelle ligne drive|F2');
+
+  assert.ok(infos.some((x) => x.msg.includes('05 · Carrière/Employeurs') && x.msg.includes('2 document(s) mis à jour dans le catalogue')));
+});

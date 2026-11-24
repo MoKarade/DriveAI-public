@@ -1040,9 +1040,11 @@ var _etatsPorteursRun = {};
 var _nbVerifsPorteursRun = 0;
 var _idDoublonsRun;
 //  _indexLignesCache    : clé → n° de ligne de l'Index (dernière gagnante), posé avec la colonne A déjà lue (ADR-0071) ;
-//                         0 = ligne ajoutée dans ce run, numéro inconnu. _redepotMemoRun / _nbLecturesRedepotRun : résidents
-//                         de 00·À trier déjà jugés (Property, lue paresseusement) et lectures de ligne faites dans ce run
+//                         0 = ligne ajoutée dans ce run, numéro inconnu. _indexDerniereCleParFileId : fileId → dernière clé
+//                         connue (colonne A déjà lue, zéro lecture Sheet en plus). _redepotMemoRun / _nbLecturesRedepotRun :
+//                         résidents de 00·À trier déjà jugés (Property, lue paresseusement) et lectures faites dans ce run
 var _indexLignesCache = null;
+var _indexDerniereCleParFileId = null;
 var _redepotMemoRun = null;
 var _nbLecturesRedepotRun = 0;
 
@@ -1058,6 +1060,7 @@ function reinitialiserIndexCache_() {
   _nbVerifsPorteursRun = 0;
   _idDoublonsRun = undefined;
   _indexLignesCache = null;
+  _indexDerniereCleParFileId = null;
   _redepotMemoRun = null;
   _nbLecturesRedepotRun = 0;
 }
@@ -1147,6 +1150,7 @@ function chargerIndexCache_() {
   var empreintesCache = {};
   var empreintesParIdCache = {};
   var lignesCache = {};
+  var derniereCleParId = {};
   var f = feuille_('Index');
   // Auto-réparation : assure la colonne « Empreinte » (G) sur un Index existant.
   if (f.getRange(1, 7).getValue() !== 'Empreinte') f.getRange(1, 7).setValue('Empreinte');
@@ -1163,7 +1167,7 @@ function chargerIndexCache_() {
   var dern = f.getLastRow();
   if (dern < 2) {
     _indexCache = indexCache; _empreintesCache = empreintesCache; _empreintesParIdCache = empreintesParIdCache;
-    _indexLignesCache = lignesCache;
+    _indexLignesCache = lignesCache; _indexDerniereCleParFileId = derniereCleParId;
     return;
   }
   // PERF (Vague 2, anti-gel) : ce cache n'utilise QUE la colonne A (clé) et la colonne G (empreinte),
@@ -1174,7 +1178,13 @@ function chargerIndexCache_() {
   var cles = f.getRange(2, 1, dern - 1, 1).getValues();        // colonne A (clé)
   var empreintes = f.getRange(2, 7, dern - 1, 1).getValues();  // colonne G (empreinte)
   for (var i = 0; i < cles.length; i++) {
-    if (cles[i][0]) { indexCache[cles[i][0]] = true; lignesCache[cles[i][0]] = i + 2; } // dernière gagnante (ADR-0071)
+    var cleLigne = cles[i][0];
+    var fid = cleLigne ? fileIdDeCleIndex_(cleLigne) : '';
+    if (cleLigne) {
+      indexCache[cleLigne] = true;
+      lignesCache[cleLigne] = i + 2; // dernière gagnante (ADR-0071)
+      if (fid) derniereCleParId[fid] = String(cleLigne);
+    }
     if (!empreintes[i][0]) continue;
     empreintesCache[empreintes[i][0]] = true;
     // DERNIÈRE ligne gagnante (revue sécurité #229) : l'Index est append-only, donc l'ordre des
@@ -1188,13 +1198,25 @@ function chargerIndexCache_() {
     // pièces jointes Gmail est possible et ne coûterait qu'un aller-retour — mais ce cache n'est
     // qu'un RACCOURCI de performance (`empreinteConnueParId_` ; `Reset.gs` recalcule le hash en
     // repli), donc l'écart ne perd aucune donnée. Noté au BACKLOG plutôt que fait ici.
-    var fid = fileIdDeCleIndex_(cles[i][0]);
     if (fid) empreintesParIdCache[fid] = String(empreintes[i][0]);
   }
   _indexCache = indexCache;
   _empreintesCache = empreintesCache;
   _empreintesParIdCache = empreintesParIdCache;
   _indexLignesCache = lignesCache;
+  _indexDerniereCleParFileId = derniereCleParId;
+}
+
+/**
+ * Retourne la dernière clé d'Index connue associée à ce `fileId`, ou `''`.
+ * Réutilise la colonne A déjà lue par `chargerIndexCache_` (zéro lecture Sheet supplémentaire).
+ * @param {string} fileId
+ * @return {string}
+ */
+function derniereCleIndexPourFileId_(fileId) {
+  if (!fileId) return '';
+  if (_indexDerniereCleParFileId === null) chargerIndexCache_();
+  return _indexDerniereCleParFileId[fileId] || '';
 }
 
 /**
@@ -1416,6 +1438,10 @@ function indexAjouter_(cle, resultat, empreinte, trace) {
   ]);
   if (_indexCache !== null) _indexCache[cle] = true;
   if (_indexLignesCache !== null) _indexLignesCache[cle] = 0; // ADR-0071 : ligne ajoutée dans ce run, numéro non suivi
+  if (_indexDerniereCleParFileId !== null) {
+    var fidAjout = fileIdDeCleIndex_(cle);
+    if (fidAjout) _indexDerniereCleParFileId[fidAjout] = cle;
+  }
   if (_empreintesCache !== null && empreinte) _empreintesCache[empreinte] = true;
   if (_empreintesParIdCache !== null && empreinte) {
     // ⚠️ C49-16 — MIGRÉ : le fileId est en main trois lignes plus haut (`resultat.fileId`), donc
@@ -1446,7 +1472,10 @@ function purgerClesTriIndex_(threadId) {
     if (String(v[i][0]).indexOf(prefixe) === 0) lignes.push(i + 2);
   }
   for (var j = lignes.length - 1; j >= 0; j--) f.deleteRow(lignes[j]);
-  if (lignes.length > 0) _indexLignesCache = null;
+  if (lignes.length > 0) {
+    _indexLignesCache = null;
+    _indexDerniereCleParFileId = null;
+  }
   if (_indexCache !== null) {
     for (var k in _indexCache) { if (k.indexOf(prefixe) === 0) delete _indexCache[k]; }
   }
