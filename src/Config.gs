@@ -190,7 +190,7 @@ var CONFIG = {
   // 3 échecs datant d'une panne de compte sont des faux positifs — vécu : 32 fichiers de la
   // panne du 1ᵉʳ juillet sautés en silence pendant 6 jours). Le RÉTABLISSEMENT d'une panne
   // efface aussi la Property → re-déclenche tout seul après chaque panne. Bumper le tag rejoue.
-  DEQUARANTAINE_TAG: 'q1',
+  DEQUARANTAINE_TAG: 'q2', // 24/11/2026 : purge clés obsolètes + relance anciens drive| post-correctifs
 
   // Panne de COMPTE API persistée (R2, check-up 2026-07-06) : pendant une panne (crédit/clé), les
   // SOURCES du tick sont suspendues (Gmail/dépôts/partages/campagnes/tri) — sinon les scans

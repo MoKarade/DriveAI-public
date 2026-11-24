@@ -863,6 +863,10 @@ export interface Telemetrie {
   coutDollars: number | null;
   freinDollars: number | null; // « Frein campagnes à N $ » (Détail)
   appelsMois: number | null;
+  tickTempsJourMin: number | null;
+  tickPlafondJourMin: number | null;
+  rangementTempsJourMin: number | null;
+  rangementPlafondJourMin: number | null;
 }
 
 /** Extrait le nombre d'un Détail moteur (« Plafond 500/j », « Frein campagnes à 110 $ »). */
@@ -953,6 +957,9 @@ export function interpreterTelemetrie(brut: string[][]): Telemetrie {
     }
   }
 
+  const tickTemps = parCle['tick_temps_jour_min'];
+  const rangTemps = parCle['rangement_temps_jour_min'];
+
   return {
     presente: Object.keys(parCle).length > 0,
     quotaSuspendu: (quota?.[1] ?? '') === 'suspendu',
@@ -970,6 +977,10 @@ export function interpreterTelemetrie(brut: string[][]): Telemetrie {
     coutDollars: cout ? nombrePositifOuNull(cout[1]) : null,
     freinDollars: cout ? nombreDuDetail(cout[3] ?? '') : null,
     appelsMois: appels ? nombrePositifOuNull(appels[1]) : null,
+    tickTempsJourMin: tickTemps ? nombrePositifOuNull(tickTemps[1]) : null,
+    tickPlafondJourMin: tickTemps ? nombreDuDetail(tickTemps[3] ?? '') : null,
+    rangementTempsJourMin: rangTemps ? nombrePositifOuNull(rangTemps[1]) : null,
+    rangementPlafondJourMin: rangTemps ? nombreDuDetail(rangTemps[3] ?? '') : null,
   };
 }
 
@@ -1116,6 +1127,10 @@ export interface SyntheseEtat {
     coutMoisDollars: number | null;
     appelsMois: number | null;
     freinDollars: number | null;
+    tickTempsJourMin: number | null;
+    tickPlafondJourMin: number | null;
+    rangementTempsJourMin: number | null;
+    rangementPlafondJourMin: number | null;
     totalCouts: LigneCout | null;
     postes: LigneCout[];
   };
@@ -1292,6 +1307,10 @@ export function syntheseEtat(
         ? tele.appelsMois
         : (coutSante?.appels ?? null),
       freinDollars: tele.freinDollars,
+      tickTempsJourMin: tele.presente ? tele.tickTempsJourMin : null,
+      tickPlafondJourMin: tele.presente ? tele.tickPlafondJourMin : null,
+      rangementTempsJourMin: tele.presente ? tele.rangementTempsJourMin : null,
+      rangementPlafondJourMin: tele.presente ? tele.rangementPlafondJourMin : null,
       totalCouts: coutsResume.total,
       postes: coutsResume.postes,
     },

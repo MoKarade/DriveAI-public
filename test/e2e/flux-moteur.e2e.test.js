@@ -137,7 +137,7 @@ function creerWorkspaceE2E(opts) {
     DriveAI_FORM_ID: 'FICTIF_FORM_ID_01',
     DriveAI_ANTHROPIC_KEY: 'k',
     DriveAI_VERSION: 'P3.0',
-    DriveAI_DEQUARANTAINE: 'q1',
+    DriveAI_DEQUARANTAINE: 'q2',
     DriveAI_SEED_ENTITES: 'seed-1',
     DriveAI_CURATION_ENTITES: 'c2',
     DriveAI_NOMS_DOMAINES: 's1',

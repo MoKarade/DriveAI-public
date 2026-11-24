@@ -74,6 +74,39 @@ function dequarantainerLignes_(prefixe) {
   return lignes.length;
 }
 
+/**
+ * Vrai si une clé de l'onglet `Échecs` appartient à un module/tag retiré (`llm-intention|`,
+ * ancienne passe `reanalyse|c26-08|`). Ne touche jamais aux clés actives `drive|` ou `tri|`. PURE.
+ * @param {*} cle
+ * @return {boolean}
+ */
+function estCleEchecObsolete_(cle) {
+  var s = String(cle || '');
+  return /^llm-intention\|/.test(s) || /^reanalyse\|c26-08\|/.test(s);
+}
+
+/**
+ * Retire de l'onglet `Échecs` les lignes des clés obsolètes (ordre décroissant, zéro suppression Drive).
+ * @return {number} nombre de lignes retirées
+ */
+function purgerEchecsObsoletes_() {
+  var fe = feuille_('Échecs');
+  var dern = fe.getLastRow();
+  if (dern < 2) return 0;
+  var cles = fe.getRange(2, 1, dern - 1, 1).getValues();
+  var lignes = [];
+  for (var i = 0; i < cles.length; i++) {
+    if (estCleEchecObsolete_(cles[i][0])) lignes.push(i + 2);
+  }
+  lignes.sort(function (a, b) { return b - a; });
+  for (var j = 0; j < lignes.length; j++) fe.deleteRow(lignes[j]);
+  if (lignes.length > 0) {
+    reinitialiserIndexCache_();
+    journalInfo_('Maintenance', lignes.length + ' ancienne(s) erreur(s) obsolète(s) purgée(s) de Échecs.');
+  }
+  return lignes.length;
+}
+
 /* ============================================================================
  * GRAND RANGEMENT — réorganiser tout le contenu existant des domaines.
  * ==========================================================================*/
