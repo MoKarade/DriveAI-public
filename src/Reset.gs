@@ -2206,6 +2206,12 @@ function reorganiserInterne04_(fileId, tag, ctx) {
       catch (e) { journalErreur_('Reset', 'Retrait ancien parent 04 impossible (' + nom + ') : ' + e); }
     }
     deplace = true;
+    if (ancienParent && typeof enregistrerAction_ === 'function') {
+      enregistrerAction_('drive-deplacer', fileId,
+        { parentId: ancienParent.getId(), nom: nom },
+        { parentId: cibleId, nom: nom },
+        'reorg-interne-04');
+    }
   }
   indexAjouter_(cle, { statut: 'tri33-04-route', nom: nom, domaine: '04 · Immigration', chemin: '04 · Immigration/' + sousChemin }, '');
   if (ancienParent && ancienParent.getId() !== cibleId) {
@@ -2234,6 +2240,57 @@ function reorganiserPageInterne04_(estBudgetDepasse, ctx) {
     catch (e) { etat.complet = false; journalErreur_('Reset', '04 interne différé (' + ids[i] + ') : ' + e); }
   }
   return { examines: ids.length, deplaces: deplaces, complet: etat.complet };
+}
+
+/**
+ * Réorganisation interne autonome de `04 · Immigration` (ADR-0081, vague 4c).
+ * Exécute par lots bornés sous le frein budget 30 $ ; ne sort jamais de 04 et pose le tag
+ * de complétion uniquement lorsqu'une passe complète ne collecte plus rien.
+ * @param {function():boolean} estBudgetDepasse
+ * @return {boolean} vrai si au moins un fichier reste potentiellement à traiter
+ */
+function appliquerReorgInterne04Autonome_(estBudgetDepasse) {
+  if (!CONFIG.REORG_04_INTERNE_ACTIF) return false;
+  if (typeof budgetCampagnesAtteint_ === 'function' && budgetCampagnesAtteint_()) return false;
+  var budget = typeof estBudgetDepasse === 'function' ? estBudgetDepasse : function () { return false; };
+  if (budget()) return false;
+  if (typeof DriveApp === 'undefined' || typeof DriveApp.getFolderById !== 'function') return false;
+
+  var props = PropertiesService.getScriptProperties();
+  var tag = CONFIG.REORG_04_INTERNE_TAG || 'v4c-04';
+  if (props.getProperty('DriveAI_REORG_04_INTERNE') === tag) return false;
+
+  var racine;
+  try { racine = dossierRacine04Reset_(); }
+  catch (e) {
+    journalErreur_('Reset', 'Racine 04 illisible (reorg interne autonome) : ' + e);
+    return false;
+  }
+
+  var max = CONFIG.REORG_04_INTERNE_MAX_PAR_RUN || 10;
+  var ids = [];
+  var etat = { complet: true };
+  collecterInterne04Reset_(racine, ids, max, budget, tag, etat);
+
+  var deplaces = 0;
+  var ctx = { proteges: ensembleDomainesProteges_() };
+  for (var i = 0; i < ids.length; i++) {
+    if (budget()) { etat.complet = false; break; }
+    try { if (reorganiserInterne04_(ids[i], tag, ctx)) deplaces++; }
+    catch (e2) {
+      etat.complet = false;
+      journalErreur_('Reset', 'Réorg interne 04 différée (' + ids[i] + ') : ' + e2);
+    }
+  }
+  if (deplaces > 0) {
+    journalInfo_('Reset', deplaces + ' document(s) réorganisé(s) en interne dans 04 · Immigration (' + tag + ').');
+  }
+  if (etat.complet && ids.length === 0) {
+    props.setProperty('DriveAI_REORG_04_INTERNE', tag);
+    journalInfo_('Reset', 'Réorganisation interne 04 · Immigration terminée (' + tag + ').');
+    return false;
+  }
+  return !etat.complet || ids.length > 0;
 }
 
 /** ÉTAPE DE TICK : réorganisation interne de 04, gatée flag + budgets. */

@@ -952,6 +952,13 @@ var CONFIG = {
   // Ralloué depuis la marge de l'ADR-0074 (total reset-OFF : 12 + 8 = 20 min/j << mur ~90 min/j).
   REANALYSE_BUDGET_JOUR_MS: 8 * 60 * 1000,
 
+  // --- ADR-0081 §2.4 (vague 4c, 24/11/2026) : réorganisation INTERNE autonome de `04 · Immigration` ---
+  // Activé après audit lecture seule sur 20 documents réels (15/20 mieux rangés, 5 conservés en
+  // place, 0 sortie de 04, 0 erreur). Coupé au frein 30 $ ; chaque déplacement journalisé dans `Actions`.
+  REORG_04_INTERNE_ACTIF: true,
+  REORG_04_INTERNE_TAG: 'v4c-04',
+  REORG_04_INTERNE_MAX_PAR_RUN: 10,
+
   // --- C26-07 (ADR-0015) : PREUVE dry-run avant/après du pipeline v2, sur un échantillon RÉEL ---
   // Prérequis à la campagne C26-08 et à l'allumage de ANALYSE_V2. Interrupteur DÉDIÉ, distinct
   // d'ANALYSE_V2 : n'affecte JAMAIS le flux vivant (Haiku 1 passe reste actif tant qu'ANALYSE_V2
