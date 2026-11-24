@@ -553,7 +553,8 @@ var CONFIG = {
   EXT_TECHNIQUES: [
     '.java', '.class', '.jar', '.py', '.c', '.cpp', '.h', '.hpp', '.cs', '.go', '.rs', '.rb', '.php',
     '.sh', '.sql', '.m', '.ino', '.v', '.vhd',                         // code
-    '.step', '.stp', '.stl', '.igs', '.iges', '.dwg', '.dxf', '.obj', '.fbx', '.blend', '.sldprt', '.ipt' // CAO
+    '.step', '.stp', '.stl', '.igs', '.iges', '.dwg', '.dxf', '.obj', '.fbx', '.blend', '.sldprt', '.ipt', // CAO
+    '.pack', '.rev', '.idx', '.sample', '.lock', '.bin', '.o', '.so', '.dll', '.pyc' // binaires & dépôts Git
   ],
 
   // --- Chantier #11 : MÉDIAS BRUTS (ADR-0009 §2, `_Médias` hors domaines) ---
