@@ -19,7 +19,7 @@
 | `Agenda.gs` | Rappels d'échéance automatiques dans Google Agenda (`CalendarApp`, idempotence `Index`, journal `Actions`, ADR-0081) |
 | `DossiersVie.gs` | Carte en mémoire des dossiers de vie existants et journalisation des liens mails ↔ Drive (`Liens`, ADR-0081) |
 | `Intake.gs` | Source 2 : dépôt manuel `00 · À trier` (déplacement) |
-| `VeilleDrive.gs` | Veille automatique racine `Mon Drive` + nouveaux dépôts non classés (hors `Anna`, `Marc`, `04`) |
+| `VeilleDrive.gs` | Veille automatique racine `Mon Drive`, suivi direct Changes API v3 et nouveaux dépôts (hors `Anna`, `Marc`, `04`) |
 | `Partages.gs` | Source 3 : fichiers partagés récents (copie, ADR-0005) |
 | `Migration.gs` | Campagne de re-classement de l'existant (#8, gatée par tag) |
 | `Ocr.gs` | Extraction de texte (conversion Drive + OCR, REST) |

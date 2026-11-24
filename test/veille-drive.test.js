@@ -166,3 +166,151 @@ test('VeilleDrive : respecte VEILLE_DRIVE_ACTIF=false, MAX_PAR_RUN et budget tem
   assert.strictEqual(borne.c.veillerDrive_(() => false), 2);
   assert.strictEqual(borne.c.veillerDrive_(() => true), 0);
 });
+
+test('VeilleDrive Changes API : prédicats purs ignorables et zones ignorées', () => {
+  const c = load(['Config.gs', 'Reset.gs', 'VeilleDrive.gs']);
+  assert.strictEqual(c.estChangementDriveIgnorable_(null, {}), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ removed: true, file: { id: '1', name: 'a.pdf' } }, {}), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ file: { id: 'S1', name: 'doc.pdf' } }, { S1: true }), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ file: { id: '1', name: 'lien', mimeType: 'application/vnd.google-apps.shortcut' } }, {}), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ file: { id: '1', name: 'DriveAI', mimeType: 'application/vnd.google-apps.script' } }, {}), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ file: { id: '1', name: 'driveai-profil-prive.json', mimeType: 'application/json' } }, {}), true);
+  assert.strictEqual(c.estChangementDriveIgnorable_({ file: { id: '1', name: 'Reçu.pdf', mimeType: 'application/pdf' } }, {}), false);
+
+  assert.strictEqual(c.estSousZoneIgnoreeVeille_(['Mon Drive', 'Anna', 'Perso']), true);
+  assert.strictEqual(c.estSousZoneIgnoreeVeille_(['Marc', '04 · Immigration', 'MIFI']), true);
+  assert.strictEqual(c.estSousZoneIgnoreeVeille_(['Marc', '08 · Perso & projets', 'Données & exports', 'Takeout']), true);
+  assert.strictEqual(c.estSousZoneIgnoreeVeille_(['Marc', '02 · Finances', '2026']), false);
+});
+
+test('VeilleDrive Changes API : initialisation jeton, détection déplacement Marc, nouveau dépôt sous-dossier et erreur HTTP', () => {
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_MARC', { id: 'FICTIF_MARC', name: 'Marc', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_ANNA', { id: 'FICTIF_ANNA', name: 'Anna', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_DOSSIERS_A_TRIER', { id: 'FICTIF_DOSSIERS_A_TRIER', name: '00 · À trier', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_D02', { id: 'FICTIF_D02', name: '02 · Finances', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_D02_SUB', { id: 'FICTIF_D02_SUB', name: 'Banque', parents: ['FICTIF_D02'] }],
+    ['FICTIF_D04', { id: 'FICTIF_D04', name: '04 · Immigration', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_TECH', { id: 'FICTIF_TECH', name: '_Technique', parents: ['FICTIF_MARC'] }],
+  ]);
+  const files = new Map([
+    ['f_idx_marc', { id: 'f_idx_marc', name: '2026-03-01_Releve_Banque.pdf', mimeType: 'application/pdf', parents: ['FICTIF_D02_SUB'], trashed: false }],
+    ['f_idx_moteur', { id: 'f_idx_moteur', name: '2026-04-01_Facture.pdf', mimeType: 'application/pdf', parents: ['FICTIF_D02'], trashed: false }],
+    ['f_new_sub', { id: 'f_new_sub', name: 'ScanRecu.pdf', mimeType: 'application/pdf', parents: ['FICTIF_D02_SUB'], trashed: false }],
+    ['f_anna', { id: 'f_anna', name: 'PersoAnna.pdf', mimeType: 'application/pdf', parents: ['FICTIF_ANNA'], trashed: false }],
+    ['f_04', { id: 'f_04', name: 'Permis.pdf', mimeType: 'application/pdf', parents: ['FICTIF_D04'], trashed: false }],
+  ]);
+  const props = new Map();
+  const ajoutsIndex = [];
+  const actions = [];
+  const infos = [];
+  const erreurs = [];
+  let modeHttp = 'ok';
+  let changementsPage = [];
+
+  const iter = (arr) => {
+    let i = 0;
+    return { hasNext: () => i < arr.length, next: () => arr[i++] };
+  };
+  const foldW = (id) => {
+    const d = folders.get(id);
+    if (!d) throw new Error('Absent ' + id);
+    return {
+      getId: () => d.id,
+      getName: () => d.name,
+      getParents: () => iter(d.parents.map(foldW)),
+      getFiles: () => iter([]),
+      getFolders: () => iter([]),
+      getFoldersByName: () => iter([]),
+      moveTo: (dest) => { d.parents = [dest.getId()]; },
+    };
+  };
+  const fileW = (id) => {
+    const f = files.get(id);
+    if (!f) throw new Error('Fichier absent ' + id);
+    return {
+      getId: () => f.id,
+      getName: () => f.name,
+      getMimeType: () => f.mimeType,
+      isTrashed: () => f.trashed,
+      getParents: () => iter(f.parents.map(foldW)),
+      moveTo: (dest) => { f.parents = [dest.getId()]; },
+    };
+  };
+  const httpRep = (code, obj) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(obj) });
+
+  const c = load(['Config.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: (url) => {
+        if (String(url).includes('startPageToken')) return httpRep(200, { startPageToken: '100' });
+        if (modeHttp === 'err') return httpRep(500, { error: { message: 'boom' } });
+        return httpRep(200, { changes: changementsPage, newStartPageToken: '101' });
+      },
+    },
+    DriveApp: {
+      getRootFolder: () => foldW('FICTIF_ROOT'),
+      getFolderById: (id) => foldW(id),
+      getFileById: (id) => fileW(id),
+    },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+
+  const indexLignes = {
+    'drive|f_idx_marc': { cle: 'drive|f_idx_marc', nom: '2026-03-01_Releve_Banque.pdf', chemin: '02 · Finances', statut: 'classé' },
+    'drive|f_idx_moteur': { cle: 'drive|f_idx_moteur', nom: '2026-04-01_Facture.pdf', chemin: '02 · Finances', statut: 'classé' },
+  };
+  c.indexContient_ = (k) => Boolean(indexLignes[k] || ajoutsIndex.some((x) => x.cle === k));
+  c.lireLigneIndex_ = (k) => indexLignes[k] || null;
+  c.indexAjouter_ = (cle, meta) => { ajoutsIndex.push({ cle, meta }); };
+  c.enregistrerAction_ = (type, cible, avant, apres, detail) => { actions.push({ type, cible, detail }); return 'act-1'; };
+  c.journalInfo_ = (src, msg) => infos.push({ src, msg });
+  c.journalErreur_ = (src, msg) => erreurs.push({ src, msg });
+  c.constaterEtatDrive_ = (fid) => {
+    const f = files.get(fid);
+    return fid === 'f_idx_marc'
+      ? { existe: true, corbeille: false, nom: f.name, chemin: '02 · Finances / Banque' }
+      : { existe: true, corbeille: false, nom: f.name, chemin: '02 · Finances' };
+  };
+  c.decisionSyncIndex_ = (ligne, constat) => (ligne.chemin !== constat.chemin ? { statut: 'déplacé', nom: constat.nom, chemin: constat.chemin } : null);
+  c.dossierExportsVeille_ = () => foldW('FICTIF_TECH');
+  c.dossierTechnique_ = () => foldW('FICTIF_TECH');
+
+  // 1) Premier appel : initialise startPageToken sans rejouer
+  assert.strictEqual(c.veillerDrive_(() => false), 0);
+  assert.strictEqual(props.get('DriveAI_CHANGES_TOKEN'), '100');
+  assert.ok(infos.some((x) => x.msg.includes('initialisé')));
+
+  // 2) Deuxième appel sur erreur HTTP 500 : jeton préservé à '100'
+  modeHttp = 'err';
+  c.veillerDrive_(() => false);
+  assert.strictEqual(props.get('DriveAI_CHANGES_TOKEN'), '100', 'jeton jamais avancé sur échec HTTP');
+  assert.ok(erreurs.some((x) => x.msg.includes('changes.list HTTP 500')));
+
+  // 3) Troisième appel OK : traite déplacement Marc (+ épingle), ignore déplacement moteur identique, envoie f_new_sub → À trier, ignore Anna et 04
+  modeHttp = 'ok';
+  changementsPage = [
+    { fileId: 'f_idx_marc', file: { id: 'f_idx_marc', name: '2026-03-01_Releve_Banque.pdf', mimeType: 'application/pdf', trashed: false } },
+    { fileId: 'f_idx_moteur', file: { id: 'f_idx_moteur', name: '2026-04-01_Facture.pdf', mimeType: 'application/pdf', trashed: false } },
+    { fileId: 'f_new_sub', file: { id: 'f_new_sub', name: 'ScanRecu.pdf', mimeType: 'application/pdf', trashed: false } },
+    { fileId: 'f_anna', file: { id: 'f_anna', name: 'PersoAnna.pdf', mimeType: 'application/pdf', trashed: false } },
+    { fileId: 'f_04', file: { id: 'f_04', name: 'Permis.pdf', mimeType: 'application/pdf', trashed: false } },
+  ];
+  const n = c.veillerDrive_(() => false);
+  assert.strictEqual(n, 1, 'seul f_new_sub est déplacé vers 00 · À trier');
+  assert.strictEqual(props.get('DriveAI_CHANGES_TOKEN'), '101');
+  assert.deepStrictEqual(files.get('f_new_sub').parents, ['FICTIF_DOSSIERS_A_TRIER']);
+  assert.deepStrictEqual(files.get('f_anna').parents, ['FICTIF_ANNA']);
+  assert.deepStrictEqual(files.get('f_04').parents, ['FICTIF_D04']);
+  assert.ok(ajoutsIndex.some((x) => x.cle === 'drive|f_idx_marc' && x.meta.statut === 'déplacé'));
+  assert.ok(ajoutsIndex.some((x) => x.cle === 'epingle|f_idx_marc' && x.meta.statut === 'épinglé'));
+  assert.ok(!ajoutsIndex.some((x) => x.cle === 'epingle|f_idx_moteur'));
+  assert.strictEqual(actions.length, 1);
+});

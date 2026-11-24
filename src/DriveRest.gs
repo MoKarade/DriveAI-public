@@ -213,3 +213,64 @@ function raccourciExiste_(cibleId, parentId) {
   } catch (e) { /* au moindre doute : false → création (un doublon de raccourci est bénin) */ }
   return false;
 }
+
+/**
+ * Obtient le jeton de départ du journal des changements Drive (`changes/startPageToken`).
+ * @return {string} jeton de départ, ou `''` en cas d'erreur
+ */
+function obtenirJetonChangementsDrive_() {
+  try {
+    var url = 'https://www.googleapis.com/drive/v3/changes/startPageToken?supportsAllDrives=false';
+    var rep = fetchDriveAvecRetry_(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + jetonDrive_() },
+      muteHttpExceptions: true
+    });
+    if (rep.getResponseCode() !== 200) {
+      journalErreur_('Drive', 'startPageToken HTTP ' + rep.getResponseCode() + ' : ' + String(rep.getContentText() || '').slice(0, 200));
+      return '';
+    }
+    var json = JSON.parse(rep.getContentText() || '{}');
+    return String(json.startPageToken || '');
+  } catch (e) {
+    journalErreur_('Drive', 'startPageToken impossible : ' + e);
+    return '';
+  }
+}
+
+/**
+ * Liste une page du journal des changements Drive depuis `pageToken`.
+ * @param {string} pageToken
+ * @param {number=} pageSize
+ * @return {{ok:boolean, changes:Array, nextPageToken:string, newStartPageToken:string}}
+ */
+function listerChangementsDrive_(pageToken, pageSize) {
+  var vide = { ok: false, changes: [], nextPageToken: '', newStartPageToken: '' };
+  if (!pageToken) return vide;
+  try {
+    var taille = Number(pageSize) > 0 ? Math.min(100, Math.round(Number(pageSize))) : 50;
+    var fields = 'nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,trashed,parents))';
+    var url = 'https://www.googleapis.com/drive/v3/changes?pageToken=' + encodeURIComponent(String(pageToken)) +
+      '&pageSize=' + taille + '&spaces=drive&includeItemsFromAllDrives=false&supportsAllDrives=false' +
+      '&fields=' + encodeURIComponent(fields);
+    var rep = fetchDriveAvecRetry_(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + jetonDrive_() },
+      muteHttpExceptions: true
+    });
+    if (rep.getResponseCode() !== 200) {
+      journalErreur_('Drive', 'changes.list HTTP ' + rep.getResponseCode() + ' : ' + String(rep.getContentText() || '').slice(0, 200));
+      return vide;
+    }
+    var json = JSON.parse(rep.getContentText() || '{}');
+    return {
+      ok: true,
+      changes: Array.isArray(json.changes) ? json.changes : [],
+      nextPageToken: String(json.nextPageToken || ''),
+      newStartPageToken: String(json.newStartPageToken || '')
+    };
+  } catch (e) {
+    journalErreur_('Drive', 'changes.list impossible : ' + e);
+    return vide;
+  }
+}

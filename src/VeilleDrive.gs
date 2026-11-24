@@ -49,6 +49,185 @@ function estFichierNouveauAClasserVeille_(nom, id, dejaIndexe, epingle) {
   return !/^\d{4}-\d{2}-\d{2}_/.test(String(nom || '').trim());
 }
 
+/** Vrai si une entrée de `changes.list` est à ignorer d'emblée (retirée, raccourci, script, système). PURE. */
+function estChangementDriveIgnorable_(ch, idsIgnores) {
+  if (!ch || ch.removed || !ch.file || !ch.file.id) return true;
+  if (idsIgnores && idsIgnores[ch.file.id]) return true;
+  var mime = String(ch.file.mimeType || '');
+  if (mime === 'application/vnd.google-apps.shortcut' || mime === 'application/vnd.google-apps.script') return true;
+  return estFichierExcluVeille_(ch.file.name);
+}
+
+/** Vrai si un ancêtre appartient à une zone jamais touchée ni ré-aspirée vers `00 · À trier`. PURE. */
+function estSousZoneIgnoreeVeille_(nomsAncetres) {
+  var zones = {
+    'anna': true,
+    '04 · immigration': true,
+    '_technique': true,
+    '_doublons': true,
+    '_médias': true,
+    '00 · à trier': true,
+    '00 · à vérifier': true,
+    'données & exports': true
+  };
+  var liste = nomsAncetres || [];
+  for (var i = 0; i < liste.length; i++) {
+    var k = String(liste[i] || '').trim().toLowerCase();
+    if (zones[k]) return true;
+  }
+  return false;
+}
+
+function nomsAncetresItemVeille_(item) {
+  var noms = [];
+  var vus = {};
+  try {
+    var pile = [];
+    var it = item.getParents();
+    while (it.hasNext()) pile.push(it.next());
+    var pas = 0;
+    while (pile.length && pas < 20) {
+      pas++;
+      var d = pile.shift();
+      var did = d.getId();
+      if (vus[did]) continue;
+      vus[did] = true;
+      noms.push(d.getName());
+      var ps = d.getParents();
+      while (ps.hasNext()) pile.push(ps.next());
+    }
+  } catch (e) { }
+  return noms;
+}
+
+function idsIgnoresChangementsVeille_() {
+  var set = {};
+  if (typeof CONFIG === 'undefined') return set;
+  if (CONFIG.SHEET_ID) set[CONFIG.SHEET_ID] = true;
+  if (CONFIG.DOSSIERS) {
+    if (CONFIG.DOSSIERS.A_TRIER) set[CONFIG.DOSSIERS.A_TRIER] = true;
+    if (CONFIG.DOSSIERS.A_VERIFIER) set[CONFIG.DOSSIERS.A_VERIFIER] = true;
+  }
+  return set;
+}
+
+/**
+ * Suivi direct des changements Drive via Changes API v3 (jamais bloquant, jeton avancé après succès).
+ * @return {number} nombre d'éléments déplacés
+ */
+function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, garde) {
+  if (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_CHANGES_ACTIF === false) return 0;
+  if (typeof fetchDriveAvecRetry_ !== 'function' || typeof obtenirJetonChangementsDrive_ !== 'function' ||
+      typeof listerChangementsDrive_ !== 'function') return 0;
+  if (typeof UrlFetchApp === 'undefined' || typeof PropertiesService === 'undefined') return 0;
+
+  var props = PropertiesService.getScriptProperties();
+  var token = String(props.getProperty('DriveAI_CHANGES_TOKEN') || '');
+  if (!token) {
+    var initial = obtenirJetonChangementsDrive_();
+    if (initial) {
+      props.setProperty('DriveAI_CHANGES_TOKEN', initial);
+      try { journalInfo_('VeilleDrive', 'Suivi direct des changements Drive initialisé (jeton actif).'); } catch (e) { }
+    }
+    return 0;
+  }
+
+  var idsIgnores = idsIgnoresChangementsVeille_();
+  var exclusSup = (typeof CONFIG !== 'undefined' && CONFIG.VEILLE_DRIVE_EXCLUS) || [];
+  var racineId = racineDrive.getId();
+  var deplaces = 0;
+
+  for (var page = 0; page < 2 && deplaces < maxRestant && !garde(); page++) {
+    var rep = listerChangementsDrive_(token, 50);
+    if (!rep.ok) break;
+    var liste = rep.changes || [];
+    for (var i = 0; i < liste.length && deplaces < maxRestant && !garde(); i++) {
+      var ch = liste[i];
+      if (estChangementDriveIgnorable_(ch, idsIgnores)) continue;
+      var meta = ch.file;
+      var fid = String(meta.id);
+      var cleIndex = 'drive|' + fid;
+      var dejaIndexe = typeof indexContient_ === 'function' && indexContient_(cleIndex);
+
+      if (dejaIndexe) {
+        if (typeof lireLigneIndex_ === 'function' && typeof constaterEtatDrive_ === 'function' &&
+            typeof decisionSyncIndex_ === 'function') {
+          var lig = lireLigneIndex_(cleIndex);
+          if (lig) {
+            var constat = constaterEtatDrive_(fid);
+            var dec = decisionSyncIndex_({ nom: lig.nom, chemin: lig.chemin, statut: lig.statut }, constat);
+            if (dec) {
+              indexAjouter_(cleIndex, dec);
+              if (dec.statut === 'déplacé' && !indexContient_('epingle|' + fid) &&
+                  String(dec.chemin || '').indexOf('00 · À trier') !== 0) {
+                indexAjouter_('epingle|' + fid, {
+                  statut: 'épinglé',
+                  nom: constat.nom || lig.nom,
+                  domaine: '',
+                  chemin: dec.chemin || ''
+                });
+              }
+              try {
+                journalInfo_('VeilleDrive', 'Changement direct détecté : ' + (constat.nom || fid) + ' → ' + (dec.chemin || dec.statut));
+              } catch (eLog) { }
+            }
+          }
+        }
+        continue;
+      }
+
+      if (meta.trashed) continue;
+
+      if (meta.mimeType === 'application/vnd.google-apps.folder') {
+        var parentsMeta = Array.isArray(meta.parents) ? meta.parents : [];
+        if (parentsMeta.indexOf(racineId) !== -1) {
+          var cibleType = cibleDossierRacineVeille_(meta.name, exclusSup);
+          if (cibleType) {
+            var dest = cibleType === 'exports'
+              ? dossierExportsVeille_()
+              : (typeof dossierTechnique_ === 'function' ? dossierTechnique_() : null);
+            if (dest) {
+              try {
+                if (deplacerObjetVeille_(DriveApp.getFolderById(fid), dest, true, 'Veille directe racine (' + cibleType + ')')) deplaces++;
+              } catch (eDir) { journaliserErreurVeille_('Dossier change inaccessible', eDir); }
+            }
+            continue;
+          }
+        }
+        if (!estDossierExcluRacineVeille_(meta.name, exclusSup)) {
+          try {
+            var dirObj = DriveApp.getFolderById(fid);
+            if (!estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(dirObj))) {
+              journalInfo_('VeilleDrive', 'Dossier modifié détecté : ' + meta.name);
+            }
+          } catch (eInfoDir) { }
+        }
+        continue;
+      }
+
+      var epingle = typeof indexContient_ === 'function' && indexContient_('epingle|' + fid);
+      if (!estFichierNouveauAClasserVeille_(meta.name, fid, false, epingle)) continue;
+      try {
+        var fObj = DriveApp.getFileById(fid);
+        if (proteges && typeof aParentProtege_ === 'function' && aParentProtege_(fObj, proteges, true)) continue;
+        if (estSousZoneIgnoreeVeille_(nomsAncetresItemVeille_(fObj))) continue;
+        if (deplacerObjetVeille_(fObj, aTrier, false, 'Veille directe changement → 00 · À trier')) deplaces++;
+      } catch (eFich) {
+        journaliserErreurVeille_('Fichier change inaccessible', eFich);
+      }
+    }
+
+    var prochain = rep.nextPageToken || rep.newStartPageToken;
+    if (prochain && prochain !== token) {
+      token = prochain;
+      try { props.setProperty('DriveAI_CHANGES_TOKEN', token); } catch (eProp) { }
+    }
+    if (!rep.nextPageToken) break;
+  }
+
+  return deplaces;
+}
+
 function journaliserErreurVeille_(contexte, err) {
   if (_veilleErreurSignaleeRun) return;
   _veilleErreurSignaleeRun = true;
@@ -171,6 +350,12 @@ function veillerDrive_(estBudgetDepasse) {
   var racineDrive = DriveApp.getRootFolder();
   var proteges = typeof ensembleDomainesProteges_ === 'function' ? ensembleDomainesProteges_() : {};
   var deplaces = 0;
+
+  try {
+    deplaces += suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRun - deplaces, garde);
+  } catch (eChanges) {
+    journaliserErreurVeille_('Suivi direct des changements impossible', eChanges);
+  }
 
   deplaces += deplacerFichiersLibresDossierVeille_(
     racineDrive, aTrier, proteges, maxRun - deplaces, garde, false, 'Veille racine Mon Drive → 00 · À trier'
