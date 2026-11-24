@@ -261,6 +261,49 @@ function validerTickMinutes_(v) {
   return (n === 5 || n === 10 || n === 15 || n === 30) ? n : null;
 }
 
+/** Date du jour au format `AAAA/MM/JJ` pour les budgets quotidiens en Properties. */
+function budgetJourDate_() {
+  return typeof dateGmail_ === 'function'
+    ? dateGmail_(new Date())
+    : new Date().toISOString().slice(0, 10).replace(/-/g, '/');
+}
+
+/** Lit un budget quotidien `AAAA/MM/JJ|ms` persisté en Script Property. PURE. */
+function lireBudgetMsJour_(props, cleProp, aujourdhui) {
+  if (!props || !cleProp || !aujourdhui) return 0;
+  try {
+    var brut = String(props.getProperty(cleProp) || '');
+    var sep = brut.indexOf('|');
+    if (sep === -1 || brut.slice(0, sep) !== aujourdhui) return 0;
+    var n = Number(brut.slice(sep + 1));
+    return isFinite(n) && n > 0 ? n : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/** Cumule `deltaMs` (> 0 fini) dans `AAAA/MM/JJ|ms` en Script Property (reset auto à minuit). */
+function ajouterBudgetMsJour_(props, cleProp, aujourdhui, deltaMs) {
+  if (!props || !cleProp || !aujourdhui) return 0;
+  var delta = Number(deltaMs);
+  if (!isFinite(delta) || delta <= 0) return lireBudgetMsJour_(props, cleProp, aujourdhui);
+  var total = lireBudgetMsJour_(props, cleProp, aujourdhui) + Math.round(delta);
+  try { props.setProperty(cleProp, aujourdhui + '|' + total); } catch (e) { /* best-effort */ }
+  return total;
+}
+
+/** Vrai si le temps cumulé de la journée approche du mur Google 90 min/j (filet doux 78 min/j). PURE. */
+function estQuotaTickJourAtteint_(msJour, plafondMs) {
+  var limite = Number(plafondMs) > 0 ? Number(plafondMs) : 78 * 60000;
+  return Number(msJour) >= limite;
+}
+
+/** Vrai si le grand rangement a consommé son enveloppe quotidienne (60 min/j par défaut). PURE. */
+function estBudgetRangementJourAtteint_(msJour, plafondMs) {
+  var limite = Number(plafondMs) > 0 ? Number(plafondMs) : 60 * 60000;
+  return Number(msJour) >= limite;
+}
+
 /** Un passage du pipeline : Gmail + dépôts + partagés (+ migration, importance des mails, tri) → tout est CLASSÉ (plus de revue depuis 2026-07-01). */
 function tickDriveAI() {
   // ÉCHEC FERMÉ (#497) : sans le profil privé, `CONFIG` ne porte que des identifiants FICTIFS — le
@@ -350,6 +393,16 @@ function tickDriveAI() {
     // Flux Gmail (intake-gmail, tri-gmail) : quota journalier épuisé → l'étape sort en silence.
     // Sans gate elle s'enregistrait « ok » et la ligne Progression restait « en cours » (DriveAI#804).
     var gPanneGmail = function () { return estPanneGmail_() ? 'quota Gmail épuisé' : null; };
+    var jourBudget = budgetJourDate_();
+    var propsBudget = PropertiesService.getScriptProperties();
+    var msTickJour = lireBudgetMsJour_(propsBudget, 'DriveAI_TICK_JOUR_MS', jourBudget);
+    var msRangJour = lireBudgetMsJour_(propsBudget, 'DriveAI_RANGEMENT_JOUR_MS', jourBudget);
+    var gQuotaJour = function () {
+      return estQuotaTickJourAtteint_(msTickJour, CONFIG.TICK_PLAFOND_JOUR_MS) ? 'quota jour Google' : null;
+    };
+    var gRangementJour = function () {
+      return estBudgetRangementJourAtteint_(msRangJour, CONFIG.RANGEMENT_PLAFOND_JOUR_MS) ? 'plafond jour atteint' : null;
+    };
 
     // Auto-rejeu sur nouvelle version du classement : renvoie les DÉPÔTS partis en revue vers
     // 00·À trier pour reclassement. SECONDAIRE → enveloppé : un échec ne doit JAMAIS bloquer
@@ -438,6 +491,8 @@ function tickDriveAI() {
     // fini — sinon on itérerait jusqu'à 40 fichiers de 00·À trier à chaque tick pour rien, à vie.
     etapeSuivie_('rangement', [
       gBudgetTick,
+      gQuotaJour,
+      gRangementJour,
       function () { return estPannePlateforme_() ? 'panne API (compte)' : null; },
       function () { return rangementTermine_() ? 'campagne terminée' : null; },
       gFreinCampagnes,
@@ -446,7 +501,15 @@ function tickDriveAI() {
         return nbFichiersATrier_(CONFIG.RANGEMENT_SEUIL_FILE) < CONFIG.RANGEMENT_SEUIL_FILE
           ? null : 'file 00·À trier pleine';
       },
-    ], function () { appliquerRangementInitial_(estBudgetDepasse); },
+    ], function () {
+      var debutRang = Date.now();
+      var plafondTickRang = CONFIG.RANGEMENT_PLAFOND_TICK_MS || 90000;
+      var estBudgetRangement = function () {
+        return estBudgetDepasse() || (Date.now() - debutRang >= plafondTickRang);
+      };
+      try { appliquerRangementInitial_(estBudgetRangement); }
+      finally { ajouterBudgetMsJour_(propsBudget, 'DriveAI_RANGEMENT_JOUR_MS', jourBudget, Date.now() - debutRang); }
+    },
       function (e) { journalErreur_('Rangement', 'Grand rangement différé : ' + e); });
 
     // INTAKE : draine la file (dépôts manuels + sortie du grand rangement) et les PJ Gmail.
@@ -644,7 +707,7 @@ function tickDriveAI() {
       }
     } catch (e) { journalErreur_('ResolutionFileId', 'Résolution des identifiants différée : ' + e); }
 
-    etapeSuivie_('histo-gmail', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+    etapeSuivie_('histo-gmail', [gQuotaJour, gBudgetTick, gFreinCampagnes, gResetEnCours],
       function () { traiterGmailHistorique_(estBudgetDepasse); },
       function (e) {
         if (!signalerPanneGmail_(e)) journalErreur_('Gmail', 'Campagne historique différée : ' + e);
@@ -654,7 +717,7 @@ function tickDriveAI() {
     // taxonomie, EN PLACE, une page par tick. APRÈS l'intake (le flux vivant garde la priorité),
     // AVANT l'analyse des mails (la précision documentaire prime, cap produit ADR-0001). Campagne finie
     // → 1 Property lue, coût nul. ENVELOPPÉE : un échec ne doit jamais bloquer la suite du tick.
-    etapeSuivie_('migration', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+    etapeSuivie_('migration', [gQuotaJour, gBudgetTick, gFreinCampagnes, gResetEnCours],
       function () { appliquerMigrationTaxonomie_(estBudgetDepasse); },
       function (e) { journalErreur_('Migration', 'Migration taxonomie différée : ' + e); });
 
@@ -662,7 +725,7 @@ function tickDriveAI() {
     // (REANALYSE_CIBLES : `06` seul depuis ADR-0056, et à la RACINE du domaine) au pipeline v2, EN PLACE, une page par tick. Ne démarre qu'après
     // la FIN de m1 (une seule campagne de masse à la fois — garde dans appliquerReanalyseCiblee_).
     // Même famille que la migration : après l'intake, gatée par le frein budget, enveloppée.
-    etapeSuivie_('reanalyse', [gBudgetTick, gFreinCampagnes, gResetEnCours],
+    etapeSuivie_('reanalyse', [gQuotaJour, gBudgetTick, gFreinCampagnes, gResetEnCours],
       function () { appliquerReanalyseCiblee_(estBudgetDepasseDoc); },
       function (e) { journalErreur_('Réanalyse', 'Re-analyse ciblée différée : ' + e); });
 
@@ -703,7 +766,7 @@ function tickDriveAI() {
     // renommages de dossiers, re-vérif zone protégée par mutation — jamais de suppression), PUIS
     // propose un nouveau plan si demandé (drainer avant d'alimenter). Tout en DERNIER (à la
     // demande, jamais prioritaire sur l'intake), budget-gaté, enveloppé.
-    etapeSuivie_('reorg', [gBudgetTick], function () { etapeReorg_(estBudgetDepasse); },
+    etapeSuivie_('reorg', [gQuotaJour, gBudgetTick], function () { etapeReorg_(estBudgetDepasse); },
       function (e) { journalErreur_('Reorg', 'Étape réorg différée : ' + e); });
 
     // (Campagne de réorg AUTOMATIQUE C28-32/ADR-0029 : ABROGÉE par l'ADR-0031 — décision Marc
@@ -724,7 +787,7 @@ function tickDriveAI() {
     // d'afficher un état faux. Aucun invariant cassé : `indexContient_` teste la PRÉSENCE d'une clé,
     // jamais son statut (aucun re-traitement possible), curseur persistant + Index append-only ⇒ la
     // dette se rattrape intégralement à la reprise (campagne perpétuelle, rien ne se perd).
-    etapeSuivie_('reconciliation-index', [gBudgetTick, gResetEnCours],
+    etapeSuivie_('reconciliation-index', [gQuotaJour, gBudgetTick, gResetEnCours],
       function () { synchroniserIndex_(estBudgetDepasse); },
       function (e) { journalErreur_('Maintenance', 'Réconciliation Index différée : ' + e); });
 
@@ -756,6 +819,11 @@ function tickDriveAI() {
       // unique, robuste ; un échec ici ne doit rien casser (enveloppé).
       try { PropertiesService.getScriptProperties().setProperty('DriveAI_LAST_TICK', String(Date.now())); }
       catch (e) { /* écriture Property impossible : rien de plus à faire */ }
+      try {
+        if (typeof debut === 'number') {
+          ajouterBudgetMsJour_(propsBudget, 'DriveAI_TICK_JOUR_MS', jourBudget, Date.now() - debut);
+        }
+      } catch (e) { /* cumul quotidien best-effort */ }
       // Observabilité anti-gel (Vague 2) : trace la DURÉE totale du tick au plus 1×/h. Le « socle »
       // (relectures Index/Journal, campagnes) n'est budgété par rien ; s'il dérive vers le mur runtime
       // ~90 min/j (×288 ticks), c'est INVISIBLE aujourd'hui jusqu'au gel. Cette trace horaire le rend
