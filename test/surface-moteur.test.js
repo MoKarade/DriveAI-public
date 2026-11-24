@@ -80,7 +80,8 @@ const CONTRAT = [
   'actionPasSuspect_', 'validerThreadId_',
   // fenêtre des mails récents (porte `ancien` du verdict « à traiter », ADR-0075/0076 ; héritée de C28-24)
   'joursFenetreIntentions_', 'estHorsFenetreIntentions_',
-  'traiterDepots_', 'ordonnerDepots_', 'veillerDrive_', 'collecterPartages_', 'appliquerMigrationTaxonomie_',
+  'traiterDepots_', 'ordonnerDepots_', 'veillerDrive_', 'suivreChangementsDrive_', 'collecterPartages_', 'appliquerMigrationTaxonomie_',
+  'obtenirJetonChangementsDrive_', 'listerChangementsDrive_',
   // re-analyse v2 ciblée (C26-08, ADR-0018)
   'estAReanalyser_', 'appliquerReanalyseCiblee_', 'reanalyserUnePage_', 'collecterAReanalyser_',
   'reanalyserFichier_',

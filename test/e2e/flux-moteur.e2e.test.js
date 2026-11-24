@@ -877,6 +877,17 @@ function creerWorkspaceE2E(opts) {
           return reponseHttp(200, { storageQuota: hooks.storageQuota });
         }
 
+        // 3b) Drive Changes API v3 (suivi direct VeilleDrive)
+        if (String(url).startsWith('https://www.googleapis.com/drive/v3/changes/startPageToken')) {
+          return reponseHttp(200, { startPageToken: hooks.changesStartToken || '1' });
+        }
+        if (String(url).startsWith('https://www.googleapis.com/drive/v3/changes')) {
+          return reponseHttp(200, {
+            changes: hooks.driveChanges || [],
+            newStartPageToken: hooks.changesNextToken || '2',
+          });
+        }
+
         // 4) Drive Files collection (GET list / POST shortcut)
         if (String(url).startsWith('https://www.googleapis.com/drive/v3/files?')) {
           if (method === 'POST') {
