@@ -358,3 +358,178 @@ test('executerEtapeCopilote_ : respecte COPILOTE_ACTIF: false et exécute les ca
   assert.strictEqual(dr.moves.length, 1);
   assert.strictEqual(sh.sheets.Copilote[1][8], 'appliqué');
 });
+
+
+test('protection Drive physique : bloque Anna, les 6 zones système et 04 · Immigration même avec fiche Copilote/Index falsifiée', () => {
+  const zones = ['Anna', '00 · À trier', '00 · À vérifier', '_Technique', '_Doublons', '_Médias', 'Données & exports', '04 · Immigration'];
+  const folders = {
+    FICTIF_EXT_DOM: { id: 'FICTIF_EXT_DOM', name: '05 · Carrière', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_EXT_CIBLE'] },
+    FICTIF_EXT_CIBLE: { id: 'FICTIF_EXT_CIBLE', name: 'CibleExterne', parents: ['FICTIF_EXT_DOM'], files: ['FICTIF_EXT_FILE_0001'], folders: [] },
+  };
+  const files = {
+    FICTIF_EXT_FILE_0001: { id: 'FICTIF_EXT_FILE_0001', name: '2026-01-01_Doc_Fictif.pdf', parents: ['FICTIF_EXT_CIBLE'], trashed: false },
+  };
+  const cartes = [['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations']];
+  zones.forEach((z, idx) => {
+    const zId = 'FICTIF_ZONE_' + idx;
+    const subId = 'FICTIF_ZSUB_' + idx;
+    const fId = 'FICTIF_ZFILE_' + String(idx).padStart(4, '0');
+    folders[zId] = { id: zId, name: z, parents: ['FICTIF_ROOT'], files: [], folders: [subId] };
+    folders[subId] = { id: subId, name: 'SousDossier', parents: [zId], files: [fId], folders: [] };
+    files[fId] = { id: fId, name: '2026-02-01_Doc_' + idx + '.pdf', parents: [subId], trashed: false };
+    cartes.push(['cop-cas-' + idx, new Date(), 'carte', 'cascade', '05 · Carrière', '05 · Carrière/Faux', 'Cascade',
+      JSON.stringify({ cibleId: 'FICTIF_EXT_CIBLE', ids: [fId] }), 'proposé', 0]);
+    cartes.push(['cop-doub-' + idx, new Date(), 'carte', 'doublon-dossier', '05 · Carrière', '05 · Carrière/Faux', 'Doublon',
+      JSON.stringify({ sourceId: subId, cibleId: 'FICTIF_EXT_CIBLE' }), 'proposé', 0]);
+    const emptyId = 'FICTIF_ZEMPTY_' + idx;
+    folders[emptyId] = { id: emptyId, name: 'VideFictif', parents: [zId], files: [], folders: [] };
+    folders[zId].folders.push(emptyId);
+    cartes.push(['cop-vide-' + idx, new Date(), 'carte', 'dossier-vide', '05 · Carrière', '05 · Carrière/Faux', 'Vide',
+      JSON.stringify({ dossierId: emptyId }), 'proposé', 0]);
+  });
+  // Carte cascade visant à déplacer un fichier externe VERS Anna
+  cartes.push(['cop-into-anna', new Date(), 'carte', 'cascade', '05 · Carrière', '05 · Carrière/VersAnna', 'VersAnna',
+    JSON.stringify({ cibleId: 'FICTIF_ZSUB_0', ids: ['FICTIF_EXT_FILE_0001'] }), 'proposé', 0]);
+
+  const { c, dr } = ctxCopilote({ folders, files, sheets: { Copilote: cartes } });
+  zones.forEach((_, idx) => {
+    assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-cas-' + idx, decision: 'executer' }).ok, false);
+    assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-doub-' + idx, decision: 'executer' }).ok, false);
+    assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-vide-' + idx, decision: 'executer' }).ok, false);
+  });
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-into-anna', decision: 'executer' }).ok, false);
+  assert.strictEqual(dr.moves.length, 0, 'zéro déplacement Drive autorisé depuis ou vers Anna/zones système');
+
+  // Index obsolète pointant vers 02 · Finances alors que le fichier est physiquement dans Anna
+  const stale = ctxCopilote({
+    folders: {
+      FICTIF_ANNA: { id: 'FICTIF_ANNA', name: 'Anna', parents: ['FICTIF_ROOT'], files: ['FICTIF_ANNA_STALE_01'], folders: [] },
+      FICTIF_FIN: { id: 'FICTIF_FIN', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_CIB'] },
+      FICTIF_CIB: { id: 'FICTIF_CIB', name: 'FournisseurY', parents: ['FICTIF_FIN'], files: [], folders: [] },
+    },
+    files: {
+      FICTIF_ANNA_STALE_01: { id: 'FICTIF_ANNA_STALE_01', name: '2026-01-10_Facture_FournisseurY.pdf', parents: ['FICTIF_ANNA'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|FICTIF_ANNA_STALE_01', new Date(), '2026-01-10_Facture_FournisseurY.pdf', '02 · Finances', '02 · Finances/Divers', 'classé', '', '', 'FICTIF_ANNA_STALE_01'],
+      ],
+    },
+  });
+  assert.strictEqual(stale.c.proposerCascadeDossier_({
+    domaine: '02 · Finances', chemin: '02 · Finances/FournisseurY', parentId: 'FICTIF_CIB', emetteurOuSujet: 'FournisseurY',
+  }), '', 'fichier physiquement dans Anna ignoré malgré un Index obsolète');
+});
+
+test('cartes ignorées non recréées et >= 15 alertes ouvertes n’affament pas cascade/doublon-dossier', () => {
+  const folders = {
+    FICTIF_DOM05: { id: 'FICTIF_DOM05', name: '05 · Carrière', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_EMP1', 'FICTIF_EMP2'] },
+    FICTIF_EMP1: { id: 'FICTIF_EMP1', name: 'Employeur', parents: ['FICTIF_DOM05'], files: ['FICTIF_F_EMP'], folders: [] },
+    FICTIF_EMP2: { id: 'FICTIF_EMP2', name: 'Employeurs', parents: ['FICTIF_DOM05'], files: ['FICTIF_CAS_CIB_00001'], folders: [] },
+    FICTIF_VRAC: { id: 'FICTIF_VRAC', name: 'Vrac', parents: ['FICTIF_ROOT'], files: ['FICTIF_CAS_DOC_00001'], folders: [] },
+    FICTIF_CORB: { id: 'FICTIF_CORB', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: [] },
+  };
+  const files = {
+    FICTIF_F_EMP: { id: 'FICTIF_F_EMP', name: '2026-01-01_Contrat_Fictif.pdf', parents: ['FICTIF_EMP1'], trashed: false },
+    FICTIF_CAS_DOC_00001: { id: 'FICTIF_CAS_DOC_00001', name: '2026-01-05_FournisseurZ_Facture.pdf', parents: ['FICTIF_VRAC'], trashed: false },
+    FICTIF_CAS_CIB_00001: { id: 'FICTIF_CAS_CIB_00001', name: '2026-01-06_Facture_FournisseurZ.pdf', parents: ['FICTIF_EMP2'], trashed: false },
+  };
+  const index = [
+    ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+    ['drive|FICTIF_CAS_DOC_00001', new Date(), '2026-01-05_FournisseurZ_Facture.pdf', '08 · Perso & projets', '08 · Perso & projets/Vrac', 'classé', '', '', 'FICTIF_CAS_DOC_00001'],
+    ['drive|FICTIF_CAS_CIB_00001', new Date(), '2026-01-06_Facture_FournisseurZ.pdf', '05 · Carrière', '05 · Carrière/Employeurs', 'classé', '', '', 'FICTIF_CAS_CIB_00001'],
+  ];
+  const copilote = [['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations']];
+  for (let i = 0; i < 16; i++) {
+    const tid = 'FICTIF_TRASH_OPEN_' + String(i).padStart(4, '0');
+    files[tid] = { id: tid, name: '2026-01-01_Doc_' + i + '.pdf', parents: ['FICTIF_CORB'], trashed: true };
+    folders.FICTIF_CORB.files.push(tid);
+    index.push(['drive|' + tid, new Date(), files[tid].name, '02 · Finances', '02 · Finances/Divers', 'corbeillé', '', '', tid]);
+    copilote.push(['cop-open-' + i, new Date(), 'carte', 'alerte-corbeille', '02 · Finances', '02 · Finances/Divers', 'Corbeille', JSON.stringify({ fileId: tid }), 'proposé', 0]);
+  }
+  const { c, sh } = ctxCopilote({ folders, files, sheets: { Index: index, Copilote: copilote } });
+  c.domainesVeilleNonProteges_ = () => [{ nom: '05 · Carrière', id: 'FICTIF_DOM05' }];
+  c.collecterSousDossiersFusion_ = () => [
+    { nom: 'Employeur', id: 'FICTIF_EMP1', nfiles: 1 },
+    { nom: 'Employeurs', id: 'FICTIF_EMP2', nfiles: 1 },
+  ];
+
+  const r1 = c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(r1.creees, 2, 'cascade et doublon-dossier créés malgré 16 alertes corbeille ouvertes');
+  const cas = sh.sheets.Copilote.slice(1).find((r) => r[3] === 'cascade');
+  const doub = sh.sheets.Copilote.slice(1).find((r) => r[3] === 'doublon-dossier');
+  assert.ok(cas && doub);
+
+  // Ignorer alerte-corbeille, cascade et doublon-dossier → jamais recréés au tick suivant
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-open-0', decision: 'ignorer' }).statut, 'ignoré');
+  assert.strictEqual(c.executerDecisionCopilote_({ id: cas[0], decision: 'ignorer' }).statut, 'ignoré');
+  assert.strictEqual(c.executerDecisionCopilote_({ id: doub[0], decision: 'ignorer' }).statut, 'ignoré');
+  const nbAvant = sh.sheets.Copilote.length;
+  const r2 = c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(r2.creees, 0);
+  assert.strictEqual(sh.sheets.Copilote.length, nbAvant, 'aucune carte ignorée recréée');
+});
+
+test('transitions d’état, auto-déplacement dossier-vide, 0-move guard, doublon-dossier Index/corbeille et JSON <= 500', () => {
+  const { c, sh, dr } = ctxCopilote({
+    folders: {
+      FICTIF_DOM05: { id: 'FICTIF_DOM05', name: '05 · Carrière', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_SRC', 'FICTIF_DST', 'FICTIF_TRASHED'] },
+      FICTIF_SRC: { id: 'FICTIF_SRC', name: 'Employeur', parents: ['FICTIF_DOM05'], files: ['FICTIF_MOVE_0001'], folders: [] },
+      FICTIF_DST: { id: 'FICTIF_DST', name: 'Employeurs', parents: ['FICTIF_DOM05'], files: [], folders: [] },
+      FICTIF_TRASHED: { id: 'FICTIF_TRASHED', name: 'Corbeille', parents: ['FICTIF_DOM05'], files: [], folders: [], trashed: true },
+      FICTIF_TECH_CUSTOM: { id: 'FICTIF_TECH_CUSTOM', name: 'TechSansPrefixe', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_VIDES_DIR'] },
+      FICTIF_VIDES_DIR: { id: 'FICTIF_VIDES_DIR', name: 'Dossiers vides', parents: ['FICTIF_TECH_CUSTOM'], files: [], folders: ['FICTIF_DEJA_ARCHIVE'] },
+      FICTIF_DEJA_ARCHIVE: { id: 'FICTIF_DEJA_ARCHIVE', name: 'VideDejaArchive', parents: ['FICTIF_VIDES_DIR'], files: [], folders: [] },
+    },
+    files: {
+      FICTIF_MOVE_0001: { id: 'FICTIF_MOVE_0001', name: '2026-01-01_Contrat_Fictif.pdf', parents: ['FICTIF_SRC'], trashed: false },
+    },
+    sheets: {
+      Copilote: [
+        ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+        ['cop-app', new Date(), 'carte', 'cascade', '05 · Carrière', '05 · Carrière/Employeurs', 'Déjà appliqué',
+          JSON.stringify({ cibleId: 'FICTIF_DST', ids: ['FICTIF_MOVE_0001'] }), 'appliqué', 2],
+        ['cop-ign', new Date(), 'carte', 'cascade', '05 · Carrière', '05 · Carrière/Employeurs', 'Ignoré',
+          JSON.stringify({ cibleId: 'FICTIF_DST', ids: ['FICTIF_MOVE_0001'] }), 'ignoré', 0],
+        ['cop-zero', new Date(), 'carte', 'cascade', '05 · Carrière', '05 · Carrière/Employeurs', 'Zéro move',
+          JSON.stringify({ cibleId: 'FICTIF_DST', ids: ['FICTIF_INEXISTANT'] }), 'proposé', 1],
+        ['cop-v-self', new Date(), 'carte', 'dossier-vide', '05 · Carrière', '05 · Carrière/Vide', 'Déjà archivé',
+          JSON.stringify({ dossierId: 'FICTIF_DEJA_ARCHIVE' }), 'proposé', 0],
+        ['cop-d-trash', new Date(), 'carte', 'doublon-dossier', '05 · Carrière', '05 · Carrière/Corbeille', 'Corbeillé',
+          JSON.stringify({ sourceId: 'FICTIF_SRC', cibleId: 'FICTIF_TRASHED' }), 'proposé', 0],
+        ['cop-d-ok', new Date(), 'carte', 'doublon-dossier', '05 · Carrière', '05 · Carrière/Employeur', 'Fusion valide',
+          JSON.stringify({ sourceId: 'FICTIF_SRC', cibleId: 'FICTIF_DST' }), 'proposé', 0],
+      ],
+    },
+  });
+  c.dossierTechnique_ = () => dr.DriveApp.getFolderById('FICTIF_TECH_CUSTOM');
+
+  // Re-exécution / desactiver-auto sur cartes déjà traitées ou non auto refusées
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-app', decision: 'executer' }).ok, false);
+  assert.strictEqual(sh.sheets.Copilote[1][9], 2, 'Validations inchangé sur carte déjà appliquée');
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-ign', decision: 'executer' }).ok, false);
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-zero', decision: 'desactiver-auto' }).ok, false);
+
+  // 0-move guard sur cascade
+  const rZero = c.executerDecisionCopilote_({ id: 'cop-zero', decision: 'executer' });
+  assert.strictEqual(rZero.ok, false);
+  assert.strictEqual(sh.sheets.Copilote[3][8], 'proposé');
+  assert.strictEqual(sh.sheets.Copilote[3][9], 1);
+
+  // dossier-vide déjà dans Dossiers vides refusé (pas de self-move addParents === removeParents)
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-v-self', decision: 'executer' }).ok, false);
+
+  // doublon-dossier cible en corbeille refusé
+  assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-d-trash', decision: 'executer' }).ok, false);
+
+  // doublon-dossier valide écrit le chemin DESTINATION dans Index
+  const rOk = c.executerDecisionCopilote_({ id: 'cop-d-ok', decision: 'executer' });
+  assert.strictEqual(rOk.ok, true);
+  assert.strictEqual(sh.sheets.Index[1][4], '05 · Carrière/Employeurs', 'Index enregistre le chemin cible');
+
+  // serialiserActionCopilote_ produit toujours du JSON valide <= 500 chars
+  const tropLong = c.serialiserActionCopilote_({ cibleId: 'FICTIF_CIBLE', ids: ['FICTIF_' + 'A'.repeat(510)] });
+  assert.ok(tropLong.length <= 500);
+  assert.deepStrictEqual(JSON.parse(tropLong), {});
+});
