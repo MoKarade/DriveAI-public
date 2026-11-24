@@ -66,6 +66,7 @@ function construireTitreAgenda_(analyse, categorie, zoneProtegee) {
 
 /**
  * Crée un rappel journée entière dans Google Agenda si l'échéance et toutes les gardes passent.
+ * Défauts locaux (`AGENDA_ACTIF = true`, `AGENDA_MAX_PAR_RUN = 3`, `AGENDA_HORIZON_JOURS = 365`), surchargeables via `CONFIG`.
  * Idempotent via `Index`, journalisé dans `Actions`, jamais bloquant pour `tri-gmail`.
  * @param {string} filId
  * @param {Object} analyse
@@ -73,7 +74,7 @@ function construireTitreAgenda_(analyse, categorie, zoneProtegee) {
  * @return {string} identifiant d'événement créé, ou `''`
  */
 function creerRappelEcheanceAgenda_(filId, analyse, opts) {
-  if (typeof CONFIG !== 'undefined' && !CONFIG.AGENDA_ACTIF) return '';
+  if (typeof CONFIG !== 'undefined' && CONFIG.AGENDA_ACTIF === false) return '';
   var maxRun = typeof CONFIG !== 'undefined' && CONFIG.AGENDA_MAX_PAR_RUN ? CONFIG.AGENDA_MAX_PAR_RUN : 3;
   if (_agendaCreesCeRun >= maxRun) return '';
   if (!filId || !opts || opts.freinBudget || opts.suspect || opts.promoDeterministe || opts.horsBoite) {
