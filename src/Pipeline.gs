@@ -192,6 +192,9 @@ function traiterDocument_(src) {
     decision.fileId = fileId;
     indexAjouter_(src.cle, decision, empreinte, trace);
     if (typeof enregistrerLienMailDrive_ === 'function') enregistrerLienMailDrive_(src, decision);
+    if (typeof enregistrerSignalDepuisPipeline_ === 'function') {
+      try { enregistrerSignalDepuisPipeline_(src, classif, decision); } catch (eSig) { }
+    }
     journalInfo_('Pipeline', decision.statut + ' → ' + decision.chemin + ' : ' + decision.nom);
   } catch (e) {
     // Erreur inattendue (OCR, blob, Sheet...) : comptée comme un échec → re-tentée, ou

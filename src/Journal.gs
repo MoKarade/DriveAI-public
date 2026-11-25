@@ -38,6 +38,8 @@ function initialiserSheet_(ss) {
   creerOnglet_(ss, 'Actions', COLONNES_ACTIONS); // journal des actions réversibles (ADR-0081)
   creerOnglet_(ss, 'Copilote', typeof COLONNES_COPILOTE !== 'undefined' ? COLONNES_COPILOTE :
     ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations']);
+  creerOnglet_(ss, 'Signaux', typeof COLONNES_SIGNAUX !== 'undefined' ? COLONNES_SIGNAUX :
+    ['FileId', 'Categorie', 'Fournisseur', 'Domaine', 'Chemin', 'DateDoc', 'DateExpiration', 'Montant', 'Devise', 'FinGarantie', 'DelaiRetour', 'StatutReclamation']);
   creerOnglet_(ss, 'Liens', COLONNES_LIENS); // liens mails ↔ documents Drive (ADR-0081)
   creerOnglet_(ss, 'Réglages', ['Clé', 'Valeur']); // réglages modifiables depuis l'app (#22)
   // Réorg IA (#21) : demandes de l'app + actions proposées/validées/appliquées — machine à états,

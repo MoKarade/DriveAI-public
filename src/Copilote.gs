@@ -54,7 +54,7 @@ function parserActionCopilote_(brut) {
   try { var o = brut && typeof brut === 'string' ? JSON.parse(brut) : null; return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; }
 }
 
-function cibleActionCopilote_(a) { return a ? String(a.sourceId || a.cibleId || a.dossierId || a.fileId || '') : ''; }
+function cibleActionCopilote_(a) { return a ? String(a.sourceId || a.cibleId || a.dossierId || a.fileId || a.cle || '') : ''; }
 
 function correspondSujetCopilote_(sujetNorm, nom, chemin) {
   if (!sujetNorm || sujetNorm.length < 3) return false;
@@ -178,7 +178,10 @@ function executerDecisionCopilote_(corps) {
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, action = parserActionCopilote_(carte.actionJson), nbVal = carte.validations;
 
   if (decision === 'ignorer' || decision === 'desactiver-auto' || decision === 'passer-auto') {
-    if (decision === 'passer-auto' && (carte.type === 'alerte-corbeille' || carte.type === 'demarche-active' || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) return { ok: false, erreur: 'mode auto interdit sur cette carte' };
+    if (decision === 'passer-auto' && (carte.type === 'alerte-corbeille' || carte.type === 'demarche-active' ||
+        carte.type === 'expiration' || carte.type === 'piece-manquante' || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) {
+      return { ok: false, erreur: 'mode auto interdit sur cette carte' };
+    }
     var ns = decision === 'ignorer' ? 'ignoré' : (decision === 'passer-auto' ? 'auto' : 'proposé');
     fSheet.getRange(carte.row, 9).setValue(ns);
     return { ok: true, id: id, statut: ns, actionIds: [], nbValidations: nbVal, proposerAuto: false, message: 'Statut mis à jour.' };
@@ -389,5 +392,8 @@ function executerEtapeCopilote_(estBudgetDepasse) {
   if (creees < maxRun && !depasse()) creees += detecterCascadeTickCopilote_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterDoublonsEtVidesCopilote_(depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterDemarcheEnCours_(lignes, depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterExpirationsCopilote_ === 'function') creees += detecterExpirationsCopilote_(depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterPiecesManquantesCopilote_ === 'function') creees += detecterPiecesManquantesCopilote_(lignes, depasse, maxRun - creees);
+  if (!depasse() && typeof rattraperSignauxCopilote_ === 'function') rattraperSignauxCopilote_(lignes, depasse);
   return { traitees: traitees, creees: creees };
 }

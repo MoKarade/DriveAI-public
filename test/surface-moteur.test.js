@@ -308,6 +308,11 @@ const CONTRAT = [
   // Copilote démarche en cours & Pont Drive → Gmail (Lot 2B, #7/#8)
   'detecterDemarcheEnCours_', 'analyserDemarchesCopilote_', 'groupeDemarcheChemin_',
   'orienterPontDriveGmail_', 'pontDriveParAdresse_', 'contexteDrivePourFil_', 'liensPontCache_',
+  // Signaux, radar d'expirations & détecteur de pièces manquantes (Lot 3A, #9/#10)
+  'construireSignalDepuisClassif_', 'calculerFinGarantie_', 'lireSignaux_', 'enregistrerSignal_',
+  'enregistrerSignalDepuisPipeline_', 'budgetSignauxDepasse_', 'analyserExpirationsSignaux_',
+  'detecterExpirationsCopilote_', 'detecterPiecesManquantesPure_', 'detecterPiecesManquantesCopilote_',
+  'rattraperSignauxCopilote_', 'creerRappelExpirationAgenda_', 'extraireSignalLlm_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

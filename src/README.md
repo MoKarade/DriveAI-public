@@ -13,6 +13,7 @@
 | `Suivi.gs` | Registre des 43 étapes et suivi LIVE (`Progression`, ventilation des coûts) |
 | `WebApp.gs` | Pont HTTP (`doGet`/`doPost`) entre l'app web / GitHub Actions et le moteur |
 | `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons/vides/corbeille (#6) et démarches en cours (#7) |
+| `Signaux.gs` | Onglet `Signaux` (métadonnées structurées), rattrapage borné (`15/j`, frein `25 $`), radar expirations Agenda J-90/J-30 (#9) et pièces manquantes (#10) |
 | `Pipeline.gs` | Traitement unifié d'un document (doublon → technique → média → OCR → LLM → routage) |
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
 | `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps, contexte Drive pont #8) |
