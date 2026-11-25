@@ -10,7 +10,7 @@ import { annulerActionMoteur, creerPackCopilote, executerDecisionCopilote, gerer
 import { BanniereErreur, EntetePage, IndicateurChargement } from '../composants/UI';
 import { Fiche360 } from '../composants/Fiche360';
 import { Icone, type NomIcone } from '../composants/Icone';
-import { construireActionsSemaine, construireFiches360, construireVueSignauxCopilote, extraireMouvementsDrive, fileIdsPourChecklist, filtrerMouvementsDrive, formaterMontantSignal, interpreterCartesCopilote, interpreterChecklistsCopilote, interpreterEntites, interpreterLiens, interpreterReglesCopilote, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote, urlDriveSure, type CarteCopilote, type CategorieMouvementDrive, type ChecklistCopilote, type FiltreMouvementDrive, type MouvementDrive, type RegleCopilote, type SignalRepli, type TypeCarteCopilote } from '../copilote';
+import { construireActionsSemaine, construireFiches360, construireVueSignauxCopilote, extraireExclusionsSignauxCopilote, extraireMouvementsDrive, fileIdsPourChecklist, filtrerMouvementsDrive, formaterMontantSignal, interpreterCartesCopilote, interpreterChecklistsCopilote, interpreterEntites, interpreterLiens, interpreterReglesCopilote, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote, urlDriveSure, type CarteCopilote, type CategorieMouvementDrive, type ChecklistCopilote, type FiltreMouvementDrive, type MouvementDrive, type RegleCopilote, type SignalRepli, type TypeCarteCopilote } from '../copilote';
 import { formaterDateCourte } from '../explorateur';
 import { t, type CleTexte, type Langue } from '../i18n';
 
@@ -69,7 +69,13 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
   const visibles = filtrerMouvementsDrive(mouvements, filtre);
   const liens = interpreterLiens(donnees.liensBrut);
   const signaux = interpreterSignaux(donnees.signauxBrut);
-  const vue = construireVueSignauxCopilote(interpreterCartesCopilote(donnees.copiloteBrut), signaux, statutsLocaux);
+  const vue = construireVueSignauxCopilote(
+    interpreterCartesCopilote(donnees.copiloteBrut),
+    signaux,
+    statutsLocaux,
+    undefined,
+    extraireExclusionsSignauxCopilote(donnees.copiloteBrut),
+  );
   const checklists = interpreterChecklistsCopilote(donnees.copiloteBrut, cochesLocaux);
   const fiches = construireFiches360({ index: donnees.index, signaux, liens, entites: interpreterEntites(donnees.entitesBrut) });
   const reglesBase = interpreterReglesCopilote(donnees.copiloteBrut, reglesLocaux);

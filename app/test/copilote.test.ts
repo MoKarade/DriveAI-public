@@ -12,6 +12,7 @@ import {
   construireActionsSemaine,
   construireFiches360,
   construireVueSignauxCopilote,
+  extraireExclusionsSignauxCopilote,
   extraireMouvementsDrive,
   fileIdsPourChecklist,
   filtrerMouvementsDrive,
@@ -710,6 +711,112 @@ describe('copilote.ts & Copilote.tsx — Signaux, factures & argent oublié (Lot
       ],
     });
     expect(mvtsLimites).toHaveLength(3);
+  });
+
+  it('empêche la résurrection dans signauxRepli et totauxAReclamer des cartes ignoré / appliqué / reclamé après rechargement', () => {
+    expect(extraireExclusionsSignauxCopilote().size).toBe(0);
+    expect(extraireExclusionsSignauxCopilote([
+      ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+      [undefined as unknown as string],
+    ]).size).toBe(0);
+
+    const maint = new Date('2026-11-24T12:00:00Z');
+    const copiloteBrut: string[][] = [
+      ['c-exp-ign', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Exp ign', '{"fileId":"f-exp-ign"}', 'ignoré', '0'],
+      ['c-exp-app', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Exp app', '{"fileId":"f-exp-app"}', 'appliqué', '0'],
+      ['c-ret-ign', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Ret ign', '{"fileId":"f-ret-ign","sousType":"retour"}', 'ignoré', '0'],
+      ['c-gar-app', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Gar app', '{"fileId":"f-gar-app","sousType":"garantie"}', 'appliqué', '0'],
+      ['c-rg-rec', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'RG rec', '{"fileId":"f-rg-rec"}', 'reclamé', '0'],
+      ['c-remb-ign', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb ign', '{"ids":["f-remb-ign-1","f-remb-ign-2"]}', 'ignoré', '0'],
+      ['c-remb-app', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb app', '{"fileId":"f-remb-app"}', 'appliqué', '0'],
+      ['c-remb-rec', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb rec', '{"ids":["f-remb-rec"]}', 'reclamé', '0'],
+      ['c-cas-ign', '2026-11-24', 'carte', 'cascade', '02 · Finances', '02 · Finances', 'Cas ign', '{"fileId":"f-cas-ign","ids":["f-cas-ign"]}', 'ignoré', '0'],
+      ['c-exp-ouv', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Exp ouv', '{"fileId":"f-exp-ouv"}', 'proposé', '0'],
+      ['c-exp-num', '2026-11-24', 'carte', 'expiration', '02 · Finances', '02 · Finances', 'Exp num', '{"fileId":123}', 'ignoré', '0'],
+    ];
+
+    const signaux = interpreterSignaux([
+      ['f-exp-ign', 'Permis', 'IRCC', '04 · Immigration', '04 · Immigration', '2025-01-01', '2026-12-10', '', 'CAD', '', '', ''],
+      ['f-exp-app', 'Passeport', 'IRCC', '04 · Immigration', '04 · Immigration', '2025-01-01', '2026-12-10', '', 'CAD', '', '', ''],
+      ['f-exp-ouv', 'Visa', 'IRCC', '04 · Immigration', '04 · Immigration', '2025-01-01', '2026-12-10', '', 'CAD', '', '', ''],
+      ['f-cas-ign', 'Contrat', 'Fournisseur Exemple', '02 · Finances', '02 · Finances', '2025-01-01', '2026-12-10', '', 'CAD', '', '', ''],
+      ['f-ret-ign', 'Achat', 'Magasin A', '08 · Perso', '08 · Perso', '2026-11-15', '', '', 'CAD', '2026-12-10', '2026-11-28', ''],
+      ['f-gar-app', 'Achat', 'Magasin B', '08 · Perso', '08 · Perso', '2026-11-15', '', '', 'CAD', '2026-12-10', '', ''],
+      ['f-rg-rec', 'Achat', 'Magasin C', '08 · Perso', '08 · Perso', '2026-11-15', '', '', 'CAD', '2026-12-10', '2026-11-28', ''],
+      ['f-remb-ign-1', 'Reçu', 'Clinique 1', '05 · Santé', '05 · Santé', '2026-11-01', '', '50', 'CAD', '', '', 'a-reclamer'],
+      ['f-remb-ign-2', 'Reçu', 'Clinique 2', '05 · Santé', '05 · Santé', '2026-11-01', '', '25', 'CAD', '', '', 'a-reclamer'],
+      ['f-remb-app', 'Reçu', 'Clinique 3', '05 · Santé', '05 · Santé', '2026-11-01', '', '30', 'CAD', '', '', 'a-reclamer'],
+      ['f-remb-rec', 'Reçu', 'Clinique 4', '05 · Santé', '05 · Santé', '2026-11-01', '', '80', 'CAD', '', '', 'a-reclamer'],
+      ['f-remb-actif', 'Reçu', 'Clinique Active', '05 · Santé', '05 · Santé', '2026-11-01', '', '40', 'CAD', '', '', 'a-reclamer'],
+    ]);
+
+    const exclusions = extraireExclusionsSignauxCopilote(copiloteBrut);
+    const vue = construireVueSignauxCopilote(interpreterCartesCopilote(copiloteBrut), signaux, {}, maint, exclusions);
+    expect(vue.expirations.map((c) => c.id)).toEqual(['c-exp-ouv']);
+    expect(vue.argent).toEqual([]);
+    expect(vue.signauxRepli.map((s) => s.id)).toEqual(['sig-exp-f-cas-ign', 'sig-gar-f-ret-ign', 'sig-recl-f-remb-actif']);
+    expect(vue.totauxAReclamer).toEqual([{ devise: 'CAD', montant: 40, nbRecus: 1 }]);
+
+    const actions = construireActionsSemaine({ vueSignaux: vue, checklists: [], regles: [], fiches: [] });
+    expect(actions.find((a) => a.id === 'act-exp')?.detail).toBe('2 élément(s)');
+    expect(actions.find((a) => a.id === 'act-arg')?.detail).toBe('2 dossier(s)');
+  });
+
+  it('ne ressuscite pas dans Copilote.tsx les cartes expiration, retour-garantie et remboursement clôturées après clic Ignorer puis rechargement', async () => {
+    const dansJours = (n: number) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+    const d5 = dansJours(5);
+    const d15 = dansJours(15);
+
+    mockEtat.donnees = {
+      index: [], santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      copiloteBrut: [
+        ['c-exp-dom', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Échéance permis DOM', '{"fileId":"f-exp-dom"}', 'proposé', '0'],
+      ],
+      signauxBrut: [
+        ['f-exp-dom', 'Permis DOM', 'IRCC', '04 · Immigration', '04 · Immigration/Permis', '2025-01-01', d15, '', 'CAD', '', '', ''],
+      ],
+    };
+
+    const { rerender } = render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.getByText('Échéance permis DOM')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Ignorer' }));
+    await vi.waitFor(() => expect(mockEtat.executer).toHaveBeenCalledWith('c-exp-dom', 'ignorer'));
+    await vi.waitFor(() => expect(screen.queryByText('Échéance permis DOM')).toBeNull());
+
+    mockEtat.donnees = {
+      ...mockEtat.donnees,
+      copiloteBrut: [
+        ['c-exp-dom', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Échéance permis DOM', '{"fileId":"f-exp-dom"}', 'ignoré', '0'],
+      ],
+    };
+    rerender(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.queryByText(`Permis DOM (${d15})`)).toBeNull();
+
+    cleanup();
+    mockEtat.donnees = {
+      index: [], santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      copiloteBrut: [
+        ['c-exp-ign', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Exp clôturée', '{"fileId":"f-exp-ign"}', 'ignoré', '0'],
+        ['c-ret-app', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Retour clôturé', '{"fileId":"f-ret-app","sousType":"retour"}', 'appliqué', '0'],
+        ['c-remb-ign', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb clôturé', '{"ids":["f-remb-ign"],"montantTotal":125,"devise":"CAD","nbRecus":1}', 'ignoré', '0'],
+        ['c-remb-rec', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb réclamé', '{"ids":["f-remb-rec"],"montantTotal":60,"devise":"CAD","nbRecus":1}', 'reclamé', '0'],
+      ],
+      signauxBrut: [
+        ['f-exp-ign', 'Passeport Ignoré', 'IRCC', '04 · Immigration', '04 · Immigration', '2025-01-01', d15, '', 'CAD', '', '', ''],
+        ['f-ret-app', 'Achat Appliqué', 'Magasin Clôturé', '08 · Perso', '08 · Perso', '2026-11-20', '', '90', 'CAD', '', d5, ''],
+        ['f-remb-ign', 'Reçu clinique', 'Clinique Ignorée', '05 · Santé', '05 · Santé', '2026-11-20', '', '125', 'CAD', '', '', 'a-reclamer'],
+        ['f-remb-rec', 'Reçu clinique', 'Clinique Réclamée', '05 · Santé', '05 · Santé', '2026-11-20', '', '60', 'CAD', '', '', 'a-reclamer'],
+        ['f-actif', 'Reçu pharmacie', 'Pharmacie Active', '05 · Santé', '05 · Santé', '2026-11-21', '', '45', 'CAD', '', '', 'a-reclamer'],
+      ],
+    };
+
+    render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.queryByText(`Passeport Ignoré (${d15})`)).toBeNull();
+    expect(screen.queryByText(`Magasin Clôturé (${d5})`)).toBeNull();
+    expect(screen.queryByText('Clinique Ignorée')).toBeNull();
+    expect(screen.queryByText('Clinique Réclamée')).toBeNull();
+    expect(screen.getByText('Pharmacie Active')).toBeDefined();
+    expect(screen.getByText(/À réclamer : .*45/)).toBeDefined();
   });
 });
 
