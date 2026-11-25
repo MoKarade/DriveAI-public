@@ -134,6 +134,16 @@ const ACTIONS: string[][] = [
   ['act-demo0002', '2026-07-06 14:02:00', 'gmail-libelle', 'Voyages', '', 'Voyages', 'appliqué', 'Libellé Gmail créé automatiquement'],
 ];
 
+const COPILOTE: string[][] = [
+  ['cop-demo-1', '2026-07-06T14:05:00', 'carte', 'cascade', '02 · Finances', '02 · Finances/Bellerives', 'Regrouper 2 doc(s) « Bellerives »', '{"cibleId":"dossier-finances-bellerives","ids":["f-002","f-003"]}', 'proposé', '3'],
+  ['cop-demo-2', '2026-07-06T13:45:00', 'carte', 'alerte-corbeille', '04 · Immigration', '04 · Immigration/Permis', 'Document en corbeille : 2026-07_Permis.pdf', '{"fileId":"f-014"}', 'proposé', '0'],
+  ['cop-demo-3', '2026-07-06T13:30:00', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration/Permis', 'Démarche en cours : 04 · Immigration/Permis (3 mvts / 7 j)', '{"chemin":"04 · Immigration/Permis","nbMvts":3,"nbDocs":4,"ids":["f-014"],"tids":["fil-imm-1"],"echeances":["2026-08-15"]}', 'actif', '0'],
+];
+const LIENS: string[][] = [
+  ['2026-07-06T13:20:00', 'fil-imm-1', 'msg-imm-1', 'portail@exemple.ca', '04 · Immigration', '04 · Immigration/Permis', 'f-014', '2026-07_Permis.pdf'],
+  ['2026-07-06T14:00:00', 'fil-fin-1', 'msg-fin-1', 'releves@bellerives.example', '02 · Finances', '02 · Finances/Bellerives', 'f-002', '2026-06-28_Relevé_Bellerives.pdf'],
+];
+
 /** Une plage Sheet bouchonnée, par onglet (la PLAGE exacte importe peu : les vues filtrent). */
 export function plageMock(onglet: string, plage: string): string[][] {
   // Les lectures d'EN-TÊTES seuls (A1:H1, A1:Z1) servent aux appends de l'app : renvoyer la 1ʳᵉ ligne.
@@ -151,6 +161,8 @@ export function plageMock(onglet: string, plage: string): string[][] {
     case 'Progression': return PROGRESSION;
     case 'Télémétrie': return TELEMETRIE;
     case 'Coûts': return COUTS;
+    case 'Copilote': return COPILOTE;
+    case 'Liens': return LIENS;
     default: return [];
   }
 }

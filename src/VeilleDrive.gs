@@ -461,18 +461,24 @@ function suivreChangementsDrive_(aTrier, racineDrive, proteges, maxRestant, gard
                 estZoneCatalogueLectureSeuleVeille_(ancDir);
               var domDir = domaineDeCheminVeille_(infoDir.chemin);
               if (!estLectureSeule && !estZoneExclueApprentissageVeille_(infoDir.chemin, domDir)) {
-                var nomDir = dirObj.getName() || meta.name;
+                var nomDir = dirObj.getName() || meta.name, ancienNomPont = '';
                 if (typeof entiteValideeParDossierId_ === 'function' && typeof renommerEntiteDepuisDossier_ === 'function') {
                   try {
                     var entExist = entiteValideeParDossierId_(fid);
+                    if (entExist && entExist.entite) ancienNomPont = String(entExist.entite);
                     if (entExist && nomDir && String(entExist.entite).trim() !== String(nomDir).trim()) {
                       renommerEntiteDepuisDossier_(entExist.entite, nomDir, entExist.domaine || domDir);
                     }
                   } catch (eRen) { journaliserErreurVeille_('Propagation renommage entité impossible', eRen); }
                 }
+                var ancienCheminPont = ancienNomPont && ancienNomPont !== nomDir ? infoDir.chemin.replace(/\/[^/]+$/, '/' + ancienNomPont) : '';
                 if (typeof enregistrerDossierVieDirect_ === 'function') {
-                  try { enregistrerDossierVieDirect_(domDir, nomDir, infoDir.chemin); }
+                  try { enregistrerDossierVieDirect_(domDir, nomDir, infoDir.chemin, null, ancienCheminPont); }
                   catch (eDV) { journaliserErreurVeille_('Adoption dossier vie impossible', eDV); }
+                }
+                if (typeof orienterPontDriveGmail_ === 'function') {
+                  try { orienterPontDriveGmail_(domDir, nomDir, infoDir.chemin, ancienNomPont, fid); }
+                  catch (ePont) { journaliserErreurVeille_('Pont Drive→Gmail impossible', ePont); }
                 }
               }
               var sync = syncRestant > 0 && !garde()

@@ -258,4 +258,16 @@ describe('les contrats publics que le refactor devait préserver', () => {
     vi.stubGlobal('fetch', vi.fn(async () => reponse(200, { ok: false, erreur: 'verrou occupé' })));
     await expect(demanderPassageMoteur()).rejects.toThrow('verrou occupé');
   });
+
+  it('executerDecisionCopilote : appelle action=copilote-executer en rejouable et lève si ok:false', async () => {
+    const { executerDecisionCopilote } = await import('../src/google');
+    const faux = vi.fn<typeof fetch>(async () => reponse(200, { ok: true, id: 'cop-1', statut: 'appliqué', actionIds: ['act-1'], message: 'Fait' }));
+    vi.stubGlobal('fetch', faux);
+    const rep = await executerDecisionCopilote('cop-1', 'executer');
+    expect(rep.statut).toBe('appliqué');
+    expect(String(faux.mock.calls[0]?.[0])).toContain('action=copilote-executer');
+
+    vi.stubGlobal('fetch', vi.fn(async () => reponse(200, { ok: false, erreur: 'carte introuvable' })));
+    await expect(executerDecisionCopilote('cop-x', 'ignorer')).rejects.toThrow('carte introuvable');
+  });
 });

@@ -123,7 +123,8 @@ function traiterDocument_(src) {
     var dossiersVie = (typeof dossiersVieCache_ === 'function' &&
         typeof chercherDossiersVie_ === 'function' &&
         typeof formaterContexteDossiersVie_ === 'function')
-      ? formaterContexteDossiersVie_(chercherDossiersVie_(src, dossiersVieCache_(), 3))
+      ? formaterContexteDossiersVie_(chercherDossiersVie_(src, dossiersVieCache_(), 3,
+          typeof pontDriveParAdresse_ === 'function' ? pontDriveParAdresse_() : null))
       : '';
 
     var classif = classifier_({

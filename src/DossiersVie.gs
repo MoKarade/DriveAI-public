@@ -17,10 +17,12 @@ var MOTS_OUTILS_DOSSIERS_VIE_ = {
 
 var _dossiersVieCache = null;
 var _dossiersVieErreurSignaleeRun = false;
+var _liensPontCache = null, _pontDriveCache = null;
 
 var PROP_DOSSIERS_VIE_DIRECTS = 'DriveAI_DOSSIERS_VIE_DIRECTS';
 var DOSSIERS_VIE_DIRECTS_MAX = 80;
 var DOSSIERS_VIE_DIRECTS_MAX_CARS = 8000;
+var PROP_PONT_DRIVE_GMAIL = 'DriveAI_PONT_DRIVE_GMAIL', PONT_DRIVE_GMAIL_MAX = 50, PONT_DRIVE_GMAIL_MAX_CARS = 5000;
 
 /**
  * Réinitialise le cache en mémoire des dossiers de vie au début d'un tick.
@@ -28,6 +30,7 @@ var DOSSIERS_VIE_DIRECTS_MAX_CARS = 8000;
 function reinitialiserDossiersVieCache_() {
   _dossiersVieCache = null;
   _dossiersVieErreurSignaleeRun = false;
+  _liensPontCache = null; _pontDriveCache = null;
 }
 
 /**
@@ -152,11 +155,14 @@ function construireDossiersVie_(lignesIndex) {
  * @param {number} [max=3]
  * @return {Array<Object>}
  */
-function chercherDossiersVie_(src, dossiers, max) {
+function chercherDossiersVie_(src, dossiers, max, optPonts) {
   if (!src || !Array.isArray(dossiers) || !dossiers.length) return [];
   var limite = typeof max === 'number' && max > 0 ? max : 3;
+  var adr = typeof adresseExpediteur_ === 'function' ? adresseExpediteur_(src.expediteur || '')
+    : String(src.expediteur || '').replace(/^.*<([^>]+)>.*$/, '$1').trim().toLowerCase();
+  var pontChemin = adr && optPonts && optPonts[adr] ? cleNormDossierVie_(optPonts[adr].chemin) : '';
   var reqJetons = normaliserJetonsDossier_([src.expediteur || '', src.sujet || '', src.nom || ''].join(' '));
-  if (!reqJetons.length) return [];
+  if (!reqJetons.length && !pontChemin) return [];
   var ensemble = {};
   for (var i = 0; i < reqJetons.length; i++) ensemble[reqJetons[i]] = true;
 
@@ -172,8 +178,9 @@ function chercherDossiersVie_(src, dossiers, max) {
         if (jetons[j].length >= 4) nbLong++;
       }
     }
-    if (nbLong >= 1 || nbTotal >= 2) {
-      var score = nbTotal * (1 + Math.log(1 + (dossier.nbDocs || 0)) * 0.25);
+    var estPont = !!(pontChemin && cleNormDossierVie_(dossier.chemin) === pontChemin);
+    if (nbLong >= 1 || nbTotal >= 2 || estPont) {
+      var score = nbTotal * (1 + Math.log(1 + (dossier.nbDocs || 0)) * 0.25) + (estPont ? 5 : 0);
       candidats.push({ dossier: dossier, score: score });
     }
   }
@@ -233,14 +240,15 @@ function normaliserEntreeDossierVieDirect_(domaine, sousDossier, cheminComplet, 
   return { chemin: cle.chemin, domaine: domEff, entite: cle.entite, jetons: jetons, nbDocs: 0, dernierDate: formaterDateDossierVie_(horodatage || new Date()) };
 }
 
-/** Ajoute/rafraîchit `[chemin, date]` en LRU bornée (`max`, `maxCars`). PURE. */
-function ajouterDossierVieDirectListe_(liste, entree, max, maxCars) {
+/** Ajoute/rafraîchit `[chemin, date]` en LRU bornée (`max`, `maxCars`), en purgeant `optAncienChemin`. PURE. */
+function ajouterDossierVieDirectListe_(liste, entree, max, maxCars, optAncienChemin) {
   var lim = max > 0 ? max : DOSSIERS_VIE_DIRECTS_MAX, maxC = maxCars > 0 ? maxCars : DOSSIERS_VIE_DIRECTS_MAX_CARS;
-  var cible = cleNormDossierVie_(entree && entree.chemin), out = [];
+  var cible = cleNormDossierVie_(entree && entree.chemin), anc = optAncienChemin ? cleNormDossierVie_(optAncienChemin) : '', out = [];
   (liste || []).forEach(function (x) {
     var ch = Array.isArray(x) ? String(x[0] || '') : String((x && x.chemin) || '');
     var dt = Array.isArray(x) ? String(x[1] || '') : String((x && x.dernierDate) || '');
-    if (ch && cleNormDossierVie_(ch) !== cible) out.push([ch, dt]);
+    var cn = cleNormDossierVie_(ch);
+    if (ch && cn !== cible && (!anc || cn !== anc)) out.push([ch, dt]);
   });
   if (entree && entree.chemin) out.push([entree.chemin, entree.dernierDate || '']);
   if (out.length > lim) out = out.slice(out.length - lim);
@@ -279,13 +287,24 @@ function propsDossiersVieDirects_(nouvelleListe) {
     return Array.isArray(parsed) ? parsed : [];
   } catch (e) { return []; }
 }
+function propsPont_(nouvelleListe) {
+  try {
+    var p = PropertiesService.getScriptProperties();
+    if (nouvelleListe !== undefined) { p.setProperty(PROP_PONT_DRIVE_GMAIL, JSON.stringify(nouvelleListe)); return nouvelleListe; }
+    var d = JSON.parse(p.getProperty(PROP_PONT_DRIVE_GMAIL) || '[]'); return Array.isArray(d) ? d : [];
+  } catch (e) { return []; }
+}
 
 /** Adopte immédiatement un dossier (même vide) dans `DriveAI_DOSSIERS_VIE_DIRECTS` (LRU max 80) + maj cache. */
-function enregistrerDossierVieDirect_(domaine, sousDossier, cheminComplet, horodatage) {
+function enregistrerDossierVieDirect_(domaine, sousDossier, cheminComplet, horodatage, optAncienChemin) {
   var entree = normaliserEntreeDossierVieDirect_(domaine, sousDossier, cheminComplet, horodatage);
   if (!entree) return false;
-  propsDossiersVieDirects_(ajouterDossierVieDirectListe_(propsDossiersVieDirects_(), entree, DOSSIERS_VIE_DIRECTS_MAX, DOSSIERS_VIE_DIRECTS_MAX_CARS));
-  if (_dossiersVieCache !== null) _dossiersVieCache = fusionnerDossiersVie_(_dossiersVieCache, [entree]);
+  propsDossiersVieDirects_(ajouterDossierVieDirectListe_(propsDossiersVieDirects_(), entree, DOSSIERS_VIE_DIRECTS_MAX, DOSSIERS_VIE_DIRECTS_MAX_CARS, optAncienChemin));
+  if (_dossiersVieCache !== null) {
+    var ancN = optAncienChemin ? cleNormDossierVie_(optAncienChemin) : '';
+    var base = ancN ? _dossiersVieCache.filter(function (d) { return cleNormDossierVie_(d.chemin) !== ancN; }) : _dossiersVieCache;
+    _dossiersVieCache = fusionnerDossiersVie_(base, [entree]);
+  }
   return true;
 }
 
@@ -340,4 +359,54 @@ function enregistrerLienMailDrive_(src, decision) {
       journalErreur_('DossiersVie', 'Écriture onglet Liens impossible : ' + e);
     }
   }
+}
+
+/** Charge les 500 derniers liens `Liens` 1×/run sans jamais lever. */
+function liensPontCache_() {
+  if (_liensPontCache !== null) return _liensPontCache;
+  var res = [];
+  try {
+    var f = typeof feuille_ === 'function' ? feuille_('Liens') : (typeof ss_ === 'function' && ss_() ? ss_().getSheetByName('Liens') : null), dern = f ? f.getLastRow() : 0, deb = Math.max(2, dern - 499);
+    if (dern >= 2) f.getRange(deb, 1, dern - deb + 1, 8).getValues().forEach(function (r) { if (r[3] && r[5]) res.push({ adresse: String(r[3]).trim().toLowerCase(), domaine: String(r[4] || '').trim(), chemin: String(r[5]).trim(), fileId: String(r[6] || '').trim() }); });
+  } catch (e) { res = []; }
+  return (_liensPontCache = res);
+}
+/** PURE — Met à jour la LRU bornée `[adresse, domaine, chemin, date]` du pont Drive → Gmail. */
+function normaliserPontDriveGmail_(liste, entree, max, maxCars) {
+  var lim = max > 0 ? max : PONT_DRIVE_GMAIL_MAX, maxC = maxCars > 0 ? maxCars : PONT_DRIVE_GMAIL_MAX_CARS;
+  var adr = String((entree && entree.adresse) || '').trim().toLowerCase(), cle = entree ? normaliserCleDossierVie_(entree.chemin) : null, out = [];
+  (liste || []).forEach(function (x) { var a = String((Array.isArray(x) ? x[0] : x && x.adresse) || '').trim().toLowerCase(), c = String((Array.isArray(x) ? x[2] : x && x.chemin) || ''); if (a && c && (!adr || a !== adr)) out.push([a, String((Array.isArray(x) ? x[1] : x && x.domaine) || ''), c, String((Array.isArray(x) ? x[3] : x && x.date) || '')]); });
+  if (adr && cle) out.push([adr, String(entree.domaine || cle.domaine || ''), cle.chemin, formaterDateDossierVie_(entree.date || new Date())]);
+  if (out.length > lim) out = out.slice(out.length - lim);
+  while (out.length > 1 && JSON.stringify(out).length > maxC) out.shift();
+  return out;
+}
+/** Retourne `{ [adresse]: { adresse, domaine, chemin, date } }` hors zones protégées/système. */
+function pontDriveParAdresse_() {
+  if (_pontDriveCache !== null) return _pontDriveCache;
+  var map = {};
+  propsPont_().forEach(function (x) { var a = String(x[0] || '').trim().toLowerCase(), d = String(x[1] || ''), c = String(x[2] || ''); if (a && c && normaliserEntreeDossierVieDirect_(d, '', c)) map[a] = { adresse: a, domaine: d, chemin: c, date: String(x[3] || '') }; });
+  return (_pontDriveCache = map);
+}
+/** Relie les expéditeurs connus (`Liens`, `TriAppris`) au nouveau dossier Drive (hors zones protégées/système). */
+function orienterPontDriveGmail_(domaine, nouveauNom, chemin, ancienNom) {
+  var entree = normaliserEntreeDossierVieDirect_(domaine, nouveauNom, chemin);
+  if (!entree) return 0;
+  var anc = ancienNom ? cleNormDossierVie_(String(chemin || '').replace(/\/[^/]+$/, '/' + ancienNom)) : '', nouv = cleNormDossierVie_(entree.chemin), jSet = {};
+  normaliserJetonsDossier_([nouveauNom || '', ancienNom || ''].join(' ')).forEach(function (j) { if (j.length >= 4) jSet[j] = true; });
+  var adrs = {}, domGen = { gmail: 1, yahoo: 1, outlook: 1, hotmail: 1, icloud: 1, live: 1, proton: 1, protonmail: 1 };
+  liensPontCache_().forEach(function (l) { var lc = cleNormDossierVie_(l.chemin); if (lc === nouv || (anc && lc === anc) || (l.domaine === entree.domaine && normaliserJetonsDossier_(l.chemin).some(function (t) { return !!jSet[t]; }))) adrs[l.adresse] = true; });
+  Object.keys((typeof triApprisCache_ === 'function' ? triApprisCache_() : {}) || {}).forEach(function (a) { var p = a.split('@'); if (normaliserJetonsDossier_(p[0] + ' ' + String(p[1] || '').split('.')[0]).some(function (t) { return !domGen[t] && !!jSet[t]; })) adrs[a.toLowerCase()] = true; });
+  var listeAdrs = Object.keys(adrs).slice(0, 10), cur = listeAdrs.length ? propsPont_() : null;
+  if (!cur) return 0;
+  listeAdrs.forEach(function (a) { cur = normaliserPontDriveGmail_(cur, { adresse: a, domaine: entree.domaine, chemin: entree.chemin, date: entree.dernierDate }); });
+  propsPont_(cur); _pontDriveCache = null; return listeAdrs.length;
+}
+/** PURE — Retourne le chemin Drive connu pour un fil Gmail (`ponts` > `liens` > `dossiers`), zéro PII. */
+function contexteDrivePourFil_(adresse, sujet, nomsPj, dossiers, ponts, liens) {
+  var adr = String(adresse || '').replace(/^.*<([^>]+)>.*$/, '$1').trim().toLowerCase();
+  if (adr && ponts && ponts[adr] && normaliserEntreeDossierVieDirect_(ponts[adr].domaine, '', ponts[adr].chemin)) return String(ponts[adr].chemin).slice(0, 160);
+  for (var i = Array.isArray(liens) && adr ? liens.length - 1 : -1; i >= 0; i--) if (liens[i] && String(liens[i].adresse || '').toLowerCase() === adr && normaliserEntreeDossierVieDirect_(liens[i].domaine, '', liens[i].chemin)) return String(liens[i].chemin).slice(0, 160);
+  return chercherDossiersVie_({ expediteur: adr, sujet: sujet || '', nom: Array.isArray(nomsPj) ? nomsPj.join(' ') : '' }, dossiers || [], 2, ponts)
+    .filter(function (m) { return normaliserEntreeDossierVieDirect_(m.domaine, '', m.chemin); }).map(function (m) { return m.chemin; }).join(', ').slice(0, 160);
 }

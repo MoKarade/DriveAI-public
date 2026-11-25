@@ -237,6 +237,21 @@ describe('i18n (FR / EN)', () => {
       expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
     }
   });
+
+  it('les 17 clés Copilote Lot 2B sont non vides en FR et EN', () => {
+    const clesLot2B: CleTexte[] = [
+      'copiloteProactifTitre', 'copiloteAucuneCarte', 'copiloteTypeCascade', 'copiloteTypeDoublon',
+      'copiloteTypeVide', 'copiloteTypeCorbeille', 'copiloteTypeDemarche', 'copiloteBadgeAuto',
+      'copiloteActionRegrouper', 'copiloteActionFusionner', 'copiloteActionArchiver', 'copiloteActionRestaurer',
+      'copiloteActionIgnorer', 'copilotePasserAuto', 'copiloteDesactiverAuto', 'copiloteActionOk', 'copiloteDemarcheResume',
+    ];
+    for (const cle of clesLot2B) {
+      expect(t(cle, 'fr').trim().length, `fr.${cle}`).toBeGreaterThan(0);
+      expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
+    }
+    expect(t('copiloteDemarcheResume', 'fr')).toContain('{docs}');
+    expect(t('copiloteDemarcheResume', 'en')).toContain('{mails}');
+  });
 });
 
 describe('i18n — gardes localStorage (GAP-3)', () => {

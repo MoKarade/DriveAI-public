@@ -11,11 +11,25 @@ import type { DonneesEtat } from '../src/etatGlobal';
 import {
   extraireMouvementsDrive,
   filtrerMouvementsDrive,
+  interpreterCartesCopilote,
+  interpreterLiens,
+  liensPourCarte,
+  peutPasserEnAuto,
   syntheseSemaineCopilote,
 } from '../src/copilote';
 
 const mockEtat = vi.hoisted(() => ({
   donnees: null as DonneesEtat | null,
+  executer: vi.fn(async (id: string, decision: string) => ({
+    ok: true,
+    id,
+    statut: decision === 'ignorer' ? 'ignoré' : decision === 'passer-auto' ? 'auto' : decision === 'desactiver-auto' ? 'proposé' : 'appliqué',
+    actionIds: decision === 'executer' ? [`act-${id}`] : [],
+    nbValidations: 1,
+    proposerAuto: false,
+    message: 'Décision appliquée.',
+  })),
+  annuler: vi.fn(async () => 'Action annulée.'),
 }));
 
 vi.mock('../src/etatGlobal', () => ({
@@ -25,6 +39,12 @@ vi.mock('../src/etatGlobal', () => ({
     synchroA: null,
     rafraichir: async () => {},
   }),
+}));
+
+vi.mock('../src/google', () => ({
+  MARQUEUR_DROITS_FICHIER: 'droits-insuffisants-sur-element',
+  executerDecisionCopilote: mockEtat.executer,
+  annulerActionMoteur: mockEtat.annuler,
 }));
 
 import { Copilote } from '../src/vues/Copilote';
@@ -399,5 +419,75 @@ describe('Copilote.tsx — rendu DOM, filtres et bilinguisme FR/EN', () => {
     expect(screen.getByText('80')).toBeDefined();
     expect(screen.getByText('50')).toBeDefined();
     expect(document.querySelectorAll('.copilote-vue .lignes .ligne')).toHaveLength(50);
+  });
+});
+
+describe('copilote.ts & Copilote.tsx — cartes proactives & démarches (Lot 2B)', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('interprète les cartes Copilote, les liens Liens, liensPourCarte et peutPasserEnAuto', () => {
+    expect(interpreterCartesCopilote()).toEqual([]);
+    expect(interpreterLiens()).toEqual([]);
+    const cartes = interpreterCartesCopilote([
+      ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+      ['c1', '2026-07-06', 'carte', 'cascade', '02 · Finances', '02 · Finances/Banque', 'Regrouper', '{"cibleId":"d1","ids":["f1"]}', 'proposé', '3'],
+      ['c2', '2026-07-06', 'carte', 'alerte-corbeille', '04 · Immigration', '04 · Immigration/Permis', 'Corbeille', '{json-invalide', 'proposé', '5'],
+      ['c3', '2026-07-06', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration/Permis', 'Démarche', '{"ids":["f1","f2"],"tids":["t1"],"echeances":["2026-08-01"]}', 'actif', '0'],
+      ['c4', '2026-07-06', 'carte', 'cascade', '05 · Carrière', '05 · Carrière/X', 'Fait', '{}', 'appliqué', '1'],
+      ['c5', '2026-07-06', 'carte', 'inconnu', '05 · Carrière', '05 · Carrière/X', 'Type inconnu', '{}', 'proposé', '1'],
+    ]);
+    expect(cartes).toHaveLength(3);
+    expect(cartes[1]!.action).toEqual({});
+    expect(peutPasserEnAuto(cartes[0]!)).toBe(true);
+    expect(peutPasserEnAuto(cartes[1]!)).toBe(false);
+    expect(peutPasserEnAuto(cartes[2]!)).toBe(false);
+    expect(peutPasserEnAuto({ ...cartes[0]!, domaine: '04 · Immigration', chemin: '04 · Immigration/Permis' })).toBe(false);
+    expect(peutPasserEnAuto({ ...cartes[0]!, validations: 1 })).toBe(false);
+
+    const liens = interpreterLiens([
+      ['Horodatage', 'ThreadId', 'MessageId', 'Expéditeur', 'Domaine', 'Chemin', 'FileId', 'Fichier'],
+      ['2026-07-06', 't1', 'm1', 'a@b.test', '04 · Immigration', '04 · Immigration/Permis', 'f1', 'Doc1.pdf'],
+      ['2026-07-06', 't1', 'm1', 'a@b.test', '04 · Immigration', '04 · Immigration/Permis', 'f1', 'Doc1.pdf'],
+      ['2026-07-06', 't2', 'm2', 'b@b.test', '04 · Immigration', '04 · Immigration/Permis/2026', 'f9', 'Doc9.pdf'],
+    ]);
+    expect(liens).toHaveLength(3);
+    expect(liensPourCarte(cartes[2]!, liens, 1)).toHaveLength(1);
+    expect(liensPourCarte(cartes[2]!, liens)).toHaveLength(2);
+    expect(liensPourCarte({ ...cartes[1]!, chemin: '', action: { fileId: 'f1' } }, liens)).toHaveLength(1);
+  });
+
+  it('rend les cartes, exécute Regrouper + Annuler 1-clic, Passer en auto, Désactiver auto et gère une erreur', async () => {
+    mockEtat.donnees = {
+      index: [], santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      copiloteBrut: [
+        ['c-cas', '2026-07-06', 'carte', 'cascade', '02 · Finances', '02 · Finances/Banque', 'Regrouper Banque', '{"cibleId":"d1","ids":["f1"]}', 'proposé', '3'],
+        ['c-auto', '2026-07-06', 'carte', 'dossier-vide', '05 · Carrière', '05 · Carrière/Vide', 'Vide', '{"dossierId":"d2"}', 'auto', '4'],
+        ['c-dem', '2026-07-06', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration/Permis', 'Démarche Permis', '{"nbDocs":2,"ids":["f1"],"tids":["t1"],"echeances":["2026-09-01"]}', 'actif', '0'],
+      ],
+      liensBrut: [
+        ['2026-07-06', 't1', 'm1', 'portail@exemple.test', '04 · Immigration', '04 · Immigration/Permis', 'f1', 'Permis.pdf'],
+      ],
+    };
+    render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.getByText('Propositions et démarches')).toBeDefined();
+    expect(screen.getByText('Permis.pdf')).toBeDefined();
+    expect(screen.getByText(/2 doc\(s\) · 1 courriel\(s\) · 2026-09-01/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Désactiver auto' }));
+    await vi.waitFor(() => expect(mockEtat.executer).toHaveBeenCalledWith('c-auto', 'desactiver-auto'));
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Regrouper' }) as HTMLButtonElement).disabled).toBe(false));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Regrouper' }));
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Annuler' })).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'Annuler' }));
+    await vi.waitFor(() => expect(mockEtat.annuler).toHaveBeenCalledWith('act-c-cas'));
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Passer en auto' }) as HTMLButtonElement).disabled).toBe(false));
+
+    mockEtat.executer.mockRejectedValueOnce(new Error('Refus serveur'));
+    fireEvent.click(screen.getByRole('button', { name: 'Passer en auto' }));
+    await vi.waitFor(() => expect(screen.getByRole('alert')).toBeDefined());
   });
 });

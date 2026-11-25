@@ -6,15 +6,13 @@
 import { useState } from 'react';
 import type { Section } from '../navigation';
 import { useEtatGlobal } from '../etatGlobal';
-import { EntetePage, IndicateurChargement } from '../composants/UI';
+import { annulerActionMoteur, executerDecisionCopilote, type DecisionCopilote } from '../google';
+import { BanniereErreur, EntetePage, IndicateurChargement } from '../composants/UI';
 import { Icone, type NomIcone } from '../composants/Icone';
 import {
-  extraireMouvementsDrive,
-  filtrerMouvementsDrive,
-  syntheseSemaineCopilote,
-  type CategorieMouvementDrive,
-  type FiltreMouvementDrive,
-  type MouvementDrive,
+  extraireMouvementsDrive, filtrerMouvementsDrive, interpreterCartesCopilote, interpreterLiens,
+  liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote,
+  type CarteCopilote, type CategorieMouvementDrive, type FiltreMouvementDrive, type MouvementDrive, type TypeCarteCopilote,
 } from '../copilote';
 import { formaterDateCourte } from '../explorateur';
 import { t, type CleTexte, type Langue } from '../i18n';
@@ -31,6 +29,13 @@ const PASTILLES_CATEGORIE: Record<CategorieMouvementDrive, { classe: string; cle
   fichier: { classe: 'pastille douce', cle: 'copiloteBadgeFichier' },
   apprentissage: { classe: 'pastille ok', cle: 'copiloteBadgeApprentissage' },
 };
+const TYPES_CARTE_UI: Record<TypeCarteCopilote, { icone: NomIcone; badge: CleTexte; actionCle?: CleTexte; decision?: DecisionCopilote }> = {
+  cascade: { icone: 'deplacer', badge: 'copiloteTypeCascade', actionCle: 'copiloteActionRegrouper', decision: 'executer' },
+  'doublon-dossier': { icone: 'dossier', badge: 'copiloteTypeDoublon', actionCle: 'copiloteActionFusionner', decision: 'executer' },
+  'dossier-vide': { icone: 'dossier', badge: 'copiloteTypeVide', actionCle: 'copiloteActionArchiver', decision: 'executer' },
+  'alerte-corbeille': { icone: 'alerte', badge: 'copiloteTypeCorbeille', actionCle: 'copiloteActionRestaurer', decision: 'restaurer' },
+  'demarche-active': { icone: 'copilote', badge: 'copiloteTypeDemarche' },
+};
 
 function metaMouvement(m: MouvementDrive, locale: string): string {
   const dateFormatee = formaterDateCourte(m.date, locale);
@@ -38,8 +43,12 @@ function metaMouvement(m: MouvementDrive, locale: string): string {
 }
 
 export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Section) => void }) {
-  const { donnees } = useEtatGlobal();
+  const { donnees, rafraichir } = useEtatGlobal();
   const [filtre, setFiltre] = useState<FiltreMouvementDrive>('tous');
+  const [enCoursId, setEnCoursId] = useState<string | null>(null);
+  const [statutsLocaux, setStatutsLocaux] = useState<Record<string, string>>({});
+  const [retour, setRetour] = useState<{ texte: string; actionIds: string[] } | null>(null);
+  const [erreurAction, setErreurAction] = useState('');
   if (!donnees) return <IndicateurChargement langue={langue} />;
 
   const locale = langue === 'fr' ? 'fr-CA' : 'en-CA';
@@ -47,6 +56,25 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
   const synthese = syntheseSemaineCopilote(tousMouvements);
   const mouvements = tousMouvements.slice(0, 50);
   const visibles = filtrerMouvementsDrive(mouvements, filtre);
+  const liens = interpreterLiens(donnees.liensBrut);
+  const cartes = interpreterCartesCopilote(donnees.copiloteBrut)
+    .map((c): CarteCopilote => (statutsLocaux[c.id] === 'auto' || statutsLocaux[c.id] === 'proposé' || statutsLocaux[c.id] === 'actif' ? { ...c, statut: statutsLocaux[c.id] as CarteCopilote['statut'] } : c))
+    .filter((c) => statutsLocaux[c.id] !== 'appliqué' && statutsLocaux[c.id] !== 'ignoré');
+
+  async function executer(cle: string, fn: () => Promise<void>) {
+    if (enCoursId) return;
+    setEnCoursId(cle); setErreurAction('');
+    try { await fn(); void rafraichir(true).catch(() => {}); } catch (e) { setErreurAction(String(e)); } finally { setEnCoursId(null); }
+  }
+  const agir = (id: string, decision: DecisionCopilote) => executer(id, async () => {
+    setRetour(null); const rep = await executerDecisionCopilote(id, decision);
+    if (rep.statut) setStatutsLocaux((prev) => ({ ...prev, [id]: rep.statut! }));
+    setRetour({ texte: rep.message || t('copiloteActionOk', langue), actionIds: rep.actionIds ?? [] });
+  });
+  const annulerDerniere = (actionIds: string[]) => actionIds.length ? executer('undo', async () => {
+    for (const aid of actionIds) await annulerActionMoteur(aid);
+    setRetour({ texte: t('actionAnnuleeOk', langue), actionIds: [] });
+  }) : Promise.resolve();
 
   return (
     <div className="colonnes copilote-vue">
@@ -65,6 +93,32 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
             {t('ouvrirDocuments', langue)} <Icone nom="chevron" className="chev" />
           </button>
         </div>
+      </section>
+
+      <section className="copilote-cartes">
+        <h2 className="titre-liste">{t('copiloteProactifTitre', langue)}{cartes.length > 0 && <span className="badge">{cartes.length}</span>}</h2>
+        <BanniereErreur langue={langue} erreur={erreurAction} onFermer={() => setErreurAction('')} />
+        {retour && <p className="bandeau-ok" role="status"><span>{retour.texte}</span>{retour.actionIds.length > 0 && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void annulerDerniere(retour.actionIds)}>{t('annulerAction', langue)}</button>}</p>}
+        {cartes.length === 0 ? <p className="explication">{t('copiloteAucuneCarte', langue)}</p> : <div className="propositions">{cartes.map((c) => {
+          const cfg = TYPES_CARTE_UI[c.type], assoc = liensPourCarte(c, liens);
+          return (
+            <article key={c.id} className="prop-carte">
+              <div className="prop-tete"><Icone nom={cfg.icone} className="accent" /><b>{c.titre}</b><span className="sp" /><span className="pastille douce">{t(cfg.badge, langue)}</span>{c.statut === 'auto' && <span className="pastille ok">{t('copiloteBadgeAuto', langue)}</span>}</div>
+              {(c.chemin || c.domaine) && <div className="prop-chemin">{c.chemin || c.domaine}</div>}
+              {c.type === 'demarche-active' && <>
+                <small>{t('copiloteDemarcheResume', langue).replace('{docs}', String(c.action.nbDocs ?? (c.action.ids?.length || 0))).replace('{mails}', String(c.action.tids?.length || assoc.length))}{c.action.echeances?.length ? ` · ${c.action.echeances.join(', ')}` : ''}</small>
+                {assoc.length > 0 && <div className="copilote-liens">{assoc.map((l) => <a key={`${l.threadId}|${l.fileId}`} className="bouton-ligne" href={`https://drive.google.com/file/d/${encodeURIComponent(l.fileId)}/view`} target="_blank" rel="noreferrer">{l.fichier || l.expediteur} <Icone nom="externe" className="chev" /></a>)}</div>}
+              </>}
+              <div className="prop-actions">
+                {cfg.actionCle && cfg.decision && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agir(c.id, cfg.decision!)}>{t(cfg.actionCle, langue)}</button>}
+                <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agir(c.id, 'ignorer')}>{t('copiloteActionIgnorer', langue)}</button>
+                {c.statut === 'auto'
+                  ? <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agir(c.id, 'desactiver-auto')}>{t('copiloteDesactiverAuto', langue)}</button>
+                  : peutPasserEnAuto(c) ? <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agir(c.id, 'passer-auto')}>{t('copilotePasserAuto', langue)}</button> : null}
+              </div>
+            </article>
+          );
+        })}</div>}
       </section>
 
       <section>

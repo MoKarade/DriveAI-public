@@ -917,4 +917,67 @@ test('VeilleDrive : ignore déplacement hors domaine et variantes sans accent/ma
   c.veillerDrive_(() => false);
   assert.strictEqual(props.has('DriveAI_DOSSIERS_VIE_DIRECTS'), false, '0 dossier direct adopté');
   assert.strictEqual(entRows[1][0], 'DonneesSub', '0 renommage dans Entités');
+  assert.strictEqual(props.has('DriveAI_PONT_DRIVE_GMAIL'), false, '0 pont sur zones exclues');
+});
+
+test('VeilleDrive + Pont Drive → Gmail (#8) : renommage dossier entité purge ancienChemin et oriente pont hors zones protégées', () => {
+  const indexRows = [['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire']];
+  const liensRows = [
+    ['Horodatage', 'ThreadId', 'MessageId', 'Expéditeur', 'Domaine', 'Chemin', 'FileId', 'Fichier'],
+    ['2026-10-01', 'thr-v1', 'msg-v1', 'factures@anciennom.test', '05 · Carrière', '05 · Carrière/AncienNom', 'FID_1', '2026-10-01_Doc_AncienNom.pdf'],
+  ];
+  const entRows = [
+    ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'],
+    ['AncienNom', '05 · Carrière', '', 'Employeur', 'validée', 'FICTIF_DIR_REN', '2026-10-01', '', '5'],
+  ];
+  const makeSheet = (rows) => ({
+    getLastRow: () => rows.length,
+    getLastColumn: () => (rows[0] ? rows[0].length : 0),
+    getRange: (r, c, nr, nc) => ({
+      getValue: () => (rows[r - 1] && rows[r - 1][c - 1] !== undefined ? rows[r - 1][c - 1] : ''),
+      setValue: (v) => { rows[r - 1][c - 1] = v; },
+      getValues: () => Array.from({ length: nr }, (_, rr) => Array.from({ length: nc }, (_, cc) => (rows[r - 1 + rr] && rows[r - 1 + rr][c - 1 + cc] !== undefined ? rows[r - 1 + rr][c - 1 + cc] : ''))),
+    }),
+    appendRow: (arr) => { rows.push(arr); },
+  });
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_D05', { id: 'FICTIF_D05', name: '05 · Carrière', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_DIR_REN', { id: 'FICTIF_DIR_REN', name: 'NouveauNom', parents: ['FICTIF_D05'] }],
+  ]);
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const foldW = (id) => {
+    const d = folders.get(id);
+    return { getId: () => d.id, getName: () => d.name, getParents: () => iter(d.parents.map(foldW)), getFiles: () => iter([]), getFolders: () => iter([]), getFoldersByName: () => iter([]) };
+  };
+  const props = new Map([
+    ['DriveAI_CHANGES_TOKEN', '700'],
+    ['DriveAI_DOSSIERS_VIE_DIRECTS', JSON.stringify([['05 · Carrière/AncienNom', '2026-10-01']])],
+  ]);
+  const c = load(['Config.gs', 'Entites.gs', 'Corrections.gs', 'DossiersVie.gs', 'Journal.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          changes: [{ fileId: 'FICTIF_DIR_REN', file: { id: 'FICTIF_DIR_REN', name: 'NouveauNom', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_D05'], trashed: false } }],
+          newStartPageToken: '701',
+        }),
+      }),
+    },
+    DriveApp: { getRootFolder: () => foldW('FICTIF_ROOT'), getFolderById: (id) => foldW(id) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (props.has(k) ? props.get(k) : null), setProperty: (k, v) => props.set(k, String(v)) }) },
+  });
+  c.reinitialiserIndexCache_(); c.reinitialiserEntitesCache_(); c.reinitialiserDossiersVieCache_();
+  c.feuille_ = (nom) => (nom === 'Entités' ? makeSheet(entRows) : (nom === 'Liens' ? makeSheet(liensRows) : makeSheet(indexRows)));
+  c.journalInfo_ = () => {};
+  c.journalErreur_ = (src, msg) => { throw new Error(src + ': ' + msg); };
+
+  c.veillerDrive_(() => false);
+  const directs = JSON.parse(props.get('DriveAI_DOSSIERS_VIE_DIRECTS'));
+  assert.strictEqual(directs.some((d) => d[0] === '05 · Carrière/AncienNom'), false, 'ancienChemin purgé');
+  assert.strictEqual(directs.some((d) => d[0] === '05 · Carrière/NouveauNom'), true, 'nouveau chemin adopté');
+  const ponts = JSON.parse(JSON.stringify(c.pontDriveParAdresse_()));
+  assert.strictEqual(ponts['factures@anciennom.test'].chemin, '05 · Carrière/NouveauNom');
 });

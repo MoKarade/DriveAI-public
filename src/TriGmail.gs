@@ -576,6 +576,9 @@ function contexteFil_(expediteur, sujet, corps, opts) {
   if (o.importanceFiche && o.importanceFiche !== 'inconnu') {
     parties.push('Habitude de Marc avec cet expéditeur : ' + o.importanceFiche);
   }
+  if (o.contexteDrive) {
+    parties.push('Contexte Drive connu : ' + nettoyer(o.contexteDrive));
+  }
   if (o.nomsPj && o.nomsPj.length) {
     parties.push('Pièces jointes : ' + nettoyer(o.nomsPj.join(', ')));
   }
@@ -1680,11 +1683,17 @@ function trierFil_(fil, candidats, libelles, verifierBoite, horsBoite) {
       historique = lu.historique;
       corpsDejaLu = true;
       if (lu.zoneProtegee) { zoneProtegee = true; portes.zoneProtegee = true; }
-      mc = analyserFil_(expediteur, sujet, corps, candidats, {
+      var optsAnalyse = {
         importanceFiche: impFiche ? impFiche.niveau : 'inconnu',
         nomsPj: nomsPj,
         historiqueMessages: historique
-      });
+      };
+      if (!zoneProtegee && typeof contexteDrivePourFil_ === 'function') {
+        var ctxDrive = contexteDrivePourFil_(adresse, sujet, nomsPj, typeof dossiersVieCache_ === 'function' ? dossiersVieCache_() : [],
+          typeof pontDriveParAdresse_ === 'function' ? pontDriveParAdresse_() : null, typeof liensPontCache_ === 'function' ? liensPontCache_() : []);
+        if (ctxDrive) optsAnalyse.contexteDrive = ctxDrive;
+      }
+      mc = analyserFil_(expediteur, sujet, corps, candidats, optsAnalyse);
       if (mc === null) return 'attend'; // panne TRANSITOIRE : clé non consommée, re-tenté (≠ doute)
     }
     if (mc) {

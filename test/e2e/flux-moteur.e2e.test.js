@@ -2977,3 +2977,38 @@ test('Lot 2A [E2E] : Copilote cascade + action=copilote-executer + annuler-actio
   assert.strictEqual(fImmiTrash.trashed, false);
   assert.deepStrictEqual(fImmiTrash.parents, [ws.c.CONFIG.DOMAINES['04 · Immigration']]);
 });
+
+test('Lot 2B [E2E] : demarche-active sur 04 · Immigration (0 mutation) + pont Drive → Gmail sur renommage dossier vers TriGmail et PJ', () => {
+  const ws = creerWorkspaceE2E();
+  const idDom04 = ws.c.CONFIG.DOMAINES['04 · Immigration'];
+  const idDom02 = ws.c.CONFIG.DOMAINES['02 · Finances'];
+  const dImmi = ws.ajouterDossier('FICTIF_E2E_04_PERMIS', 'Permis', [idDom04]);
+  const dBanque = ws.ajouterDossier('FICTIF_E2E_02_BANQUE', 'Banque Principale', [idDom02]);
+  for (let i = 1; i <= 3; i++) {
+    const fId = 'FICTIF_E2E_IMMI_DOC_' + i;
+    ws.ajouterFichier({ id: fId, name: '2026-07-0' + i + '_Piece_IRCC.pdf', parents: [dImmi.id], contenu: 'piece ' + i });
+    ws.c.indexAjouter_('drive|' + fId, { statut: 'classé', domaine: '04 · Immigration', chemin: '04 · Immigration/Permis', nom: '2026-07-0' + i + '_Piece_IRCC.pdf', fileId: fId });
+  }
+  const fBanque = ws.ajouterFichier({ id: 'FICTIF_E2E_BANQUE_01', name: '2026-06-01_Releve_AncienneBanque.pdf', parents: [dBanque.id], contenu: 'releve' });
+  ws.c.indexAjouter_('drive|' + fBanque.id, { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances/Banque Principale', nom: fBanque.name, fileId: fBanque.id });
+  ws.c.feuille_('Liens').appendRow([new Date(), 'thr-b1', 'msg-b1', 'releves@bellerives.test', '02 · Finances', '02 · Finances/AncienneBanque', fBanque.id, fBanque.name]);
+  ws.c.feuille_('Liens').appendRow([new Date(), 'thr-immi', 'msg-immi', 'portail@ircc.test', '04 · Immigration', '04 · Immigration/Permis', 'FICTIF_E2E_IMMI_DOC_1', '2026-07-01_Piece_IRCC.pdf']);
+  ws.c.indexAjouter_('agenda|thr-immi|2026-12-01', { statut: 'agenda', nom: 'DriveAI · Échéance', domaine: 'Immigration', chemin: '2026-12-01' });
+
+  const patchesAvant = ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length;
+  ws.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 déplacement Drive pour demarche-active sur 04');
+  const cDem = ws.lireOnglet('Copilote').slice(1).find((r) => r[3] === 'demarche-active' && r[5] === '04 · Immigration/Permis');
+  assert.ok(cDem && cDem[8] === 'actif');
+
+  // Pont Drive → Gmail orienté lors d'un renommage de dossier, utilisé ensuite par chercherDossiersVie_ et contexteDrivePourFil_
+  ws.c.reinitialiserDossiersVieCache_();
+  const nb = ws.c.orienterPontDriveGmail_('02 · Finances', 'Banque Principale', '02 · Finances/Banque Principale', 'AncienneBanque');
+  assert.strictEqual(nb, 1);
+  const ponts = ws.c.pontDriveParAdresse_();
+  const doss = ws.c.dossiersVieCache_();
+  const matchs = ws.c.chercherDossiersVie_({ expediteur: 'releves@bellerives.test', sujet: 'Avis', nom: 'doc.pdf' }, doss, 3, ponts);
+  assert.strictEqual(matchs[0].chemin, '02 · Finances/Banque Principale');
+  assert.strictEqual(ws.c.contexteDrivePourFil_('releves@bellerives.test', 'Avis', [], doss, ponts, []), '02 · Finances/Banque Principale');
+  assert.strictEqual(ws.spies.gmailForbiddenCalls.length, 0, 'zéro suppression ni retrait de libellé Gmail');
+});
