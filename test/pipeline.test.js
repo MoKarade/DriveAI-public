@@ -216,3 +216,26 @@ test('empreinteBlob_ : octets signés négatifs (& 0xFF) et repli "" sur excepti
   c.Utilities.computeDigest = () => { throw new Error('mémoire insuffisante'); };
   assert.strictEqual(c.empreinteBlob_({ getBytes: () => [1] }), '');
 });
+
+test('Pipeline Lot 3A : appelle enregistrerSignalDepuisPipeline_ sans bloquer en cas d erreur', () => {
+  const sigAppels = [];
+  const casOk = creerContextePipeline({
+    analyseV2: true,
+    classif: { domaine: '02 · Finances', type_doc: 'Facture', emetteur: 'Hydro-Exemple', date_expiration: '2027-01-01', montant: 120, confiance: 0.9, sensible: false },
+    deciderRoutageV2: () => ({ statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances/Reçus', nom: '2026-05-10_Facture_Hydro-Exemple.pdf', dossierId: 'DOSSIER_02' }),
+    src: { nom: 'facture.pdf' },
+  });
+  casOk.c.enregistrerSignalDepuisPipeline_ = (src, classif, decision) => sigAppels.push({ src, classif, decision });
+  casOk.c.traiterDocument_(casOk.src);
+  assert.strictEqual(sigAppels.length, 1);
+  assert.strictEqual(sigAppels[0].decision.fileId, 'FILE_ID_1');
+
+  const casErr = creerContextePipeline({
+    analyseV2: true,
+    deciderRoutageV2: () => ({ statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances/Reçus', nom: 'doc.pdf', dossierId: 'DOSSIER_02' }),
+    src: { nom: 'doc.pdf' },
+  });
+  casErr.c.enregistrerSignalDepuisPipeline_ = () => { throw new Error('Signaux HS'); };
+  casErr.c.traiterDocument_(casErr.src);
+  assert.strictEqual(casErr.appels.index.length, 1, 'Index et Pipeline restent intacts si Signaux lève');
+});

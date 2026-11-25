@@ -1598,7 +1598,13 @@ var CONFIG = {
   COPILOTE_ACTIF: true,                   // active l'étape copilote du tick (false → skip)
   COPILOTE_BUDGET_MS: 15000,              // borne par run (15 s max) pour préserver le quota tick
   COPILOTE_MAX_PAR_RUN: 15,               // cartes créées/traitées max par tick
-  COPILOTE_SEUIL_AUTO: 3                  // validations manuelles avant proposition du mode auto
+  COPILOTE_SEUIL_AUTO: 3,                 // validations manuelles avant proposition du mode auto
+  // Signaux & radar expirations (Lot 3A, #9/#10) : rattrapage borné, zéro *_BUDGET_JOUR_MS.
+  SIGNAUX_ACTIF: true,                    // active le radar expirations & pièces manquantes
+  SIGNAUX_RATTRAPAGE_MAX_JOUR: 15,        // plafond quotidien de docs enrichis hors nouveaux flux
+  SIGNAUX_RATTRAPAGE_MAX_PAR_RUN: 3,      // docs rattrapés au plus par tick pour préserver le quota
+  SIGNAUX_EXPIRATION_HORIZON_JOURS: 90,   // fenêtre J-90 d'alerte Copilote & Agenda
+  SIGNAUX_RELEVE_RETARD_JOURS: 40         // délai sans relevé mensuel habituel avant alerte
 };
 
 /* ---------- Profil privé : les valeurs propres au Drive de Marc, hors du dépôt (#497, #515) ----------

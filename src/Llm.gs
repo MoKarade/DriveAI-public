@@ -23,6 +23,10 @@ var PROMPT_SYSTEME =
   '  "type_doc": <type court: "Facture", "Relevé", "Contrat", "Attestation"...>,\n' +
   '  "date_doc": <date du document "AAAA-MM-JJ" ou null si absente>,\n' +
   '  "emetteur": <émetteur, ex "Hydro-Quebec", "Bellerives", "IRCC" ou null>,\n' +
+  '  "date_expiration": <date d\'expiration/échéance "AAAA-MM-JJ" ou null si absente>,\n' +
+  '  "montant": <montant total TTC (nombre positif) ou null si absent>,\n' +
+  '  "fournisseur": <fournisseur/organisme court ou null si absent>,\n' +
+  '  "garantie_mois": <durée de garantie en mois (entier > 0) ou null si absente>,\n' +
   '  "sensible": <booléen, voir règle ci-dessous>,\n' +
   '  "confiance": <nombre entre 0 et 1, honnête>\n' +
   '}\n' +
@@ -93,6 +97,10 @@ var PROMPT_PASSE1 =
   '  "emetteur": <ORGANISATION émettrice (cherche en-tête/logo/pied/adresse) ou null>,\n' +
   '  "entite": <NOM PROPRE canonique concerné ou null (jamais générique, jamais le propriétaire ; retire Inc./SAS ; véhicule = "Marque Modèle")>,\n' +
   '  "descripteur": <2 à 6 mots précis pour le NOM si NI émetteur NI titulaire, sinon "">,\n' +
+  '  "date_expiration": <date d\'expiration/renouvellement/échéance "AAAA-MM-JJ" ou null>,\n' +
+  '  "montant": <montant total TTC (nombre positif) ou null>,\n' +
+  '  "fournisseur": <fournisseur/organisme court ou null>,\n' +
+  '  "garantie_mois": <durée de garantie en mois (entier > 0) ou null>,\n' +
   '  "sensible": <bool — voir règle>,\n' +
   '  "confiance": <nombre 0..1, honnête>\n' +
   '}\n' +
@@ -113,6 +121,7 @@ var PROMPT_PASSE2 =
   '- `descripteur` : si NI émetteur NI titulaire, il DOIT être présent, précis et parlant (ce que c\'est + sujet + auteur si repérable) — JAMAIS « Inconnu » ni un mot vague. Améliore-le si la passe 1 est restée vague.\n' +
   '- `sousDossier` : laisse VIDE (null) par défaut. À renseigner UNIQUEMENT pour une entité majeure (employeur, école, véhicule, logement exact du risque assuré) — JAMAIS une banque. Corrige la passe 1 si elle a inventé un dossier-catégorie, un dossier de banque ou un dossier d\'émetteur ponctuel.\n' +
   '  Candidatures et prospection (05 · Carrière) : l\'entreprise VISÉE (sans emploi passé) n\'est JAMAIS une entité de classement — `sousDossier` = null. Seuls les employeurs RÉELS sont des entités (ADR-0025, axe 2).\n' +
+  '- Champs signaux optionnels (`date_expiration`, `montant`, `fournisseur`, `garantie_mois`) : garde null si absent, ne devine jamais.\n' +
   'Domaines autorisés : ' + domainesAutorises_().join(' | ') + '\n' +
   REGLES_V2;
 
@@ -751,17 +760,47 @@ function normaliserChampsV2_(obj) {
   if (!obj) return obj;
   var clesV2 = ['estNonDocument', 'estDocumentIdentite', 'routageHorsDomaine',
     'sousDossierType', 'titulaire', 'sousDossier', 'descripteur'];
+  var clesSig = ['date_expiration', 'montant', 'fournisseur', 'garantie_mois'];
   var aV2 = clesV2.some(function (k) { return k in obj; });
-  if (!aV2) return obj; // réponse Haiku classique → intacte (octet pour octet)
+  var aSig = clesSig.some(function (k) { return k in obj; });
+  if (!aV2 && !aSig) return obj; // réponse Haiku classique → intacte (octet pour octet)
 
-  obj.estNonDocument = obj.estNonDocument === true;
-  obj.estDocumentIdentite = obj.estDocumentIdentite === true;
-  if (obj.routageHorsDomaine !== '_Technique' && obj.routageHorsDomaine !== '_Médias') {
-    obj.routageHorsDomaine = null;
+  if (aV2) {
+    obj.estNonDocument = obj.estNonDocument === true;
+    obj.estDocumentIdentite = obj.estDocumentIdentite === true;
+    if (obj.routageHorsDomaine !== '_Technique' && obj.routageHorsDomaine !== '_Médias') {
+      obj.routageHorsDomaine = null;
+    }
+    ['sousDossierType', 'titulaire', 'sousDossier', 'descripteur'].forEach(function (k) {
+      if (typeof obj[k] === 'string') { obj[k] = obj[k].trim(); if (!obj[k]) delete obj[k]; }
+      else if (k in obj) delete obj[k]; // null/non-chaîne → absent (les fonctions aval testent la présence)
+    });
   }
-  ['sousDossierType', 'titulaire', 'sousDossier', 'descripteur'].forEach(function (k) {
-    if (typeof obj[k] === 'string') { obj[k] = obj[k].trim(); if (!obj[k]) delete obj[k]; }
-    else if (k in obj) delete obj[k]; // null/non-chaîne → absent (les fonctions aval testent la présence)
-  });
+  if (aSig) {
+    var de = typeof obj.date_expiration === 'string' ? obj.date_expiration.trim() : '', md = /^(\d{4})-(\d{2})-(\d{2})$/.exec(de);
+    var dt = md ? new Date(Date.UTC(Number(md[1]), Number(md[2]) - 1, Number(md[3]))) : null;
+    if ('date_expiration' in obj) { if (dt && dt.getUTCFullYear() === Number(md[1]) && dt.getUTCMonth() === Number(md[2]) - 1 && dt.getUTCDate() === Number(md[3])) obj.date_expiration = de; else delete obj.date_expiration; }
+    var mv = typeof obj.montant === 'number' ? obj.montant : (typeof obj.montant === 'string' && obj.montant.trim() ? Number(obj.montant.trim().replace(',', '.')) : NaN);
+    if ('montant' in obj) { if (isFinite(mv) && mv > 0) obj.montant = Math.round(mv * 100) / 100; else delete obj.montant; }
+    if ('fournisseur' in obj) { if (typeof obj.fournisseur === 'string' && obj.fournisseur.trim()) obj.fournisseur = obj.fournisseur.trim().slice(0, 80); else delete obj.fournisseur; }
+    var gm = typeof obj.garantie_mois === 'boolean' || obj.garantie_mois === null || obj.garantie_mois === '' ? NaN : Number(obj.garantie_mois);
+    if ('garantie_mois' in obj) { if (isFinite(gm) && Math.floor(gm) === gm && gm > 0 && gm <= 240) obj.garantie_mois = gm; else delete obj.garantie_mois; }
+  }
   return obj;
+}
+
+var PROMPT_SIGNAL_RATTRAPAGE = 'Extrais UNIQUEMENT en JSON valide : {"categorie":<string|null>,"fournisseur":<string|null>,"date_doc":<"AAAA-MM-JJ"|null>,"date_expiration":<"AAAA-MM-JJ"|null>,"montant":<number|null>,"devise":<"CAD"|"USD"|"EUR"|null>,"garantie_mois":<int|null>}. Sinon null.';
+
+/** Extraction JSON légère pour le rattrapage quotidien borné (`Signaux.gs`). */
+function extraireSignalLlm_(meta) {
+  if (!meta) return null;
+  var contenu = 'Nom : ' + String(meta.nomFichier || '') + '\nChemin : ' + String(meta.chemin || '') + (meta.extrait ? '\nExtrait :\n' + String(meta.extrait).slice(0, 4000) : '');
+  var brut = appelAnthropicTexte_(CONFIG.LLM_MODELE, PROMPT_SIGNAL_RATTRAPAGE, contenu, 250);
+  if (!brut) return null;
+  var obj = null;
+  try { obj = JSON.parse(brut); } catch (e) {
+    var d = brut.indexOf('{'), f = brut.lastIndexOf('}');
+    if (d !== -1 && f > d) try { obj = JSON.parse(brut.substring(d, f + 1)); } catch (e2) { obj = null; }
+  }
+  return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? normaliserChampsV2_(obj) : null;
 }

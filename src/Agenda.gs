@@ -120,3 +120,34 @@ function creerRappelEcheanceAgenda_(filId, analyse, opts) {
     return '';
   }
 }
+
+/** Rappel Google Agenda idempotent à J-90 ou J-30 pour une expiration `Signaux` (titre neutre si `zoneProtegee`). */
+function creerRappelExpirationAgenda_(signal, jalonJours, opts) {
+  var jalon = Number(jalonJours), maxRun = typeof CONFIG !== 'undefined' && CONFIG.AGENDA_MAX_PAR_RUN ? CONFIG.AGENDA_MAX_PAR_RUN : 3;
+  if ((typeof CONFIG !== 'undefined' && CONFIG.AGENDA_ACTIF === false) || (jalon !== 90 && jalon !== 30) || _agendaCreesCeRun >= maxRun || !signal || !signal.fileId || (opts && opts.freinBudget)) return '';
+  var ref = (opts && opts.dateRef instanceof Date && !isNaN(opts.dateRef.getTime())) ? opts.dateRef : new Date();
+  var exp = extraireEcheanceAgenda_({ echeance: signal.dateExpiration }, ref);
+  if (!exp) return '';
+  var cle = 'agenda-exp|' + signal.fileId + '|' + jalon + '|' + exp;
+  if (typeof indexContient_ === 'function' && indexContient_(cle)) return '';
+  var dom = String(signal.domaine || '').trim(), chem = String(signal.chemin || '').trim(), cat = String(signal.categorie || '').trim(), fourn = String(signal.fournisseur || '').trim();
+  var zoneProt = !!(opts && opts.zoneProtegee) || (typeof estZoneProtegeeCopilote_ === 'function' && estZoneProtegeeCopilote_(chem, dom)) ||
+    dom === '04 · Immigration' || dom === 'Anna' || chem.indexOf('04 · Immigration') === 0 || chem.indexOf('Anna') === 0 ||
+    (typeof toucheZoneProtegee_ === 'function' && toucheZoneProtegee_([dom, chem, cat, fourn].join(' ')));
+  var titre = (zoneProt ? ('DriveAI · Échéance document à vérifier (J-' + jalon + ')')
+    : ('DriveAI · Expiration ' + (cat || 'document') + (fourn ? ' — ' + fourn : '') + ' (J-' + jalon + ')')).slice(0, 80);
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(exp), refUtc = Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth(), ref.getUTCDate());
+  var dEvt = new Date(Math.max(refUtc, Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - jalon * 86400000));
+  var dateEvt = new Date(dEvt.getUTCFullYear(), dEvt.getUTCMonth(), dEvt.getUTCDate()), desc = 'Lien Drive : https://drive.google.com/file/d/' + encodeURIComponent(signal.fileId) + '/view';
+  try {
+    var ev = CalendarApp.getDefaultCalendar().createAllDayEvent(titre, dateEvt, { description: desc });
+    var eventId = ev && typeof ev.getId === 'function' ? String(ev.getId() || '') : '';
+    _agendaCreesCeRun++;
+    if (typeof indexAjouter_ === 'function') indexAjouter_(cle, { statut: 'agenda', nom: titre, domaine: zoneProt ? 'Zone protégée' : (dom || cat), chemin: exp });
+    if (typeof enregistrerAction_ === 'function') enregistrerAction_('agenda-creer', eventId || ('evt-' + signal.fileId), '', { titre: titre, date: dEvt.toISOString().slice(0, 10), jalon: 'J-' + jalon }, 'file:' + signal.fileId);
+    return eventId || cle;
+  } catch (e) {
+    if (!_agendaErreurSignaleeRun) { _agendaErreurSignaleeRun = true; if (typeof journalErreur_ === 'function') journalErreur_('Agenda', 'Autorisation Google Agenda requise (ré-autoriser le script une fois) : ' + e); }
+    return '';
+  }
+}

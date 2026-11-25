@@ -63,6 +63,7 @@ const MODULES_MOTEUR = [
   'Reorg.gs',
   'ResolutionFileId.gs',
   'RetourOrphelins.gs',
+  'Signaux.gs',
   'Copilote.gs',
   'WebApp.gs',
   'Actions.gs',
@@ -129,6 +130,7 @@ function creerWorkspaceE2E(opts) {
     lockAcquires: 0,
     lockReleases: 0,
     mailsSent: 0,
+    calendarEvents: [],
   };
 
   // --- Script Properties & Cache ---
@@ -770,6 +772,14 @@ function creerWorkspaceE2E(opts) {
     },
     MailApp: {
       sendEmail: () => { spies.mailsSent++; },
+    },
+    CalendarApp: {
+      getDefaultCalendar: () => ({
+        createAllDayEvent: (titre, date, o) => {
+          spies.calendarEvents.push({ titre, date, description: o && o.description });
+          return { getId: () => 'evt-e2e-' + spies.calendarEvents.length };
+        },
+      }),
     },
     FormApp: {
       openById: () => ({ getResponses: () => [] }),
@@ -3011,4 +3021,80 @@ test('Lot 2B [E2E] : demarche-active sur 04 · Immigration (0 mutation) + pont D
   assert.strictEqual(matchs[0].chemin, '02 · Finances/Banque Principale');
   assert.strictEqual(ws.c.contexteDrivePourFil_('releves@bellerives.test', 'Avis', [], doss, ponts, []), '02 · Finances/Banque Principale');
   assert.strictEqual(ws.spies.gmailForbiddenCalls.length, 0, 'zéro suppression ni retrait de libellé Gmail');
+});
+
+test('Lot 3A [E2E] : Signaux opportuniste Pipeline (0 $ extra), Agenda J-90/J-30 idempotent, titre neutre 04 et pièces manquantes gratuites', () => {
+  const ws = creerWorkspaceE2E();
+  const idDom02 = ws.c.CONFIG.DOMAINES['02 · Finances'];
+  const idDom04 = ws.c.CONFIG.DOMAINES['04 · Immigration'];
+  ws.hooks.llmHandler = () => ({
+    getResponseCode: () => 200,
+    getContentText: () => JSON.stringify({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          estNonDocument: false, estDocumentIdentite: false, routageHorsDomaine: null,
+          sousDossierType: null, titulaire: null, domaine: '02 · Finances', sousDossier: null,
+          categorie: 'Assurance', type_doc: 'Facture', date_doc: '2026-11-18',
+          emetteur: 'AssurNord', entite: 'AssurNord', descripteur: '',
+          date_expiration: '2026-12-10', montant: 420, fournisseur: 'AssurNord', garantie_mois: 12,
+          sensible: false, confiance: 0.95,
+        }),
+      }],
+      usage: { input_tokens: 50, output_tokens: 20 },
+      stop_reason: 'end_turn',
+    }),
+  });
+
+  // 1) Traitement d'un document via Pipeline : alimente Signaux sans appel LLM supplémentaire
+  ws.c.traiterDocument_({
+    cle: 'drive|FICTIF_E2E_SIG_SRC_01',
+    nom: 'facture_assurnord.txt',
+    taille: 120,
+    date: new ws.c.Date('2026-11-18T12:00:00Z'),
+    blob: () => makeBlob('Facture AssurNord 420 CAD expiration 2026-12-10', 'text/plain', 'facture_assurnord.txt'),
+    placer: (dossierId, nom) => ws.ajouterFichier({ id: 'FICTIF_E2E_SIG_PLACED_01', name: nom, parents: [dossierId || idDom02], contenu: 'ok' }).id,
+  });
+  const signauxAvant = ws.lireOnglet('Signaux').slice(1);
+  assert.strictEqual(signauxAvant.length, 1);
+  assert.strictEqual(signauxAvant[0][0], 'FICTIF_E2E_SIG_PLACED_01');
+  assert.strictEqual(signauxAvant[0][6], '2026-12-10');
+  assert.strictEqual(signauxAvant[0][7], 420);
+  assert.strictEqual(signauxAvant[0][9], '2027-11-18');
+
+  // 2) Document 04 · Immigration expirant dans 58 j + historique paie/impôts pour pièces manquantes (0 $ LLM)
+  ws.c.enregistrerSignal_({
+    fileId: 'FICTIF_E2E_04_EXP_01', categorie: 'Permis IRCC', fournisseur: 'IRCC',
+    domaine: '04 · Immigration', chemin: '04 · Immigration/Permis',
+    dateDoc: '2025-01-15', dateExpiration: '2027-01-15',
+  });
+  ws.c.indexAjouter_('drive|FICTIF_E2E_IMP_2024_01', { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances', nom: '2024_T4_Alphatek.pdf', fileId: 'FICTIF_E2E_IMP_2024_01' });
+  ws.c.indexAjouter_('drive|FICTIF_E2E_PAIE_2607_1', { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances', nom: '2026-07-15_Bulletin de paie_Alphatek.pdf', fileId: 'FICTIF_E2E_PAIE_2607_1' });
+  ws.c.indexAjouter_('drive|FICTIF_E2E_PAIE_2609_1', { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances', nom: '2026-09-15_Bulletin de paie_Alphatek.pdf', fileId: 'FICTIF_E2E_PAIE_2609_1' });
+  ws.ajouterFichier({ id: 'FICTIF_E2E_04_EXP_01', name: '2025-01-15_Permis_IRCC.pdf', parents: [idDom04], contenu: 'permis' });
+
+  const llmAvantCopilote = ws.spies.llmCalls;
+  const patchesAvant = ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length;
+  // Coupe le rattrapage LLM via budget 25 $ atteint pour isoler 0 $ sur radar + pièces manquantes
+  ws.props['DriveAI_COUT_' + ws.c.Date.prototype.toISOString.call(new ws.c.Date()).slice(0, 7)] = JSON.stringify({ h55in: 0, h55out: 0, s55in: 10000000, s55out: 1000000, appels: 10 });
+  ws.c.reinitialiserAgendaRun_();
+  ws.c.executerEtapeCopilote_(() => false);
+
+  assert.strictEqual(ws.spies.llmCalls, llmAvantCopilote, '0 appel LLM pour radar, Agenda et pièces manquantes (et frein 25 $ respecté)');
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 mutation Drive sur 04 · Immigration');
+  assert.strictEqual(ws.spies.calendarEvents.length, 3, 'J-90+J-30 AssurNord + J-90 IRCC');
+  const ev04 = ws.spies.calendarEvents.find((e) => e.description.includes('FICTIF_E2E_04_EXP_01'));
+  assert.strictEqual(ev04.titre, 'DriveAI · Échéance document à vérifier (J-90)');
+
+  const cartes = ws.lireOnglet('Copilote').slice(1);
+  assert.strictEqual(cartes.filter((r) => r[3] === 'expiration').length, 2);
+  assert.ok(cartes.some((r) => r[3] === 'piece-manquante' && r[6].includes('T4')));
+  assert.ok(cartes.some((r) => r[3] === 'piece-manquante' && r[6].includes('2026-08')));
+
+  // 3) 2e passage : idempotence totale Agenda + Copilote
+  const nbCartesAvant = cartes.length;
+  ws.c.reinitialiserAgendaRun_();
+  ws.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(ws.spies.calendarEvents.length, 3);
+  assert.strictEqual(ws.lireOnglet('Copilote').slice(1).length, nbCartesAvant);
 });

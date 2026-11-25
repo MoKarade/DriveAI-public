@@ -120,3 +120,57 @@ test('parserAnalyseFil_ : extrait une date echeance optionnelle sans casser la s
     'sans echeance valide, aucune clé echeance ajoutée'
   );
 });
+
+test('creerRappelExpirationAgenda_ : J-90/J-30 idempotents (agenda-exp|), lien Drive et titre neutre en zone protégée', () => {
+  const events = [];
+  const index = {};
+  const actions = [];
+  const c = load(['Config.gs', 'Prefiltre.gs', 'Agenda.gs'], {
+    indexContient_: (k) => !!index[k],
+    indexAjouter_: (k, v) => { index[k] = v; },
+    enregistrerAction_: (t, cible, av, ap, det) => { actions.push({ t, cible, ap: plain(ap), det }); },
+    CalendarApp: {
+      getDefaultCalendar: () => ({
+        createAllDayEvent: (titre, date, opts) => {
+          events.push({ titre, date, description: opts && opts.description });
+          return { getId: () => 'evt-exp-' + events.length };
+        },
+      }),
+    },
+  });
+  c.reinitialiserAgendaRun_();
+  const ref = new Date('2026-11-24T12:00:00Z');
+  const sig = {
+    fileId: 'FICTIF_EXP_01',
+    categorie: 'Assurance',
+    fournisseur: 'AssurNord',
+    domaine: '03 · Logement & véhicule',
+    chemin: '03 · Logement & véhicule/Logement',
+    dateExpiration: '2027-02-15',
+  };
+
+  const id90 = c.creerRappelExpirationAgenda_(sig, 90, { dateRef: ref });
+  const id30 = c.creerRappelExpirationAgenda_(sig, 30, { dateRef: ref });
+  assert.strictEqual(id90, 'evt-exp-1');
+  assert.strictEqual(id30, 'evt-exp-2');
+  assert.ok(index['agenda-exp|FICTIF_EXP_01|90|2027-02-15']);
+  assert.ok(index['agenda-exp|FICTIF_EXP_01|30|2027-02-15']);
+  assert.ok(events[0].description.includes('https://drive.google.com/file/d/FICTIF_EXP_01/view'));
+  assert.ok(events[0].titre.includes('AssurNord') && events[0].titre.includes('(J-90)'));
+
+  // Idempotence stricte + respect freinBudget
+  assert.strictEqual(c.creerRappelExpirationAgenda_(sig, 90, { dateRef: ref }), '');
+  assert.strictEqual(c.creerRappelExpirationAgenda_({ ...sig, fileId: 'FICTIF_EXP_02' }, 90, { dateRef: ref, freinBudget: true }), '');
+
+  // Zone protégée (04 · Immigration / Anna / toucheZoneProtegee_) → titre générique sans détail
+  const idImmi = c.creerRappelExpirationAgenda_({
+    fileId: 'FICTIF_IMMI_01',
+    categorie: 'Permis IRCC',
+    fournisseur: 'IRCC',
+    domaine: '04 · Immigration',
+    chemin: '04 · Immigration/Permis',
+    dateExpiration: '2027-01-10',
+  }, 30, { dateRef: ref });
+  assert.strictEqual(idImmi, 'evt-exp-3');
+  assert.strictEqual(events[2].titre, 'DriveAI · Échéance document à vérifier (J-30)');
+});

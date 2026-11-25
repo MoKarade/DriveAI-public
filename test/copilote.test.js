@@ -609,3 +609,33 @@ test('demarche-active (#7) : >= 3 mvts / 7 j, inclut 04 · Immigration & Anna (0
   assert.strictEqual(c.executerDecisionCopilote_({ id: cImmi[0], decision: 'ignorer' }).statut, 'ignoré');
   assert.strictEqual(c.detecterDemarcheEnCours_(sh.sheets.Index.slice(1), () => false, 10), 0);
 });
+
+test('Lot 3A Copilote : déduplication piece-manquante par a.cle, respect ignoré et refus passer-auto sur expiration/piece-manquante', () => {
+  const { c, sh } = ctxCopilote();
+  const r1 = c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'piece-manquante', domaine: '02 · Finances', chemin: '02 · Finances',
+    titre: 'Pièce fiscale 2025 manquante : RL-1', action: { cle: 'impots-2025-rl1', typePiece: 'impots' },
+  });
+  const r2 = c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'piece-manquante', domaine: '02 · Finances', chemin: '02 · Finances',
+    titre: 'Pièce fiscale 2025 manquante : RL-1', action: { cle: 'impots-2025-rl1', typePiece: 'impots' },
+  });
+  assert.strictEqual(r1.cree, true);
+  assert.strictEqual(r2.cree, false);
+  assert.strictEqual(r2.id, r1.id);
+
+  assert.strictEqual(c.executerDecisionCopilote_({ id: r1.id, decision: 'passer-auto' }).ok, false);
+  assert.strictEqual(c.executerDecisionCopilote_({ id: r1.id, decision: 'ignorer' }).statut, 'ignoré');
+  assert.strictEqual(c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'piece-manquante', domaine: '02 · Finances', chemin: '02 · Finances',
+    titre: 'Pièce fiscale 2025 manquante : RL-1', action: { cle: 'impots-2025-rl1', typePiece: 'impots' },
+  }).cree, false, 'une carte piece-manquante ignorée n est pas recréée');
+
+  const rExp = c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'expiration', domaine: '04 · Immigration', chemin: '04 · Immigration/Permis',
+    titre: 'Échéance à vérifier', action: { fileId: 'FICTIF_EXP_99', dateExpiration: '2027-01-10', joursRestants: 20 },
+  });
+  assert.strictEqual(c.executerDecisionCopilote_({ id: rExp.id, decision: 'passer-auto' }).ok, false);
+  sh.sheets.Index.push(['drive|FICTIF_OK', new Date(), 'doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', 'FICTIF_OK']);
+  assert.strictEqual(typeof c.executerEtapeCopilote_(() => false).creees, 'number');
+});

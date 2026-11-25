@@ -267,3 +267,39 @@ test('appelAnthropicV2_ (PASSE 2) : le few-shot ET la proposition de la passe 1 
   assert.ok(contenu.indexOf('Classements déjà corrigés') !== -1, 'few-shot présent aussi en passe 2');
   assert.ok(contenu.indexOf('PROPOSITION DE LA PASSE 1') !== -1, 'la proposition de la passe 1 est jointe');
 });
+
+test('Lot 3A : 4 champs signaux optionnels dans PROMPT_PASSE1/2, normaliserChampsV2_ et extraireSignalLlm_', () => {
+  ['date_expiration', 'montant', 'fournisseur', 'garantie_mois'].forEach((ch) => {
+    assert.ok(ctx.PROMPT_PASSE1.indexOf(ch) !== -1, 'PROMPT_PASSE1 contient ' + ch);
+    assert.ok(ctx.PROMPT_PASSE2.indexOf(ch) !== -1, 'PROMPT_PASSE2 contient ' + ch);
+  });
+
+  // Sans clé V2, seules les 4 clés signaux présentes sont normalisées sans injecter estNonDocument/etc.
+  const sigSeul = ctx.normaliserChampsV2_({
+    domaine: '02 · Finances', confiance: 0.9,
+    date_expiration: '2027-06-30', montant: '45,50', fournisseur: '  FournisseurX  ', garantie_mois: 12,
+  });
+  assert.strictEqual('estNonDocument' in sigSeul, false);
+  assert.strictEqual(sigSeul.date_expiration, '2027-06-30');
+  assert.strictEqual(sigSeul.montant, 45.5);
+  assert.strictEqual(sigSeul.fournisseur, 'FournisseurX');
+  assert.strictEqual(sigSeul.garantie_mois, 12);
+
+  // Valeurs invalides nettoyées
+  const inval = ctx.normaliserChampsV2_({
+    date_expiration: '2026-02-30', montant: -10, fournisseur: '   ', garantie_mois: 0,
+  });
+  assert.deepStrictEqual(inval, {});
+
+  // extraireSignalLlm_ réutilise appelAnthropicTexte_ avec CONFIG.LLM_MODELE
+  const c = load(['Config.gs', 'Llm.gs'], { tronquer_: (s, n) => String(s == null ? '' : s).slice(0, n) });
+  let modeleAppele = '';
+  c.appelAnthropicTexte_ = (modele) => {
+    modeleAppele = modele;
+    return '{"categorie":"Facture","fournisseur":"NordTech","date_expiration":"2027-01-15","montant":89.99,"garantie_mois":24}';
+  };
+  const ext = c.extraireSignalLlm_({ nomFichier: 'facture.pdf', chemin: '02 · Finances', extrait: 'TTC 89,99' });
+  assert.strictEqual(modeleAppele, c.CONFIG.LLM_MODELE);
+  assert.strictEqual(ext.fournisseur, 'NordTech');
+  assert.strictEqual(ext.montant, 89.99);
+});
