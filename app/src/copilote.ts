@@ -207,7 +207,7 @@ export function interpreterCartesCopilote(brut: readonly string[][] = []): Carte
     const id = String(r[0] ?? '').trim(), type = String(r[3] ?? '').trim() as TypeCarteCopilote, statut = String(r[8] ?? '').trim() as StatutCarteCopilote;
     if (!id || id === 'Id' || !TYPES_CARTES.has(type) || !STATUTS_CARTES.has(statut)) return [];
     let action: CarteCopilote['action'] = {};
-    try { const p = r[7] ? JSON.parse(String(r[7])) : null; if (p && typeof p === 'object' && !Array.isArray(p)) action = { ...(p as CarteCopilote['action']), ...('echeances' in p ? { echeances: Array.isArray(p.echeances) ? p.echeances.map(String) : undefined } : {}) }; } catch { /* ignore */ }
+    try { const p = r[7] ? JSON.parse(String(r[7])) : null; if (p && typeof p === 'object' && !Array.isArray(p)) action = { ...(p as CarteCopilote['action']), ...('ids' in p ? { ids: Array.isArray(p.ids) ? p.ids.map(String) : undefined } : {}), ...('tids' in p ? { tids: Array.isArray(p.tids) ? p.tids.map(String) : undefined } : {}), ...('echeances' in p ? { echeances: Array.isArray(p.echeances) ? p.echeances.map(String) : undefined } : {}) }; } catch { /* ignore */ }
     return [{ id, horodatage: String(r[1] ?? '').trim(), categorie: String(r[2] ?? '').trim(), type, domaine: String(r[4] ?? '').trim(), chemin: String(r[5] ?? '').trim(), titre: String(r[6] ?? '').trim(), action, statut, validations: Number(r[9]) || 0 }];
   });
 }
@@ -245,28 +245,32 @@ function diffJoursSignal(iso: string, ref: Date): number {
 /** Partitionne les cartes Copilote, déduplique avec `Signaux` et agrège le total à réclamer (PURE). */
 export function construireVueSignauxCopilote(cartes: readonly CarteCopilote[], signaux: readonly LigneSignal[], statutsLocaux: Readonly<Record<string, string>> = {}, maintenant: Date = new Date()) {
   const propositions: CarteCopilote[] = [], expirations: CarteCopilote[] = [], factures: CarteCopilote[] = [], argent: CarteCopilote[] = [];
-  const fidsCouverts = new Set<string>(), fidsMasques = new Set<string>(), totParDev = new Map<string, { montant: number; nbRecus: number }>();
-  const marquerFids = (s: Set<string>, c: CarteCopilote) => { if (c.action.fileId) s.add(c.action.fileId); for (const f of c.action.ids ?? []) if (f) s.add(f); };
+  const fidsCouverts = new Set<string>(), totParDev = new Map<string, { montant: number; nbRecus: number }>();
+  const marquerFids = (c: CarteCopilote) => {
+    const ks = c.type === 'expiration' ? ['exp'] : c.type === 'remboursement' ? ['recl'] : c.type === 'retour-garantie' ? (c.action.sousType === 'retour' ? ['ret'] : c.action.sousType === 'garantie' ? ['gar'] : ['ret', 'gar']) : [];
+    const fids = [...(c.action.fileId ? [c.action.fileId] : []), ...(Array.isArray(c.action.ids) ? c.action.ids : [])];
+    for (const k of ks) for (const f of fids) if (f) fidsCouverts.add(`${k}|${f}`);
+  };
   const addTot = (dev: string, mt: number, nb: number) => { const cur = totParDev.get(dev) ?? { montant: 0, nbRecus: 0 }; cur.montant += mt; cur.nbRecus += nb; totParDev.set(dev, cur); };
   for (const raw of cartes) {
     const loc = statutsLocaux[raw.id];
-    if (loc === 'appliqué' || loc === 'ignoré' || loc === 'reclamé') { if (TYPES_EXP.has(raw.type) || TYPES_FAC.has(raw.type) || TYPES_ARG.has(raw.type)) marquerFids(fidsMasques, raw); continue; }
+    if (loc === 'appliqué' || loc === 'ignoré' || loc === 'reclamé') { marquerFids(raw); continue; }
     const c: CarteCopilote = (loc === 'auto' || loc === 'proposé' || loc === 'actif') ? { ...raw, statut: loc } : raw;
-    if (TYPES_EXP.has(c.type)) { expirations.push(c); marquerFids(fidsCouverts, c); }
-    else if (TYPES_FAC.has(c.type)) { factures.push(c); marquerFids(fidsCouverts, c); }
-    else if (TYPES_ARG.has(c.type)) { argent.push(c); marquerFids(fidsCouverts, c); if (c.type === 'remboursement') addTot(String(c.action.devise || 'CAD').trim().toUpperCase() || 'CAD', typeof c.action.montantTotal === 'number' && Number.isFinite(c.action.montantTotal) ? c.action.montantTotal : 0, typeof c.action.nbRecus === 'number' && c.action.nbRecus > 0 ? c.action.nbRecus : (c.action.ids?.length || 1)); }
+    if (TYPES_EXP.has(c.type)) { expirations.push(c); marquerFids(c); }
+    else if (TYPES_FAC.has(c.type)) { factures.push(c); }
+    else if (TYPES_ARG.has(c.type)) { argent.push(c); marquerFids(c); if (c.type === 'remboursement') addTot(String(c.action.devise || 'CAD').trim().toUpperCase() || 'CAD', typeof c.action.montantTotal === 'number' && Number.isFinite(c.action.montantTotal) ? c.action.montantTotal : 0, typeof c.action.nbRecus === 'number' && c.action.nbRecus > 0 ? c.action.nbRecus : (Array.isArray(c.action.ids) && c.action.ids.length ? c.action.ids.length : 1)); }
     else propositions.push(c);
   }
   const signauxRepli: SignalRepli[] = [], vus = new Set<string>();
   for (const s of signaux) {
-    if (!s.fileId || vus.has(s.fileId) || s.categorie === 'aucun' || fidsCouverts.has(s.fileId) || fidsMasques.has(s.fileId)) continue;
+    if (!s.fileId || vus.has(s.fileId) || s.categorie === 'aucun') continue;
     vus.add(s.fileId);
     const lienDrive = `https://drive.google.com/file/d/${encodeURIComponent(s.fileId)}/view`, chemin = s.chemin || s.domaine, nom = s.fournisseur || s.categorie || s.fileId;
-    if (s.statutReclamation === 'a-reclamer') { signauxRepli.push({ id: `sig-recl-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: nom, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive }); addTot(s.devise, s.montant ?? 0, 1); continue; }
+    if (s.statutReclamation === 'a-reclamer' && !fidsCouverts.has(`recl|${s.fileId}`)) { signauxRepli.push({ id: `sig-recl-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: nom, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive }); addTot(s.devise, s.montant ?? 0, 1); }
     const jExp = diffJoursSignal(s.dateExpiration, maintenant), jRet = diffJoursSignal(s.delaiRetour, maintenant), jGar = diffJoursSignal(s.finGarantie, maintenant);
-    if (!Number.isNaN(jExp) && jExp >= 0 && jExp <= 90) signauxRepli.push({ id: `sig-exp-${s.fileId}`, section: 'expiration', fileId: s.fileId, titre: `${s.categorie || s.fournisseur || s.fileId} (${s.dateExpiration})`, chemin, devise: s.devise, lienDrive });
-    if (!Number.isNaN(jRet) && jRet >= 0 && jRet <= 7) signauxRepli.push({ id: `sig-ret-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: `${nom} (${s.delaiRetour})`, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive });
-    else if (!Number.isNaN(jGar) && jGar >= 0 && jGar <= 30) signauxRepli.push({ id: `sig-gar-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: `${nom} (${s.finGarantie})`, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive });
+    if (!fidsCouverts.has(`exp|${s.fileId}`) && !Number.isNaN(jExp) && jExp >= 0 && jExp <= 90) signauxRepli.push({ id: `sig-exp-${s.fileId}`, section: 'expiration', fileId: s.fileId, titre: `${s.categorie || s.fournisseur || s.fileId} (${s.dateExpiration})`, chemin, devise: s.devise, lienDrive });
+    if (!fidsCouverts.has(`ret|${s.fileId}`) && !Number.isNaN(jRet) && jRet >= 0 && jRet <= 7) signauxRepli.push({ id: `sig-ret-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: `${nom} (${s.delaiRetour})`, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive });
+    if (!fidsCouverts.has(`gar|${s.fileId}`) && !Number.isNaN(jGar) && jGar >= 0 && jGar <= 30) signauxRepli.push({ id: `sig-gar-${s.fileId}`, section: 'argent', fileId: s.fileId, titre: `${nom} (${s.finGarantie})`, chemin, ...(s.montant ? { montant: s.montant } : {}), devise: s.devise, lienDrive });
   }
   const totauxAReclamer = [...totParDev.entries()].filter(([, v]) => v.nbRecus > 0).sort(([a], [b]) => a.localeCompare(b)).map(([devise, v]) => ({ devise, montant: Math.round(v.montant * 100) / 100, nbRecus: v.nbRecus }));
   return { propositions, expirations, factures, argent, signauxRepli, totauxAReclamer };
@@ -274,7 +278,7 @@ export function construireVueSignauxCopilote(cartes: readonly CarteCopilote[], s
 
 /** Retourne jusqu'à `limite` liens Drive/Gmail associés à une carte Copilote (PURE). */
 export function liensPourCarte(carte: CarteCopilote, liens: readonly LienMailDrive[], limite = 4): LienMailDrive[] {
-  const tids = new Set(carte.action.tids ?? []), fids = new Set([...(carte.action.ids ?? []), ...(carte.action.fileId ? [carte.action.fileId] : [])]), vus = new Set<string>(), out: LienMailDrive[] = [];
+  const tids = new Set(Array.isArray(carte.action.tids) ? carte.action.tids : []), fids = new Set([...(Array.isArray(carte.action.ids) ? carte.action.ids : []), ...(carte.action.fileId ? [carte.action.fileId] : [])]), vus = new Set<string>(), out: LienMailDrive[] = [];
   for (const l of liens) {
     const cle = `${l.threadId}|${l.fileId}`;
     if (!vus.has(cle) && (tids.has(l.threadId) || fids.has(l.fileId) || (!!carte.chemin && (l.chemin === carte.chemin || l.chemin.startsWith(`${carte.chemin}/`))))) { vus.add(cle); out.push(l); if (out.length >= limite) break; }

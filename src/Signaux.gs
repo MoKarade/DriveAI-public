@@ -290,9 +290,10 @@ function estFactureSignal_(s, inclureRecus) {
 }
 function estRenouvellementSignal_(s, datesParFourn) {
   if (!s || !s.fileId || estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun' || validerDateIsoSignal_(s.dateExpiration) || !validerDateIsoSignal_(s.dateDoc) || !estFournisseurValideSignal_(s.fournisseur)) return false;
-  var txt = normaliserSignaux_((s.categorie || '') + ' ' + (s.chemin || '')).replace(/[_-]+/g, ' '), dates = (datesParFourn && datesParFourn[normaliserSignaux_(s.fournisseur)]) || [], base = new Date(Date.UTC(Number(s.dateDoc.slice(0, 4)), Number(s.dateDoc.slice(5, 7)) - 1, Number(s.dateDoc.slice(8, 10))));
+  var cat = normaliserSignaux_(s.categorie || '').replace(/[_-]+/g, ' '), txt = (cat + ' ' + normaliserSignaux_(s.chemin || '')).replace(/[_-]+/g, ' '), dates = (datesParFourn && datesParFourn[normaliserSignaux_(s.fournisseur)]) || [], base = new Date(Date.UTC(Number(s.dateDoc.slice(0, 4)), Number(s.dateDoc.slice(5, 7)) - 1, Number(s.dateDoc.slice(8, 10))));
   if (/\bmensuel/.test(txt) || /(paie|bulletin|salaire|releve|impot|t4|rl ?1|rl ?31|avis de cotisation|aucun)/.test(txt) || dates.some(function (d) { return d > s.dateDoc && diffJoursIso_(d, base) > 30; })) return false;
-  return /(abonnement|annuel|renouvellement|assurance|cotisation|adhesion|licence|forfait|bail|immatriculation|hebergement|domaine)/.test(txt) || (estFactureSignal_(s, false) && dates.some(function (d) { var ec = Math.abs(diffJoursIso_(d, base)); return ec >= 330 && ec <= 395; }));
+  var reRen = /(abonnement|annuel|renouvellement|assurance|cotisation|adhesion|licence|forfait|bail|immatriculation|hebergement|domaine)/, estFacOuMt = estFactureSignal_({ categorie: s.categorie }, false) || /\bcontrat\b/.test(cat) || montantSignal_(s.montant) > 0;
+  return reRen.test(cat) || (estFacOuMt && (reRen.test(txt) || (estFactureSignal_(s, false) && dates.some(function (d) { var ec = Math.abs(diffJoursIso_(d, base)); return ec >= 330 && ec <= 395; }))));
 }
 function estReclamableSignal_(s) {
   if (!s || !s.fileId || estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun' || s.statutReclamation === 'reclame' || s.statutReclamation === 'non-applicable') return false;
@@ -317,7 +318,7 @@ function analyserSentinelleFacturesPure_(signaux, dateRef) {
     var ser = grH[k].sort(function (a, b) { return a.dDoc < b.dDoc ? -1 : a.dDoc > b.dDoc ? 1 : (a.s.fileId < b.s.fileId ? -1 : 1); });
     if (ser.length < 3) return;
     var vals = ser.slice(0, -1).map(function (x) { return x.mt; }).sort(function (a, b) { return a - b; }), m = Math.floor(vals.length / 2);
-    var med = vals.length % 2 ? vals[m] : Math.round(((vals[m - 1] + vals[m]) / 2) * 100) / 100, dern = ser[ser.length - 1], ec = dern.mt - med;
+    var med = vals.length % 2 ? vals[m] : Math.round(((vals[m - 1] + vals[m]) / 2) * 100) / 100, dern = ser[ser.length - 1], ec = Math.round((dern.mt - med) * 100) / 100;
     if (!(med > 0) || ec < 5 || ec < med * 0.1 - 1e-9) return;
     var pct = Math.round((ec / med) * 100), zp = estZoneProtegeeSignal_(dern.s);
     cartes.push({ categorie: 'carte', type: 'facture-hausse', domaine: dern.s.domaine || '', chemin: dern.s.chemin || '', titre: zp ? 'Hausse de facture à vérifier (+' + pct + ' %)' : 'Hausse facture ' + dern.s.fournisseur + ' : ' + dern.mt + ' ' + dern.dev + ' (médiane ' + med + ' ' + dern.dev + ', +' + pct + ' %)', action: { cle: 'hausse|' + dern.s.fileId, fileId: dern.s.fileId, fournisseur: dern.s.fournisseur, montant: dern.mt, mediane: med, devise: dern.dev, ecartPct: pct } });

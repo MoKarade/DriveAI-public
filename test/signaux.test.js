@@ -590,3 +590,23 @@ test('Chasseur d argent oublié (#12) : remboursements santé/pro (plafond 480 c
   assert.strictEqual(sh.sheets.Signaux[2][11], 'reclame');
   assert.strictEqual(c.analyserArgentOubliePure_(c.lireSignaux_(), ref).filter((x) => x.type === 'remboursement').length, 0);
 });
+
+test('Non-régression Lot 3B : précision IEEE-754 +5,00 $ (3.04 -> 8.04) et non-factures en dossier Assurance/Domaine', () => {
+  const { c } = ctxSignaux();
+  const ref = new Date('2026-11-24T12:00:00Z');
+  const signaux = [
+    // IEEE-754 : 8.04 - 3.04 === 4.999999999999999 ; doit tout de même déclencher >= 5 $ et >= 10 %
+    { fileId: 'FICTIF_FP_1', categorie: 'Facture', fournisseur: 'FournMicro', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-08-01', montant: 3.04, devise: 'CAD' },
+    { fileId: 'FICTIF_FP_2', categorie: 'Facture', fournisseur: 'FournMicro', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-09-01', montant: 3.04, devise: 'CAD' },
+    { fileId: 'FICTIF_FP_3', categorie: 'Facture', fournisseur: 'FournMicro', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-10-01', montant: 8.04, devise: 'CAD' },
+    // Note / Courrier sans montant dans dossier Assurance / Domaine : ne doit PAS déclencher renouvellement
+    { fileId: 'FICTIF_NOTE_ASS', categorie: 'Note', fournisseur: 'AssureurFictif', domaine: '03 · Logement & véhicule', chemin: '03 · Logement & véhicule/Assurance', dateDoc: '2025-12-10', montant: '' },
+    { fileId: 'FICTIF_COUR_DOM', categorie: 'Courrier', fournisseur: 'RegistreFictif', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets/Domaine', dateDoc: '2025-12-10', montant: '' },
+    // Contrat / Facture avec montant dans dossier Assurance / Domaine : DOIT déclencher renouvellement
+    { fileId: 'FICTIF_CTR_ASS', categorie: 'Contrat', fournisseur: 'AssurContrat', domaine: '03 · Logement & véhicule', chemin: '03 · Logement & véhicule/Assurance', dateDoc: '2025-12-10', montant: '' },
+    { fileId: 'FICTIF_FAC_DOM', categorie: 'Facture', fournisseur: 'RegistreDom', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets/Domaine', dateDoc: '2025-12-10', montant: 25, devise: 'CAD' },
+  ];
+  const res = plain(c.analyserSentinelleFacturesPure_(signaux, ref));
+  assert.deepStrictEqual(res.filter((x) => x.type === 'facture-hausse').map((x) => x.action.fileId), ['FICTIF_FP_3']);
+  assert.deepStrictEqual(res.filter((x) => x.type === 'renouvellement').map((x) => x.action.fileId).sort(), ['FICTIF_CTR_ASS', 'FICTIF_FAC_DOM']);
+});

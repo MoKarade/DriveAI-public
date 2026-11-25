@@ -550,7 +550,7 @@ describe('copilote.ts & Copilote.tsx — Signaux, factures & argent oublié (Lot
     const vue = construireVueSignauxCopilote(cartes, signaux, {}, maint);
     expect(vue.factures).toHaveLength(1);
     expect(vue.argent).toHaveLength(1);
-    expect(vue.signauxRepli.map((s) => s.fileId)).toEqual(['f-2', 'f-3', 'f-exp', 'f-ret', 'f-gar']);
+    expect(vue.signauxRepli.map((s) => s.id)).toEqual(['sig-recl-f-2', 'sig-recl-f-3', 'sig-exp-f-exp', 'sig-ret-f-ret', 'sig-gar-f-ret', 'sig-gar-f-gar']);
     expect(vue.totauxAReclamer).toEqual([
       { devise: 'CAD', montant: 170, nbRecus: 2 },
       { devise: 'USD', montant: 30, nbRecus: 1 },
@@ -597,5 +597,79 @@ describe('copilote.ts & Copilote.tsx — Signaux, factures & argent oublié (Lot
     expect(screen.getByText('Expirations & missing documents')).toBeDefined();
     expect(screen.getByText('Bills & subscriptions')).toBeDefined();
     expect(screen.getByText('Money to recover')).toBeDefined();
+  });
+
+  it('durcit ids/tids non-tableau, préserve les signaux secondaires par fileId et couvre les champs optionnels', () => {
+    const maint = new Date('2026-11-24T12:00:00Z');
+    // 1. ids/tids non-tableau dans ActionJson (nombre, chaîne) : aucun crash ni itération caractère par caractère
+    const cartesBrut = interpreterCartesCopilote([
+      ['c-num-ids', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb', '{"ids":123}', 'proposé', '0'],
+      ['c-num-tids', '2026-11-24', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration', 'Dém', '{"tids":123,"ids":"f123"}', 'actif', '0'],
+      ['c-str-ids', '2026-11-24', 'carte', 'cascade', '02 · Finances', '02 · Finances', 'Cas', '{"ids":"f123","tids":"t123"}', 'proposé', '0'],
+      [undefined as unknown as string],
+      ['c-sparse', undefined as unknown as string, undefined as unknown as string, 'cascade', undefined as unknown as string, undefined as unknown as string, undefined as unknown as string, '', 'proposé', ''],
+    ]);
+    expect(cartesBrut[0]!.action.ids).toBeUndefined();
+    expect(cartesBrut[1]!.action.tids).toBeUndefined();
+    expect(cartesBrut[1]!.action.ids).toBeUndefined();
+    expect(cartesBrut[2]!.action.ids).toBeUndefined();
+    expect(cartesBrut[2]!.action.tids).toBeUndefined();
+
+    // Même avec un objet CarteCopilote forgé sans passer par interpreterCartesCopilote : aucun TypeError
+    const carteForgee = { ...cartesBrut[0]!, action: { ids: 123 as unknown as string[], tids: 123 as unknown as string[], fileId: 'f-ok' } };
+    expect(() => construireVueSignauxCopilote([carteForgee], [], {}, maint)).not.toThrow();
+    const liens = interpreterLiens([
+      ['2026-11-24', 't1', 'm1', 'a@b.test', '05 · Santé', '05 · Santé', 'f-ok', 'Doc.pdf'],
+      [undefined as unknown as string, undefined as unknown as string],
+    ]);
+    expect(liensPourCarte(carteForgee, liens)).toHaveLength(1);
+
+    // 2. Signaux secondaires sur le même fileId (facture-hausse + a-reclamer, expiration + a-reclamer, retour + garantie)
+    const cartesMulti = interpreterCartesCopilote([
+      ['c-fh-dual', '2026-11-24', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances', 'Hausse', '{"fileId":"f-dual"}', 'proposé', '0'],
+      ['c-exp-dual', '2026-11-24', 'carte', 'expiration', '04 · Immigration', '04 · Immigration', 'Exp', '{"fileId":"f-exp-recl"}', 'proposé', '0'],
+      ['c-ret-only', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Ret', '{"fileId":"f-rg-part","sousType":"retour"}', 'proposé', '0'],
+      ['c-gar-only', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Gar', '{"fileId":"f-rg-gar","sousType":"garantie"}', 'proposé', '0'],
+      ['c-rg-both', '2026-11-24', 'carte', 'retour-garantie', '08 · Perso', '08 · Perso', 'Both', '{"fileId":"f-rg-both"}', 'proposé', '0'],
+      ['c-remb-min', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Min', '{"ids":["f-min"]}', 'proposé', '0'],
+      ['c-loc-auto', '2026-11-24', 'carte', 'cascade', '02 · Finances', '02 · Finances', 'Auto', '{}', 'proposé', '3'],
+    ]);
+    const sigsMulti = interpreterSignaux([
+      [undefined as unknown as string],
+      ['f-dual', 'Facture', 'Cablonet', '02 · Finances', '', '2026-11-01', '', '50', '', '', '', 'a-reclamer'],
+      ['f-exp-recl', 'Permis', '', '04 · Immigration', '', '2025-12-01', '2026-12-10', '', 'CAD', '', '', 'a-reclamer'],
+      ['f-recl-exp', '', '', '05 · Santé', '', '2026-11-01', '2026-12-15', '', 'CAD', '', '', 'a-reclamer'],
+      ['f-rg-part', 'Achat', '', '08 · Perso', '', '2026-11-15', '', '', 'CAD', '2026-12-10', '2026-11-27', ''],
+      ['f-rg-gar', 'Achat', '', '08 · Perso', '', '2026-11-15', '', '', 'CAD', '2026-12-10', '2026-11-27', ''],
+      ['f-rg-both', 'Achat', '', '08 · Perso', '', '2026-11-15', '', '', 'CAD', '2026-12-10', '2026-11-27', ''],
+      ['f-bad-date', 'Achat', '', '08 · Perso', '', '2026-11-15', '2026-02-30', '', 'CAD', '2026-02-30', '2026-02-30', ''],
+    ]);
+    const vue = construireVueSignauxCopilote(cartesMulti, sigsMulti, { 'c-loc-auto': 'auto' }, maint);
+    expect(vue.propositions[0]!.statut).toBe('auto');
+    expect(vue.signauxRepli.map((s) => s.id)).toEqual([
+      'sig-recl-f-dual',
+      'sig-recl-f-exp-recl',
+      'sig-recl-f-recl-exp',
+      'sig-exp-f-recl-exp',
+      'sig-gar-f-rg-part',
+      'sig-ret-f-rg-gar',
+    ]);
+    expect(vue.totauxAReclamer).toEqual([{ devise: 'CAD', montant: 50, nbRecus: 4 }]);
+
+    // 3. Cas limites mouvements Drive (cellules vides, 3 homonymes, VeilleDrive sans titre)
+    const mvtsLimites = extraireMouvementsDrive({
+      journalBrut: [
+        ['2026-11-24T11:00:00', undefined as unknown as string, 'VeilleDrive', 'Changement direct détecté :  → 02 · Finances'],
+        ['2026-11-24T10:00:00', 'INFO', 'VeilleDrive', 'Document catalogué (lecture seule) :  → 04 · Immigration'],
+        ['2026-11-24T09:00:00', 'INFO', 'Pipeline', 'classé → 02 · Finances : meme.pdf'],
+      ],
+      index: [
+        { cle: 'drive|a', traiteLe: '', fichier: 'meme.pdf', domaine: '', chemin: '02 · Finances', statut: '', confiance: '' },
+        { cle: 'drive|b', traiteLe: '', fichier: 'meme.pdf', domaine: '', chemin: '03 · Logement', statut: '', confiance: '' },
+        { cle: 'drive|c', traiteLe: '', fichier: 'meme.pdf', domaine: '', chemin: '05 · Carrière', statut: '', confiance: '' },
+        { cle: 'drive|d', traiteLe: '', fichier: '', domaine: '', chemin: '', statut: '', confiance: '' },
+      ],
+    });
+    expect(mvtsLimites).toHaveLength(3);
   });
 });
