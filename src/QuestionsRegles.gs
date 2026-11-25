@@ -96,7 +96,12 @@ function parserPhraseRegle_(phrase, domainesConnus, libellesConnus) {
     var seg = mCib[1].trim().replace(/\s+(?:et|en|puis)\b.*$/i, '').trim();
     if (!libelle && /libell|etiqu|categori/i.test(mCib[0])) libelle = seg;
     if (seg && !domaine && !libelle) cible = seg;
-    else if (seg && domaine && seg.indexOf('/') !== -1) cible = domaine + '/' + seg.split('/').pop().trim();
+    else if (seg && domaine && seg.indexOf('/') !== -1) {
+      var segsCib = seg.split('/').map(function (x) { return x.trim(); }).filter(Boolean);
+      var dN = normaliserQR_(domaine), dCourt = normaliserQR_(domaine.replace(/^\d+\s*·\s*/, ''));
+      if (segsCib.length && (normaliserQR_(segsCib[0]) === dN || (dCourt && normaliserQR_(segsCib[0]) === dCourt))) segsCib.shift();
+      cible = segsCib.length ? (domaine + '/' + segsCib.join('/')) : domaine;
+    }
     else if (seg && domaine && normaliserQR_(seg) !== normaliserQR_(domaine) && normaliserQR_(seg) !== normaliserQR_(domaine.replace(/^\d+\s*·\s*/, ''))) cible = domaine + '/' + seg;
   }
   if (!cible && domaine) cible = domaine;
@@ -196,11 +201,30 @@ function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
     var mots = Array.isArray(a.si.mots) ? a.si.mots : [], dom = String(a.domaine || r.domaine || '').trim(), chemCib = String(a.cible || r.chemin || dom).trim();
     if (!mots.length || !dom || typeof CONFIG === 'undefined' || !CONFIG.DOMAINES || !CONFIG.DOMAINES[dom]) continue;
     var cibId = CONFIG.DOMAINES[dom];
-    if (chemCib.indexOf('/') !== -1) {
-      var nomS = chemCib.split('/').pop().trim(), sous = null;
-      try { sous = typeof sousDossierExistant_ === 'function' ? sousDossierExistant_(DriveApp.getFolderById(cibId), nomS) : null; } catch (eS) {}
-      if (!sous && typeof DriveApp !== 'undefined') { try { var itS = DriveApp.getFolderById(cibId).getFolders(), nS = normaliserQR_(nomS); while (itS.hasNext()) { var sd = itS.next(); if (!sd.isTrashed() && normaliserQR_(sd.getName()) === nS) { sous = sd; break; } } } catch (eD) {} }
-      if (sous) cibId = sous.getId();
+    if (chemCib.indexOf('/') !== -1 || normaliserQR_(chemCib) !== normaliserQR_(dom)) {
+      var segs = chemCib.split('/').map(function (s) { return s.trim(); }).filter(Boolean);
+      var domN = normaliserQR_(dom), domCourtN = normaliserQR_(dom.replace(/^\d+\s*·\s*/, ''));
+      if (segs.length && (normaliserQR_(segs[0]) === domN || (domCourtN && normaliserQR_(segs[0]) === domCourtN))) segs.shift();
+      var curId = segs.length ? cibId : '';
+      for (var sIdx = 0; curId && sIdx < segs.length; sIdx++) {
+        var nomS = segs[sIdx], sous = null;
+        try {
+          var curDir = DriveApp.getFolderById(curId);
+          if (!curDir || curDir.isTrashed()) { curId = ''; break; }
+          sous = typeof sousDossierExistant_ === 'function' ? sousDossierExistant_(curDir, nomS) : null;
+          if (!sous) {
+            var itS = curDir.getFolders(), nS = normaliserQR_(nomS);
+            while (itS.hasNext()) {
+              var sd = itS.next();
+              if (!sd.isTrashed() && normaliserQR_(sd.getName()) === nS) { sous = sd; break; }
+            }
+          }
+        } catch (eS) { sous = null; }
+        if (!sous || sous.isTrashed()) { curId = ''; break; }
+        curId = sous.getId();
+        if (proteges[curId] || (typeof estZoneProtegeeCopilote_ === 'function' && estZoneProtegeeCopilote_(sous.getName(), dom))) { curId = ''; break; }
+      }
+      cibId = curId;
     }
     if (!cibId || proteges[cibId]) continue;
     var idsCands = [];

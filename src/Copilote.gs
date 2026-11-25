@@ -63,6 +63,42 @@ function parserActionCopilote_(brut) {
 
 function cibleActionCopilote_(a) { return a ? String(a.cle || a.sourceId || a.cibleId || a.dossierId || a.fileId || '') : ''; }
 
+function estCarteRegleCascade_(type, action) {
+  return type === 'cascade' && !!(action && (action.regleId || String(action.cle || '').indexOf('regle-cas|') === 0));
+}
+
+function reglesDriveActivesCopilote_(cartes) {
+  var out = [];
+  (cartes || []).forEach(function (c) {
+    if (!c || c.type !== 'regle-auto' || !COPILOTE_STATUTS_OUVERTS[c.statut]) return;
+    var a = parserActionCopilote_(c.actionJson);
+    if (!a || !a.si || !Array.isArray(a.si.mots) || !a.si.mots.length || !a.alors || a.alors.canal === 'gmail') return;
+    if (estZoneProtegeeCopilote_(a.cible || c.chemin, a.domaine || c.domaine)) return;
+    if (typeof regleEstInterditeQR_ === 'function' && regleEstInterditeQR_(c, a)) return;
+    var mots = a.si.mots.map(normaliserCopilote_).filter(Boolean);
+    if (mots.length) out.push({ mots: mots });
+  });
+  return out;
+}
+
+function fichiersCouvertsParReglesDrive_(lignes, reglesDrv) {
+  var parId = {}, ordre = [], couverts = {};
+  if (!reglesDrv || !reglesDrv.length) return couverts;
+  (lignes || []).forEach(function (l) {
+    var fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(l) : String(Array.isArray(l) ? (l[8] || '') : (l.fileId || ''));
+    if (!fid) return;
+    if (!parId[fid]) ordre.push(fid);
+    parId[fid] = Array.isArray(l) ? { nom: String(l[2] || ''), chem: String(l[4] || '') } : { nom: String(l.nom || ''), chem: String(l.chemin || '') };
+  });
+  ordre.forEach(function (fid) {
+    var it = parId[fid], txt = normaliserCopilote_(it.nom + ' ' + it.chem);
+    for (var i = 0; i < reglesDrv.length; i++) {
+      if (reglesDrv[i].mots.every(function (m) { return txt.indexOf(m) !== -1; })) { couverts[fid] = true; break; }
+    }
+  });
+  return couverts;
+}
+
 function correspondSujetCopilote_(sujetNorm, nom, chemin) {
   if (!sujetNorm || sujetNorm.length < 3) return false;
   var em = typeof extraireEmetteurNomVeille_ === 'function' ? normaliserCopilote_(extraireEmetteurNomVeille_(nom)) : '';
@@ -106,15 +142,19 @@ function lireCartesCopilote_() {
 function enregistrerCarteCopilote_(carte) {
   var f = feuille_('Copilote'), existantes = lireCartesCopilote_(), ouverte = null;
   var json = serialiserActionCopilote_(carte.action || {}), cible = cibleActionCopilote_(carte.action);
+  var carteEstRegle = estCarteRegleCascade_(carte.type, carte.action);
   for (var i = 0; i < existantes.length; i++) {
     var c = existantes[i];
     if (c.type !== carte.type || (!COPILOTE_STATUTS_OUVERTS[c.statut] && c.statut !== 'ignoré')) continue;
-    var memeCible = cible && cibleActionCopilote_(parserActionCopilote_(c.actionJson)) === cible;
-    if (!memeCible && !((carte.type === 'cascade' || carte.type === 'demarche-active') && carte.chemin && c.chemin === carte.chemin)) continue;
+    var actC = parserActionCopilote_(c.actionJson), cEstRegle = estCarteRegleCascade_(c.type, actC);
+    var memeCible = cible && cibleActionCopilote_(actC) === cible;
+    var memeChemin = (carte.type === 'cascade' || carte.type === 'demarche-active') && carte.chemin && c.chemin === carte.chemin && !(carteEstRegle && cEstRegle);
+    if (!memeCible && !memeChemin) continue;
     if (c.statut === 'ignoré') {
+      if (carteEstRegle && !cEstRegle && !memeCible) continue;
       if (carte.type === 'remboursement') {
         var ancIds = {};
-        (parserActionCopilote_(c.actionJson).ids || []).forEach(function (x) { ancIds[x] = true; });
+        (actC.ids || []).forEach(function (x) { ancIds[x] = true; });
         if ((carte.action && Array.isArray(carte.action.ids) ? carte.action.ids : []).some(function (x) { return !ancIds[x]; })) continue;
       }
       return { id: '', cree: false };
@@ -122,6 +162,7 @@ function enregistrerCarteCopilote_(carte) {
     if (!ouverte) ouverte = c;
   }
   if (ouverte) {
+    if (estCarteRegleCascade_(ouverte.type, parserActionCopilote_(ouverte.actionJson)) && !carteEstRegle) return { id: ouverte.id, cree: false };
     if (ouverte.actionJson !== json) { f.getRange(ouverte.row, 2).setValue(new Date()); f.getRange(ouverte.row, 7).setValue(String(carte.titre || ouverte.titre).slice(0, 140)); f.getRange(ouverte.row, 8).setValue(json); }
     return { id: ouverte.id, cree: false };
   }
@@ -144,11 +185,13 @@ function parentUniqueVivant_(fObj) {
 }
 
 /** Propose (ou MAJ) une carte `cascade` vers `cible`. */
-function proposerCascadeDossier_(cible, optLignes, optSortie) {
+function proposerCascadeDossier_(cible, optLignes, optSortie, optExclusions) {
   if (!cible || !cible.parentId || !cible.chemin || estZoneProtegeeCopilote_(cible.chemin, cible.domaine)) return '';
   var proteges = ensembleDomainesProteges_();
   try { var dc = DriveApp.getFolderById(cible.parentId); if (!dc || dc.isTrashed() || estProtegeDriveCopilote_(dc, proteges)) return ''; } catch (e) { return ''; }
   var lignes = optLignes || lireLignesIndexCopilote_(), exclusions = {};
+  var exclRegles = optExclusions !== undefined ? optExclusions : fichiersCouvertsParReglesDrive_(lignes, reglesDriveActivesCopilote_(lireCartesCopilote_()));
+  if (exclRegles) Object.keys(exclRegles).forEach(function (k) { if (exclRegles[k]) exclusions[k] = true; });
   for (var i = 0; i < lignes.length; i++) { var fid = fileIdDeLigneIndex_(lignes[i]); if (fid && indexContient_('epingle|' + fid)) exclusions[fid] = true; }
   var cands = candidatsCascade_(lignes, cible.domaine, cible.chemin, cible.parentId, cible.emetteurOuSujet, exclusions), ids = [];
   for (var j = 0; j < cands.length; j++) {
@@ -343,19 +386,18 @@ function detecterDoublonsEtVidesCopilote_(depasse, maxRestant) {
 
 function detecterCascadeTickCopilote_(lignes, depasse, maxRestant) {
   if (typeof extraireEmetteurNomVeille_ !== 'function') return 0;
+  var exclusionsRegles = fichiersCouvertsParReglesDrive_(lignes, reglesDriveActivesCopilote_(lireCartesCopilote_()));
   var vues = {}, creees = 0, sondees = 0;
   for (var i = lignes.length - 1; i >= 0 && creees < maxRestant && sondees < 20 && !depasse(); i--) {
     var l = lignes[i], nom = String(l[2] || ''), dom = String(l[3] || ''), chem = String(l[4] || ''), stat = String(l[5] || '');
     if ((stat !== 'classé' && stat !== 'déplacé' && stat !== 'manuel') || !chem || estZoneProtegeeCopilote_(chem, dom)) continue;
-    var em = extraireEmetteurNomVeille_(nom);
-    if (!em || vues[chem + '|' + normaliserCopilote_(em)]) continue;
+    var em = extraireEmetteurNomVeille_(nom), fid = fileIdDeLigneIndex_(l);
+    if (!em || !fid || exclusionsRegles[fid] || vues[chem + '|' + normaliserCopilote_(em)]) continue;
     vues[chem + '|' + normaliserCopilote_(em)] = true;
-    var fid = fileIdDeLigneIndex_(l);
-    if (!fid) continue;
     sondees++;
     try {
       var f = DriveApp.getFileById(fid), p = f && !f.isTrashed() ? parentUniqueVivant_(f) : null, out = {};
-      if (p && proposerCascadeDossier_({ domaine: dom, chemin: chem, parentId: p.getId(), emetteurOuSujet: em }, lignes, out) && out.cree) creees++;
+      if (p && proposerCascadeDossier_({ domaine: dom, chemin: chem, parentId: p.getId(), emetteurOuSujet: em }, lignes, out, exclusionsRegles) && out.cree) creees++;
     } catch (e) { }
   }
   return creees;

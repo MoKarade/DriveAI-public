@@ -10,7 +10,7 @@ const { load, iter } = require('./harness');
 const plain = (x) => JSON.parse(JSON.stringify(x));
 
 function ctxQR(opts = {}) {
-  const c = load(['Config.gs', 'Cout.gs', 'Suivi.gs', 'Journal.gs', 'Actions.gs', 'Signaux.gs', 'PacksChecklists.gs', 'Copilote.gs', 'QuestionsRegles.gs']);
+  const c = load(opts.modules || ['Config.gs', 'Cout.gs', 'Suivi.gs', 'Journal.gs', 'Actions.gs', 'Signaux.gs', 'PacksChecklists.gs', 'Copilote.gs', 'QuestionsRegles.gs']);
   const props = Object.assign({}, opts.props);
   const sheets = Object.assign({
     Index: [['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire']],
@@ -341,4 +341,156 @@ test('#19 non-régression : articles français interdits, liste blanche LLM et d
   const resDrv = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
   assert.strictEqual(resDrv.traitees, 0);
   assert.strictEqual(resDrv.creees, 0);
+});
+
+test('non-régression M9 Anomalie 1 : règle proposé préserve regleId/cle contre detecterCascadeTickCopilote_, zéro cascade inverse et passage auto à 3 validations', () => {
+  const FH1 = 'FICTIF_TEST_HYD_00001';
+  const FH2 = 'FICTIF_TEST_HYD_00002';
+  const FH3 = 'FICTIF_TEST_HYD_00003';
+  const FH4 = 'FICTIF_TEST_HYD_00004';
+  const w = ctxQR({
+    modules: ['Config.gs', 'Cout.gs', 'Suivi.gs', 'Journal.gs', 'Actions.gs', 'Entites.gs', 'VeilleDrive.gs', 'Signaux.gs', 'PacksChecklists.gs', 'Copilote.gs', 'QuestionsRegles.gs'],
+    folders: {
+      FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM02'] },
+      FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_HYD_DIR', 'FICTIF_AUTRE'] },
+      FICTIF_HYD_DIR: { id: 'FICTIF_HYD_DIR', name: 'Hydro-Exemple', parents: ['FICTIF_DOM02'], files: [FH2], folders: [] },
+      FICTIF_AUTRE: { id: 'FICTIF_AUTRE', name: 'Autre', parents: ['FICTIF_DOM02'], files: [FH1, FH3, FH4], folders: [] },
+    },
+    files: {
+      [FH1]: { id: FH1, name: '2026-10-01_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_AUTRE'], trashed: false },
+      [FH2]: { id: FH2, name: '2026-10-02_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_HYD_DIR'], trashed: false },
+      [FH3]: { id: FH3, name: '2026-10-03_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_AUTRE'], trashed: false },
+      [FH4]: { id: FH4, name: '2026-10-04_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_AUTRE'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|' + FH1, '2026-10-01', '2026-10-01_Facture_Hydro-Exemple.pdf', '02 · Finances', '02 · Finances/Autre', 'classé', '', '', FH1],
+        ['drive|' + FH2, '2026-10-02', '2026-10-02_Facture_Hydro-Exemple.pdf', '02 · Finances', '02 · Finances/Hydro-Exemple', 'classé', '', '', FH2],
+      ],
+    },
+  });
+  w.c.domainesVeilleNonProteges_ = () => [];
+
+  const cr = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture Hydro-Exemple alors classer dans 02 · Finances/Hydro-Exemple' }));
+  assert.strictEqual(cr.ok, true);
+  assert.strictEqual(cr.auto, false);
+
+  w.c.executerEtapeCopilote_(() => false);
+  const cartes1 = plain(w.c.lireCartesCopilote_());
+  const cascades1 = cartes1.filter((x) => x.type === 'cascade' && x.statut === 'proposé');
+  assert.strictEqual(cascades1.length, 1, 'aucune cascade inverse vers 02 · Finances/Autre');
+  assert.strictEqual(cascades1[0].chemin, '02 · Finances/Hydro-Exemple');
+  assert.strictEqual(cascades1[0].statut, 'proposé');
+  const act1 = JSON.parse(cascades1[0].actionJson);
+  assert.strictEqual(act1.regleId, cr.regleId);
+  assert.strictEqual(act1.cle, 'regle-cas|' + cr.regleId + '|FICTIF_HYD_DIR');
+  assert.strictEqual(act1.cibleId, 'FICTIF_HYD_DIR');
+  assert.deepStrictEqual(act1.ids, [FH1]);
+
+  // Un appel générique ultérieur sur le même chemin ne doit pas écraser regleId / cle
+  const ecrasement = plain(w.c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'cascade', domaine: '02 · Finances', chemin: '02 · Finances/Hydro-Exemple',
+    titre: 'Générique', action: { cibleId: 'FICTIF_HYD_DIR', ids: [FH1] },
+  }));
+  assert.strictEqual(ecrasement.id, cascades1[0].id);
+  assert.strictEqual(ecrasement.cree, false);
+  const actApres = JSON.parse(plain(w.c.lireCartesCopilote_()).find((x) => x.id === cascades1[0].id).actionJson);
+  assert.strictEqual(actApres.regleId, cr.regleId);
+  assert.strictEqual(actApres.cle, 'regle-cas|' + cr.regleId + '|FICTIF_HYD_DIR');
+
+  // Une ancienne carte cascade générique ignorée ne bloque pas une nouvelle règle explicite, et deux règles distinctes restent isolées
+  w.sheets.Copilote.push([
+    'cop-ign-gen', new Date(), 'carte', 'cascade', '02 · Finances', '02 · Finances/Hydro-Exemple',
+    'Ancienne cascade', JSON.stringify({ cibleId: 'FICTIF_HYD_DIR', ids: [FH1] }), 'ignoré', 0,
+  ]);
+  const cr2 = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si relevé Hydro-Exemple alors classer dans 02 · Finances/Hydro-Exemple' }));
+  assert.strictEqual(cr2.ok, true);
+  const resR2 = plain(w.c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'cascade', domaine: '02 · Finances', chemin: '02 · Finances/Hydro-Exemple',
+    titre: 'Règle 2', action: { cle: 'regle-cas|' + cr2.regleId + '|FICTIF_HYD_DIR', cibleId: 'FICTIF_HYD_DIR', ids: [FH1], regleId: cr2.regleId },
+  }));
+  assert.strictEqual(resR2.cree, true);
+  assert.notStrictEqual(resR2.id, cascades1[0].id);
+  w.c.executerDecisionCopilote_({ id: resR2.id, decision: 'ignorer' });
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: cr2.regleId });
+
+  // Validation #1 -> Validations === 1, Statut === 'proposé'
+  const ex1 = plain(w.c.executerDecisionCopilote_({ id: cascades1[0].id, decision: 'executer' }));
+  assert.strictEqual(ex1.ok, true);
+  assert.strictEqual(w.moves[0].dst, 'FICTIF_HYD_DIR');
+  let ligRegle = plain(w.c.lireCartesCopilote_()).find((x) => x.id === cr.regleId);
+  assert.strictEqual(ligRegle.validations, 1);
+  assert.strictEqual(ligRegle.statut, 'proposé');
+
+  // Validation #2
+  w.sheets.Index.push(['drive|' + FH3, '2026-10-03', '2026-10-03_Facture_Hydro-Exemple.pdf', '02 · Finances', '02 · Finances/Autre', 'classé', '', '', FH3]);
+  w.c.executerEtapeCopilote_(() => false);
+  const cas2 = plain(w.c.lireCartesCopilote_()).find((x) => x.type === 'cascade' && x.statut === 'proposé');
+  assert.ok(cas2 && JSON.parse(cas2.actionJson).regleId === cr.regleId);
+  assert.strictEqual(w.c.executerDecisionCopilote_({ id: cas2.id, decision: 'executer' }).ok, true);
+  ligRegle = plain(w.c.lireCartesCopilote_()).find((x) => x.id === cr.regleId);
+  assert.strictEqual(ligRegle.validations, 2);
+  assert.strictEqual(ligRegle.statut, 'proposé');
+
+  // Validation #3 -> passage auto
+  w.sheets.Index.push(['drive|' + FH4, '2026-10-04', '2026-10-04_Facture_Hydro-Exemple.pdf', '02 · Finances', '02 · Finances/Autre', 'classé', '', '', FH4]);
+  w.c.executerEtapeCopilote_(() => false);
+  const cas3 = plain(w.c.lireCartesCopilote_()).find((x) => x.type === 'cascade' && x.statut === 'proposé');
+  assert.ok(cas3 && JSON.parse(cas3.actionJson).regleId === cr.regleId);
+  assert.strictEqual(w.c.executerDecisionCopilote_({ id: cas3.id, decision: 'executer' }).ok, true);
+  ligRegle = plain(w.c.lireCartesCopilote_()).find((x) => x.id === cr.regleId);
+  assert.strictEqual(ligRegle.validations, 3);
+  assert.strictEqual(ligRegle.statut, 'auto');
+  assert.strictEqual(JSON.parse(ligRegle.actionJson).auto, true);
+});
+
+test('non-régression M9 Anomalie 2 : zéro repli sur racine domaine ou sous-dossier partiel, support multi-niveaux existant', () => {
+  const TEL1 = 'FICTIF_TEST_TEL_00001';
+  const w = ctxQR({
+    folders: {
+      FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM02', 'FICTIF_VRAC'] },
+      FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_EXISTANT'] },
+      FICTIF_EXISTANT: { id: 'FICTIF_EXISTANT', name: 'Existant', parents: ['FICTIF_DOM02'], files: [], folders: ['FICTIF_SUBVALIDE'] },
+      FICTIF_SUBVALIDE: { id: 'FICTIF_SUBVALIDE', name: 'SousDossierValide', parents: ['FICTIF_EXISTANT'], files: [], folders: [] },
+      FICTIF_VRAC: { id: 'FICTIF_VRAC', name: '08 · Perso & projets', parents: ['FICTIF_ROOT'], files: [TEL1], folders: [] },
+    },
+    files: {
+      [TEL1]: { id: TEL1, name: '2026-10-01_Facture_TelecomExemple.pdf', parents: ['FICTIF_VRAC'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|' + TEL1, '2026-10-01', '2026-10-01_Facture_TelecomExemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', TEL1],
+      ],
+    },
+  });
+
+  // 1. Sous-dossier inexistant à 1 niveau -> 0 déplacement, 0 carte cascade
+  const r1 = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture TelecomExemple alors déplacer dans 02 · Finances/SousDossierInexistant' }));
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: r1.regleId }).auto, true);
+  w.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(w.moves.length, 0);
+  assert.strictEqual(plain(w.c.lireCartesCopilote_()).filter((x) => x.type === 'cascade').length, 0);
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: r1.regleId });
+
+  // 2. Chemin multi-niveaux partiellement inexistant -> parser préserve tout, 0 déplacement (ni Existant, ni racine)
+  const parsedMulti = plain(w.c.parserPhraseRegle_('Si facture TelecomExemple alors déplacer dans 02 · Finances/Existant/SousDossierInexistant', ['02 · Finances'], ['Finances']));
+  assert.ok(parsedMulti);
+  assert.strictEqual(parsedMulti.cible, '02 · Finances/Existant/SousDossierInexistant');
+  const r2 = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture TelecomExemple alors déplacer dans 02 · Finances/Existant/SousDossierInexistant' }));
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: r2.regleId }).auto, true);
+  w.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(w.moves.length, 0);
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: r2.regleId });
+
+  // 3. Contrôle positif multi-niveaux existant -> déplacement vers la feuille cible
+  const r3 = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture TelecomExemple alors déplacer dans 02 · Finances/Existant/SousDossierValide' }));
+  assert.strictEqual(r3.ok, true);
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: r3.regleId }).auto, true);
+  w.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(w.moves.length, 1);
+  assert.strictEqual(w.moves[0].dst, 'FICTIF_SUBVALIDE');
 });
