@@ -986,3 +986,69 @@ test('doPost action=copilote-pack et action=copilote-checklist : secret, validat
   assert.strictEqual(appelsChk, 2);
   assert.strictEqual(releaseCalls, 4);
 });
+
+/* ---------- action=copilote-question & action=copilote-regle (Lot 4B-1, #18/#19) ---------- */
+
+test('doPost action=copilote-question et action=copilote-regle : secret, validation, verrou, opération Cout, mémo requestId', () => {
+  const c = load(['Config.gs', 'WebApp.gs']);
+  const cache = {};
+  let lockOk = true;
+  let releaseCalls = 0;
+  let lockCalls = 0;
+  let appelsQ = 0;
+  let appelsR = 0;
+  const ops = [];
+  c.CacheService = { getScriptCache: () => ({ get: (k) => cache[k] || null, put: (k, v) => { cache[k] = v; } }) };
+  c.PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k === 'DriveAI_WEBAPP_SECRET' ? 'SECRET' : null), setProperty: () => {} }) };
+  c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  c.LockService = { getScriptLock: () => ({ tryLock: () => { lockCalls++; return lockOk; }, releaseLock: () => { releaseCalls++; } }) };
+  c.poserOperationCourante_ = (op) => ops.push(op);
+  c.repondreQuestionCopilote_ = (p) => {
+    appelsQ++;
+    if (p.question === 'err') return { ok: false, erreur: 'erreur simulée' };
+    return { ok: true, reponse: 'Voici la facture.', sources: [{ fileId: 'FICTIF_1', nom: 'Facture.pdf', chemin: '02 · Finances', lien: 'https://drive.google.com/file/d/FICTIF_1/view' }], llmUtilise: false };
+  };
+  c.executerRegleCopilote_ = (p) => {
+    appelsR++;
+    if (p.phrase === 'Si immigration alors déplacer') return { ok: false, erreur: 'zone protégée ou action interdite' };
+    return { ok: true, regleId: p.regleId || 'cop-reg-1', auto: p.mode === 'basculer-auto', message: 'ok' };
+  };
+
+  const post = (action, secret, body) => JSON.parse(c.doPost({
+    parameter: { action, secret },
+    postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) },
+  }));
+
+  // copilote-question : secret, JSON invalide, validation question, sans LockService bloquant, mémo requestId
+  assert.strictEqual(post('copilote-question', 'MAUVAIS', { question: 'Test ?' }).erreur, 'refusé');
+  assert.strictEqual(post('copilote-question', 'SECRET', '{bad').erreur, 'corps JSON invalide');
+  assert.strictEqual(post('copilote-question', 'SECRET', { question: '   ' }).erreur, 'question requise');
+  assert.strictEqual(post('copilote-question', 'SECRET', { question: 'a'.repeat(301) }).erreur, 'question trop longue (max 300 car.)');
+  assert.strictEqual(post('copilote-question', 'SECRET', { question: 'err', requestId: 'reqQuest01' }).ok, false);
+  assert.strictEqual(Object.keys(cache).length, 0, 'ok:false non mémorisé');
+  const q1 = post('copilote-question', 'SECRET', { question: 'Ma facture ?', requestId: 'reqQuest02' });
+  const q2 = post('copilote-question', 'SECRET', { question: 'Ma facture ?', requestId: 'reqQuest02' });
+  assert.strictEqual(q1.ok, true);
+  assert.strictEqual(q2.memo, true);
+  assert.strictEqual(appelsQ, 2);
+  assert.strictEqual(lockCalls, 0, 'copilote-question sans LockService bloquant');
+  assert.ok(ops.includes('app:copilote-question'));
+
+  // copilote-regle : secret, JSON invalide, validation mode/phrase/regleId, verrou, mémo requestId
+  assert.strictEqual(post('copilote-regle', 'MAUVAIS', { mode: 'creer', phrase: 'Si facture alors Finances' }).erreur, 'refusé');
+  assert.strictEqual(post('copilote-regle', 'SECRET', '{bad').erreur, 'corps JSON invalide');
+  assert.strictEqual(post('copilote-regle', 'SECRET', { mode: 'inconnu' }).erreur, 'mode invalide');
+  assert.strictEqual(post('copilote-regle', 'SECRET', { mode: 'creer', phrase: 'abc' }).erreur, 'phrase invalide');
+  assert.strictEqual(post('copilote-regle', 'SECRET', { mode: 'basculer-auto', regleId: 'bad|id' }).erreur, 'regleId invalide');
+  lockOk = false;
+  assert.match(post('copilote-regle', 'SECRET', { mode: 'creer', phrase: 'Si facture alors 02 · Finances', requestId: 'reqReg01' }).erreur, /moteur occupé/);
+  lockOk = true;
+  assert.strictEqual(post('copilote-regle', 'SECRET', { mode: 'creer', phrase: 'Si immigration alors déplacer', requestId: 'reqReg02' }).ok, false);
+  assert.strictEqual(Object.keys(cache).length, 1, 'seul q1 mémorisé');
+  const r1 = post('copilote-regle', 'SECRET', { mode: 'creer', phrase: 'Si facture alors 02 · Finances', requestId: 'reqReg03' });
+  const r2 = post('copilote-regle', 'SECRET', { mode: 'creer', phrase: 'Si facture alors 02 · Finances', requestId: 'reqReg03' });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r2.memo, true);
+  assert.strictEqual(appelsR, 2);
+  assert.strictEqual(releaseCalls, 2);
+});

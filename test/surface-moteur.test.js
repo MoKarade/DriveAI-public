@@ -320,6 +320,11 @@ const CONTRAT = [
   'indexerDocumentsVivantsPacks_', 'analyserChecklistsCopilotePure_', 'extraireOrganismesActifs18MoisPure_',
   'detecterChecklistsCopilote_', 'detecterChangementVieCopilote_', 'executerChecklistCopilote_',
   'creerPackCopilote_', 'actionCopilotePack_', 'actionCopiloteChecklist_',
+  // Brouillons augmentés, Questions IA & Règles en 1 phrase (Lot 4B-1, #16/#18/#19)
+  'chercherReferencesDriveBrouillon_', 'repondreQuestionCopilote_', 'parserPhraseRegle_',
+  'executerRegleCopilote_', 'lireReglesCopilote_', 'appliquerReglesGmail_',
+  'appliquerReglesDriveCopilote_', 'incrementerValidationRegle_', 'regleEstInterditeQR_',
+  'actionCopiloteQuestion_', 'actionCopiloteRegle_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

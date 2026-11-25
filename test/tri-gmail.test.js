@@ -1346,3 +1346,60 @@ test('GAP-6 — filsFondLusJour_, reliquatFondNonVivant_ et compteurs journalier
   c.trierHistoriqueArchive_({ traites: 0, attentes: 0 }, () => false, ['Finance'], libelles);
   assert.strictEqual(calls.props.DriveAI_TRI_HISTO_FILS_JOUR, '1');
 });
+
+test('#19 trierFil_ : priorité des règles en 1 phrase actives (auto), zéro retrait de libellé et protection zone protégée', () => {
+  const c = load(['Config.gs', 'Gmail.gs', 'TriGmail.gs', 'Copilote.gs', 'QuestionsRegles.gs']);
+  const ajouts = [];
+  const poses = [];
+  const archives = [];
+  c.reinitialiserBrouillonsTri_();
+  c.reinitialiserEscaladeTri_();
+  c.reinitialiserReglesGmailCache_();
+  c.journalErreur_ = () => {};
+  c.journalInfo_ = () => {};
+  c.budgetCampagnesAtteint_ = () => false;
+  c.estHorsFenetreIntentions_ = () => false;
+  c.indexContient_ = () => false;
+  c.indexAjouter_ = (k, r) => ajouts.push({ cle: k, ...plain(r) });
+  c.toucheZoneProtegee_ = (t) => /IRCC/.test(t);
+  c.ecarteParMotsCles_ = () => false;
+  c.piecesJointes_ = () => [];
+  c.estPannePlateforme_ = () => false;
+  c.estPromoGmail_ = () => false;
+  c.apprendreTri_ = () => {};
+  c.triApprisCache_ = () => ({});
+  c.confianceCache_ = () => ({});
+  c.ficheCache_ = () => ({});
+  c.lireCartesCopilote_ = () => [{
+    id: 'cop-reg-1',
+    type: 'regle-auto',
+    domaine: '02 · Finances',
+    chemin: '02 · Finances',
+    statut: 'auto',
+    actionJson: JSON.stringify({
+      cle: 'regle|hydro',
+      si: { mots: ['hydro'] },
+      alors: { canal: 'gmail', action: 'libeller', libelle: 'Finance', important: true, archiver: false },
+      auto: true,
+    }),
+  }];
+  let llmAppels = 0;
+  c.analyserFil_ = () => { llmAppels++; return null; };
+  const labObj = (nom) => ({ getName: () => nom, addToThread: (t) => poses.push({ nom, fil: t.getId() }) });
+  const libelles = { Finance: labObj('Finance'), 'À vérifier': labObj('À vérifier'), '⚠️ Suspect': labObj('⚠️ Suspect'), '⏰ À traiter': labObj('⏰ À traiter') };
+
+  const fil = {
+    getId: () => 'FIL_REG_1',
+    isInInbox: () => true,
+    getLastMessageDate: () => new Date(1000),
+    isUnread: () => true,
+    getLabels: () => [],
+    getMessages: () => [{ getId: () => 'M_REG_1', getFrom: () => 'Factures <f@exemple.test>', getSubject: () => 'Facture Hydro mensuelle', getHeader: () => '', getPlainBody: () => 'Détail', isDraft: () => false }],
+    moveToArchive: () => archives.push('FIL_REG_1'),
+  };
+  const res = c.trierFil_(fil, ['Finance'], libelles, false, false);
+  assert.strictEqual(res, 'traite');
+  assert.strictEqual(llmAppels, 0, 'règle auto prioritaire évite un appel LLM inutile');
+  assert.deepStrictEqual(poses.map((p) => p.nom), ['Finance', '⏰ À traiter']);
+  assert.strictEqual(archives.length, 0);
+});

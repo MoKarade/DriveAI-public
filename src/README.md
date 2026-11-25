@@ -12,8 +12,9 @@
 | `Main.gs` | Orchestration du tick (`tickDriveAI`, 43 étapes) + déclencheurs + chien de garde |
 | `Suivi.gs` | Registre des 43 étapes et suivi LIVE (`Progression`, ventilation des coûts) |
 | `WebApp.gs` | Pont HTTP (`doGet`/`doPost`) entre l'app web / GitHub Actions et le moteur |
-| `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons/vides/corbeille (#6), démarches (#7), sentinelle factures (#11), remboursements (#12), checklists (#13) et changement de vie (#14) |
+| `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons/vides/corbeille (#6), démarches (#7), sentinelle factures (#11), remboursements (#12), checklists (#13), changement de vie (#14) et règles (#19) |
 | `PacksChecklists.gs` | Checklists automatiques par démarche (#13), plan « Changement de vie » sur 18 mois (#14) et Packs 1-clic par raccourcis Drive uniquement dans `00 · Packs` (#15) |
+| `QuestionsRegles.gs` | Questions en langage naturel sur métadonnées structurées (#18) et règles en 1 phrase + mode auto annulable (#19) |
 | `Signaux.gs` | Onglet `Signaux` (métadonnées structurées), rattrapage borné (`15/j`, frein `25 $`), radar expirations (#9), pièces manquantes (#10), sentinelle factures (#11) et argent oublié (#12) |
 | `Pipeline.gs` | Traitement unifié d'un document (doublon → technique → média → OCR → LLM → routage) |
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
