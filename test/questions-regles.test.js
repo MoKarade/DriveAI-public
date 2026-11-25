@@ -291,18 +291,27 @@ test('#19 non-régression : articles français interdits, liste blanche LLM et d
     },
   });
 
-  // Retrait de libellés avec articles / pluriels et envoi de courriel bloqués à la création
+  // Retrait de libellés avec articles / pluriels / possessifs / démonstratifs / quantificateurs / ôter et envoi e-mail bloqués
   for (const phrase of [
     'Si mail Hydro alors retirer le libellé Finances',
     'Si mail Hydro alors enlever les libellés Finances',
     'Si mail Hydro alors supprimer l\'étiquette Finances',
     'Si document Hydro alors envoyer des courriels',
+    'Si mail Hydro alors envoyer un e-mail et libeller Finances',
+    'Si mail Hydro alors retirer mon libellé Finances',
+    'Si mail Hydro alors retirer ce libellé Finances',
+    'Si mail Hydro alors retirer tous les libellés Finances',
+    'Si mail Hydro alors ôter le libellé Finances',
   ]) {
     assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'creer', phrase }).ok, false, phrase);
   }
 
-  // parserRegleViaLlm_ rejette action/canal hors liste blanche et libelle/domaine protégés
+  // parserRegleViaLlm_ rejette action/canal hors liste blanche (y compris clés prototype) et libelle/domaine protégés
   w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'supprimer', domaine: '', cible: '', libelle: 'Finances' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'toString', domaine: '', cible: '', libelle: 'Finances' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'constructor', action: 'libeller', domaine: '', cible: '', libelle: 'Finances' });
   assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
   w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'sms', action: 'libeller', domaine: '', cible: '', libelle: 'Finances' });
   assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
@@ -311,16 +320,18 @@ test('#19 non-régression : articles français interdits, liste blanche LLM et d
   w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'libeller', domaine: '', cible: '', libelle: 'Anna' });
   assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
 
-  // appliquerReglesGmail_ bloque une ligne Copilote pré-injectée si colonnes vides mais ActionJson protégé
+  // appliquerReglesGmail_ bloque une ligne Copilote pré-injectée si colonnes vides mais ActionJson protégé (incl. _Prive dans phrase)
   const reglesPiegees = [
     { id: 'cop-mal-04', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, domaine: '04 · Immigration', alors: { canal: 'gmail', action: 'libeller', libelle: 'Finances' }, auto: true }) },
     { id: 'cop-mal-anna', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'gmail', action: 'libeller', libelle: 'Anna' }, auto: true }) },
     { id: 'cop-mal-alors', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'gmail', action: 'libeller', domaine: '04 · Immigration', libelle: 'Finances' }, auto: true }) },
+    { id: 'cop-mal-prive', domaine: '02 · Finances', chemin: '02 · Finances', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, phrase: 'Si hydro alors _Prive', domaine: '02 · Finances', cible: '02 · Finances', alors: { canal: 'gmail', action: 'libeller', libelle: 'Finances' }, auto: true }) },
   ];
   assert.strictEqual(w.c.appliquerReglesGmail_(reglesPiegees, {
     expediteur: 'Hydro <factures@exemple.test>', adresse: 'factures@exemple.test',
     sujet: 'Facture Hydro octobre', nomsPj: [], zoneProtegee: false, candidats: ['Finances', 'Anna'],
   }), null);
+  assert.strictEqual(w.c.regleEstInterditeQR_(reglesPiegees[3], JSON.parse(reglesPiegees[3].actionJson)), true);
 
   // appliquerReglesDriveCopilote_ bloque également une ligne pré-injectée visant 04 · Immigration / 00 · Packs dans ActionJson
   w.sheets.Copilote.push(

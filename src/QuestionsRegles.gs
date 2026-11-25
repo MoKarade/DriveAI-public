@@ -71,8 +71,8 @@ function repondreQuestionCopilote_(payload) {
 function toucheZoneOuActionInterditeRegle_(texte, domaine, cible) {
   var n = normaliserQR_(texte);
   if (/\b(supprimer|supprime|effacer|efface|detruire|detruit|corbeille|vider|sendemail|transferer|repondre\s+automatiquement|spam)\b/.test(n)) return true;
-  if (/\b(?:retirer|enlever|supprimer)\s+(?:(?:un|une|le|la|les|des|l)\s+)?(?:libell|etiqu)[a-z]*\b/.test(n) || /\benvoyer\s+(?:(?:un|une|des|les)\s+)?(?:mail|courriel)s?\b/.test(n)) return true;
-  if (/\b(04\s*·\s*immigration|immigration|ircc|csq|caq|anna|00\s*·\s*packs|00\s*·\s*a\s*trier|00\s*·\s*a\s*verifier|_technique|_doublons|_medias|donnees\s*&\s*exports)\b/.test(n)) return true;
+  if (/\b(?:retirer|enlever|oter|supprimer)\s+(?:(?:tous|toutes)\s+)?(?:(?:un|une|le|la|les|des|l|ce|cet|cette|ces|mon|ma|mes|ton|ta|tes|son|sa|ses)\s+)?(?:libell|etiqu)[a-z]*\b/.test(n) || /\benvoyer\s+(?:(?:un|une|des|les)\s+)?(?:(?:e[- ]?)?mail|courriel)s?\b/.test(n)) return true;
+  if (/\b(04\s*·\s*immigration|immigration|ircc|csq|caq|anna|00\s*·\s*packs|00\s*·\s*a\s*trier|00\s*·\s*a\s*verifier|_technique|_doublons|_medias|donnees\s*&\s*exports)\b/.test(n) || /\b_[a-z0-9]+/.test(n)) return true;
   return typeof estZoneProtegeeCopilote_ === 'function' && (estZoneProtegeeCopilote_(cible, domaine) || estZoneProtegeeCopilote_(texte, domaine));
 }
 function regleEstInterditeQR_(r, a) {
@@ -115,7 +115,7 @@ function parserRegleViaLlm_(phrase) {
     var raw = appelAnthropicTexte_(mod, 'Convertis en JSON {"mots":[],"canal":"drive|gmail|les-deux","action":"deplacer|libeller|important|archiver","domaine":"","cible":"","libelle":"","important":false,"archiver":false} ou null.', phrase, 220);
     var a = raw ? raw.indexOf('{') : -1, b = raw ? raw.lastIndexOf('}') : -1, o = (a !== -1 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : null;
     var okAct = { deplacer: 1, libeller: 1, important: 1, archiver: 1 }, okCan = { drive: 1, gmail: 1, 'les-deux': 1 };
-    if (!o || !Array.isArray(o.mots) || !o.mots.length || !okAct[o.action] || !okCan[o.canal] || toucheZoneOuActionInterditeRegle_([phrase, o.cible, o.libelle, o.domaine].join(' '), o.domaine || '', o.cible || '') || (typeof estZoneProtegeeCopilote_ === 'function' && o.libelle && estZoneProtegeeCopilote_(o.libelle, o.domaine || ''))) return null;
+    if (!o || !Array.isArray(o.mots) || !o.mots.length || !Object.prototype.hasOwnProperty.call(okAct, o.action) || !Object.prototype.hasOwnProperty.call(okCan, o.canal) || toucheZoneOuActionInterditeRegle_([phrase, o.cible, o.libelle, o.domaine].join(' '), o.domaine || '', o.cible || '') || (typeof estZoneProtegeeCopilote_ === 'function' && o.libelle && estZoneProtegeeCopilote_(o.libelle, o.domaine || ''))) return null;
     var mots = o.mots.map(function (m) { return normaliserQR_(m); }).filter(Boolean).slice(0, 6);
     return mots.length ? { cle: 'regle|' + normaliserQR_(mots.join('-') + '|' + (o.cible || o.libelle || o.action)).slice(0, 64), phrase: phrase, domaine: String(o.domaine || ''), cible: String(o.cible || o.domaine || ''), si: { mots: mots }, alors: { canal: o.canal, action: o.action, libelle: String(o.libelle || ''), domaine: String(o.domaine || ''), cible: String(o.cible || ''), important: !!o.important, archiver: !!o.archiver }, auto: false, validations: 0 } : null;
   } catch (e) { return null; } finally { if (typeof flushUsage_ === 'function') { try { flushUsage_(); } catch (eF) {} } }

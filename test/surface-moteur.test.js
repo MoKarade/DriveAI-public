@@ -323,7 +323,7 @@ const CONTRAT = [
   // Brouillons augmentés, Questions IA & Règles en 1 phrase (Lot 4B-1, #16/#18/#19)
   'chercherReferencesDriveBrouillon_', 'repondreQuestionCopilote_', 'parserPhraseRegle_',
   'executerRegleCopilote_', 'lireReglesCopilote_', 'appliquerReglesGmail_',
-  'appliquerReglesDriveCopilote_', 'incrementerValidationRegle_',
+  'appliquerReglesDriveCopilote_', 'incrementerValidationRegle_', 'regleEstInterditeQR_',
   'actionCopiloteQuestion_', 'actionCopiloteRegle_',
 ];
 

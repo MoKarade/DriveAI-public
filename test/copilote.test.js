@@ -757,3 +757,48 @@ test('#19 serialiserActionCopilote_, regle-auto (sync ActionJson.auto & passage 
   assert.strictEqual(etape.traitees, 1);
   assert.ok(etape.creees >= 1);
 });
+
+test('#19 non-régression : executerDecisionCopilote_ et WebApp action=copilote-executer bloquent regle-auto protégée pré-injectée', () => {
+  const sh = makeSheetHarness({
+    Copilote: [
+      ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+      ['cop-inj-04', new Date(), 'regle', 'regle-auto', '', '', 'Piège 04',
+        JSON.stringify({ si: { mots: ['hydro'] }, domaine: '04 · Immigration', alors: { canal: 'drive', action: 'deplacer', domaine: '04 · Immigration', cible: '04 · Immigration' }, auto: false, validations: 2 }), 'proposé', 2],
+      ['cop-inj-anna', new Date(), 'regle', 'regle-auto', '', '', 'Piège Anna',
+        JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'gmail', action: 'libeller', libelle: 'Anna' }, auto: false, validations: 2 }), 'proposé', 2],
+      ['cop-inj-packs', new Date(), 'regle', 'regle-auto', '', '', 'Piège Packs',
+        JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'drive', action: 'deplacer', domaine: '02 · Finances', cible: '00 · Packs/Visa' }, auto: false, validations: 2 }), 'proposé', 2],
+    ],
+  });
+  const cache = {};
+  const props = { DriveAI_WEBAPP_SECRET: 'SECRET_FICTIF' };
+  const c = load(['Config.gs', 'Entites.gs', 'DriveRest.gs', 'Maintenance.gs', 'VeilleDrive.gs', 'Fusion.gs', 'Reorg.gs', 'Actions.gs', 'Journal.gs', 'Copilote.gs', 'QuestionsRegles.gs', 'WebApp.gs'], {
+    CacheService: { getScriptCache: () => ({ get: (k) => cache[k] || null, put: (k, v) => { cache[k] = v; } }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); } }) },
+    ContentService: { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } },
+    LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
+  });
+  c.feuille_ = sh.feuille_;
+  c.poserOperationCourante_ = () => {};
+
+  for (const [idx, id] of ['cop-inj-04', 'cop-inj-anna', 'cop-inj-packs'].entries()) {
+    const rAuto = c.executerDecisionCopilote_({ id, decision: 'passer-auto' });
+    assert.strictEqual(rAuto.ok, false, 'passer-auto refusé pour ' + id);
+    const rExec = c.executerDecisionCopilote_({ id, decision: 'executer' });
+    assert.strictEqual(rExec.ok, false, 'executer refusé pour ' + id);
+    assert.strictEqual(sh.sheets.Copilote[idx + 1][8], 'proposé');
+    assert.strictEqual(sh.sheets.Copilote[idx + 1][9], 2);
+
+    const wPass = JSON.parse(c.doPost({
+      parameter: { secret: 'SECRET_FICTIF', action: 'copilote-executer' },
+      postData: { contents: JSON.stringify({ requestId: 'reqPass' + idx + '00', id, decision: 'passer-auto' }) },
+    }));
+    const wExec = JSON.parse(c.doPost({
+      parameter: { secret: 'SECRET_FICTIF', action: 'copilote-executer' },
+      postData: { contents: JSON.stringify({ requestId: 'reqExec' + idx + '00', id, decision: 'executer' }) },
+    }));
+    assert.strictEqual(wPass.ok, false);
+    assert.strictEqual(wExec.ok, false);
+    assert.strictEqual(sh.sheets.Copilote[idx + 1][8], 'proposé');
+  }
+});

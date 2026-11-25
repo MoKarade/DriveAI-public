@@ -192,7 +192,7 @@ function executerDecisionCopilote_(corps) {
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, action = parserActionCopilote_(carte.actionJson), nbVal = carte.validations;
 
   if (decision === 'ignorer' || decision === 'desactiver-auto' || decision === 'passer-auto') {
-    if (decision === 'passer-auto' && (COPILOTE_TYPES_SANS_AUTO[carte.type] || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) {
+    if (decision === 'passer-auto' && (COPILOTE_TYPES_SANS_AUTO[carte.type] || estZoneProtegeeCopilote_(carte.chemin, carte.domaine) || (carte.type === 'regle-auto' && typeof regleEstInterditeQR_ === 'function' && regleEstInterditeQR_(carte, action)))) {
       return { ok: false, erreur: 'mode auto interdit sur cette carte' };
     }
     var ns = decision === 'ignorer' ? 'ignoré' : (decision === 'passer-auto' ? 'auto' : 'proposé');
@@ -227,7 +227,7 @@ function executerDecisionCopilote_(corps) {
     return { ok: true, id: id, statut: 'reclamé', actionIds: [], nbValidations: nbVal, proposerAuto: false, message: 'Marqué comme réclamé (' + nbRec + ' reçu(s)).' };
   }
 
-  if (estZoneProtegeeCopilote_(carte.chemin, carte.domaine)) return { ok: false, erreur: 'zone protégée — mutation refusée' };
+  if (estZoneProtegeeCopilote_(carte.chemin, carte.domaine) || (carte.type === 'regle-auto' && typeof regleEstInterditeQR_ === 'function' && regleEstInterditeQR_(carte, action))) return { ok: false, erreur: 'zone protégée — mutation refusée' };
   var proteges = ensembleDomainesProteges_(), intouchables = typeof ensembleIntouchables_ === 'function' ? ensembleIntouchables_() : {}, actionIds = [];
 
   if (carte.type === 'cascade') {
