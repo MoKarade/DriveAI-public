@@ -87,14 +87,26 @@ function parserPhraseRegle_(phrase, domainesConnus, libellesConnus) {
   var mSep = /\b(?:alors)\b|=>|->|,/i.exec(p), partSi = mSep ? p.slice(0, mSep.index) : p, partAlors = mSep ? p.slice(mSep.index + mSep[0].length) : p;
   var mExp = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.exec(partSi), siMots = tokeniserQR_(normaliserQR_(partSi).replace(/^si\s+|^quand\s+/, ''), 3).slice(0, 6);
   if (!siMots.length && !mExp) return null;
-  var doms = Array.isArray(domainesConnus) ? domainesConnus : (typeof CONFIG !== 'undefined' && CONFIG.DOMAINES ? Object.keys(CONFIG.DOMAINES) : []);
-  var libs = Array.isArray(libellesConnus) ? libellesConnus : [], nAl = normaliserQR_(partAlors), domaine = '', libelle = '', cible = '';
-  for (var i = 0; i < doms.length; i++) { var dn = normaliserQR_(doms[i]), ct = dn.replace(/^\d+\s*·\s*/, ''); if ((dn && nAl.indexOf(dn) !== -1) || (ct.length >= 4 && nAl.indexOf(ct) !== -1)) { domaine = doms[i]; break; } }
+  var doms = Array.isArray(domainesConnus) ? domainesConnus
+    : (typeof domainesAutorises_ === 'function' ? domainesAutorises_()
+      : ((typeof CONFIG !== 'undefined' && CONFIG.DOMAINES ? Object.keys(CONFIG.DOMAINES) : [])
+        .concat((typeof CONFIG !== 'undefined' && Array.isArray(CONFIG.DOMAINES_AUTO)) ? CONFIG.DOMAINES_AUTO : [])));
+  var libs = Array.isArray(libellesConnus) ? libellesConnus : [], nAl = normaliserQR_(partAlors), domaine = '', libelle = '', cible = '', bestIdx = -1;
+  for (var i = 0; i < doms.length; i++) {
+    var dn = normaliserQR_(doms[i]), idx = dn ? nAl.indexOf(dn) : -1;
+    if (idx !== -1 && (bestIdx === -1 || idx < bestIdx)) { bestIdx = idx; domaine = doms[i]; }
+  }
+  if (!domaine) {
+    for (var i2 = 0; i2 < doms.length; i2++) {
+      var ct = normaliserQR_(doms[i2]).replace(/^\d+\s*·\s*/, ''), idx2 = ct.length >= 4 ? nAl.indexOf(ct) : -1;
+      if (idx2 !== -1 && (bestIdx === -1 || idx2 < bestIdx)) { bestIdx = idx2; domaine = doms[i2]; }
+    }
+  }
   for (var j = 0; j < libs.length; j++) if (nAl.indexOf(normaliserQR_(libs[j])) !== -1) { libelle = libs[j]; break; }
-  var mCib = /(?:dans|vers|dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)\s+([A-Za-z0-9À-ÿ _/·.-]{2,50})/i.exec(partAlors);
+  var mCib = /(?:^|[^A-Za-z0-9À-ÿœŒŸ])(dans|vers|dossier|libell[eé]r?|étiqueter|etiqueter|étiquette|etiquette|catégorie|categorie)(?:\s+((?:l['’]|(?:la|le|un|une)\s+)?(?:dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)))?\s+([A-Za-z0-9À-ÿœŒŸ'’ &_/·.-]{2,220})/i.exec(partAlors);
   if (mCib) {
-    var seg = mCib[1].trim().replace(/\s+(?:et|en|puis)\b.*$/i, '').trim();
-    if (!libelle && /libell|etiqu|categori/i.test(mCib[0])) libelle = seg;
+    var seg = mCib[3].trim().replace(/\s+(?:(?:et|puis)\s+(?:l['’]|la\s+|le\s+|les\s+)?(?:marquer|archiver|libeller|etiqueter|étiqueter|classer|ranger|deplacer|déplacer|mettre|passer|ajouter|en\s+)|en\s+(?:important|prioritaire|archive)|(?:important|prioritaire)\s+(?:et\s+)?archiver|archiver(?:\s+(?:et\s+)?(?:important|prioritaire|marquer.*))?)\b.*$/i, '').replace(/[.,;:!?]+$/, '').trim();
+    if (!libelle && /libell|etiqu|categori/i.test(mCib[1] + ' ' + (mCib[2] || ''))) libelle = seg;
     if (seg && !domaine && !libelle) cible = seg;
     else if (seg && domaine && seg.indexOf('/') !== -1) {
       var segsCib = seg.split('/').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -132,7 +144,50 @@ function lireReglesCopilote_(seulementAuto) {
     return seulementAuto ? (c.statut === 'auto' && a.auto !== false) : (c.statut === 'proposé' || c.statut === 'auto' || c.statut === 'actif');
   });
 }
-function serialiserRegleAction_(obj) { return typeof serialiserActionCopilote_ === 'function' ? serialiserActionCopilote_(obj) : (JSON.stringify(obj || {}).length <= 500 ? JSON.stringify(obj || {}) : '{}'); }
+function hashRegleCleQR_(s) {
+  var h1 = 2166136261, h2 = 5381, txt = String(s || '');
+  for (var i = 0; i < txt.length; i++) {
+    var c = txt.charCodeAt(i);
+    h1 = ((h1 ^ c) * 16777619) >>> 0;
+    h2 = (((h2 << 5) + h2) ^ c) >>> 0;
+  }
+  return h1.toString(36) + h2.toString(36);
+}
+function serialiserRegleAction_(obj) {
+  var copie = {};
+  if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) {
+    copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : (obj[k] && typeof obj[k] === 'object' ? JSON.parse(JSON.stringify(obj[k])) : obj[k]);
+  });
+  var len = function () { return JSON.stringify(copie).length; };
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.domaine === copie.domaine || !copie.alors.domaine) delete copie.alors.domaine;
+    if (copie.alors.cible === copie.cible || !copie.alors.cible) delete copie.alors.cible;
+  }
+  if (len() > 492 && typeof copie.phrase === 'string') {
+    [120, 40].forEach(function (lim) { if (len() > 492 && typeof copie.phrase === 'string') copie.phrase = copie.phrase.slice(0, lim); });
+    if (len() > 492) delete copie.phrase;
+  }
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.libelle === '') delete copie.alors.libelle;
+    if (copie.alors.important === false) delete copie.alors.important;
+    if (copie.alors.archiver === false) delete copie.alors.archiver;
+  }
+  if (len() > 492 && typeof copie.cle === 'string' && copie.cle.length > 24) {
+    copie.cle = 'regle|' + hashRegleCleQR_(copie.cle + '|' + (copie.cible || ''));
+  }
+  var cibleMarge = (copie.auto === false && !copie.validations) ? 478 : 492;
+  if (len() > cibleMarge) {
+    if (copie.auto === false) delete copie.auto;
+    if (len() > cibleMarge && copie.validations === 0) delete copie.validations;
+  }
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.canal === 'les-deux') delete copie.alors.canal;
+    if (len() > 492 && copie.alors.action === 'deplacer' && copie.cible) delete copie.alors.action;
+  }
+  var out = typeof serialiserActionCopilote_ === 'function' ? serialiserActionCopilote_(copie) : JSON.stringify(copie);
+  if (out === '{}' && len() <= 500) out = JSON.stringify(copie);
+  return out.length <= 500 ? out : '{}';
+}
 /** #19 — Crée, bascule auto/proposé ou désactive une règle en 1 phrase dans `Copilote`. */
 function executerRegleCopilote_(payload) {
   var p = payload || {}, mode = String(p.mode || '').trim();
@@ -145,10 +200,16 @@ function executerRegleCopilote_(payload) {
     var libs = []; try { if (typeof libellesUtilisateur_ === 'function') libs = Object.keys(libellesUtilisateur_()); } catch (eL) {}
     var regle = parserPhraseRegle_(phrase, null, libs) || parserRegleViaLlm_(phrase);
     if (!regle) return { ok: false, erreur: 'règle incompréhensible (utilise « Si ... alors ... »)' };
+    var actionJson = serialiserRegleAction_(regle);
+    if (!actionJson || actionJson === '{}') return { ok: false, regleId: '', auto: false, message: '', erreur: 'règle trop longue pour être enregistrée' };
+    var cleStockee = (typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(actionJson) : {}).cle || regle.cle;
     var exist = lireReglesCopilote_(false);
-    for (var i = 0; i < exist.length; i++) if ((typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(exist[i].actionJson) : {}).cle === regle.cle) return { ok: true, regleId: exist[i].id, auto: exist[i].statut === 'auto', message: 'Règle déjà enregistrée.' };
+    for (var i = 0; i < exist.length; i++) {
+      var cleEx = (typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(exist[i].actionJson) : {}).cle;
+      if (cleEx && (cleEx === regle.cle || cleEx === cleStockee)) return { ok: true, regleId: exist[i].id, auto: exist[i].statut === 'auto', message: 'Règle déjà enregistrée.' };
+    }
     var id = 'cop-' + Date.now().toString(36) + '-' + (Math.random().toString(36) + '0000').slice(2, 6);
-    fSheet.appendRow([id, new Date(), 'regle', 'regle-auto', regle.domaine || '', regle.cible || '', phrase.slice(0, 140), serialiserRegleAction_(regle), 'proposé', 0]);
+    fSheet.appendRow([id, new Date(), 'regle', 'regle-auto', regle.domaine || '', regle.cible || '', phrase.slice(0, 140), actionJson, 'proposé', 0]);
     return { ok: true, regleId: id, auto: false, message: 'Règle créée en mode proposé (annulable).' };
   }
   var regleId = String(p.regleId || '').trim(), cartes = typeof lireCartesCopilote_ === 'function' ? lireCartesCopilote_() : [], carte = null;
@@ -159,10 +220,12 @@ function executerRegleCopilote_(payload) {
     if (carte.statut === 'ignoré') return { ok: false, erreur: 'règle désactivée' };
     if (regleEstInterditeQR_(carte, act)) return { ok: false, erreur: 'zone protégée — mode auto interdit' };
     var nAuto = carte.statut !== 'auto'; act.auto = nAuto;
-    fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(nAuto ? 'auto' : 'proposé');
+    var actMaj = serialiserRegleAction_(act);
+    if (!actMaj || actMaj === '{}') return { ok: false, regleId: regleId, auto: carte.statut === 'auto', message: '', erreur: 'règle trop longue pour être mise à jour' };
+    fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(actMaj); fSheet.getRange(carte.row, 9).setValue(nAuto ? 'auto' : 'proposé');
     return { ok: true, regleId: regleId, auto: nAuto, message: nAuto ? 'Mode automatique activé.' : 'Mode automatique désactivé.' };
   }
-  if (mode === 'supprimer-auto') { act.auto = false; fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue('ignoré'); return { ok: true, regleId: regleId, auto: false, message: 'Règle désactivée.' }; }
+  if (mode === 'supprimer-auto') { act.auto = false; var actSup = serialiserRegleAction_(act); fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue((actSup && actSup !== '{}') ? actSup : carte.actionJson); fSheet.getRange(carte.row, 9).setValue('ignoré'); return { ok: true, regleId: regleId, auto: false, message: 'Règle désactivée.' }; }
   return { ok: false, erreur: 'mode invalide' };
 }
 /** Incrémente les validations d'une règle et passe automatiquement en `auto` à >= 3 validations. */
@@ -174,7 +237,9 @@ function incrementerValidationRegle_(regleId) {
   if (regleEstInterditeQR_(carte, act)) return null;
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, nbVal = (Number(carte.validations) || 0) + 1, auto = carte.statut === 'auto' || nbVal >= seuil, fSheet = feuille_('Copilote');
   act.validations = nbVal; if (auto) act.auto = true;
-  fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(auto ? 'auto' : 'proposé'); fSheet.getRange(carte.row, 10).setValue(nbVal);
+  var actVal = serialiserRegleAction_(act);
+  if (!actVal || actVal === '{}') return null;
+  fSheet.getRange(carte.row, 8).setValue(actVal); fSheet.getRange(carte.row, 9).setValue(auto ? 'auto' : 'proposé'); fSheet.getRange(carte.row, 10).setValue(nbVal);
   return { validations: nbVal, auto: auto, statut: auto ? 'auto' : 'proposé' };
 }
 /** PURE (#19) — Évalue les règles Gmail actives (`auto === true`) avant `analyserFil_`. */
@@ -191,6 +256,17 @@ function appliquerReglesGmail_(reglesAuto, ctxFil) {
   }
   return null;
 }
+function idDomaineRegleQR_(dom) {
+  if (!dom || typeof CONFIG === 'undefined') return '';
+  if (CONFIG.DOMAINES && CONFIG.DOMAINES[dom]) return CONFIG.DOMAINES[dom];
+  if (Array.isArray(CONFIG.DOMAINES_AUTO) && CONFIG.DOMAINES_AUTO.indexOf(dom) !== -1) {
+    try {
+      var props = typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties ? PropertiesService.getScriptProperties() : null;
+      return (props && props.getProperty('DriveAI_DOM_' + dom)) || '';
+    } catch (e) { return ''; }
+  }
+  return '';
+}
 /** #19 — Applique en priorité les règles Drive (`auto` → déplacement réversible, `proposé` → carte `cascade`). */
 function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
   var regles = lireReglesCopilote_(false), traitees = 0, creees = 0, proteges = typeof ensembleDomainesProteges_ === 'function' ? ensembleDomainesProteges_() : {}, parId = {}, ordre = [];
@@ -199,8 +275,14 @@ function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
     var r = regles[i], a = typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(r.actionJson) : {};
     if (!a.si || !a.alors || a.alors.canal === 'gmail' || regleEstInterditeQR_(r, a)) continue;
     var mots = Array.isArray(a.si.mots) ? a.si.mots : [], dom = String(a.domaine || r.domaine || '').trim(), chemCib = String(a.cible || r.chemin || dom).trim();
-    if (!mots.length || !dom || typeof CONFIG === 'undefined' || !CONFIG.DOMAINES || !CONFIG.DOMAINES[dom]) continue;
-    var cibId = CONFIG.DOMAINES[dom];
+    if (!mots.length || !dom) continue;
+    var cibId = idDomaineRegleQR_(dom);
+    if (!cibId || proteges[cibId]) continue;
+    try {
+      var domDir = DriveApp.getFolderById(cibId);
+      if (!domDir || domDir.isTrashed() || (typeof estProtegeDriveCopilote_ === 'function' && estProtegeDriveCopilote_(domDir, proteges))) cibId = '';
+    } catch (eD) { cibId = ''; }
+    if (!cibId || proteges[cibId]) continue;
     if (chemCib.indexOf('/') !== -1 || normaliserQR_(chemCib) !== normaliserQR_(dom)) {
       var segs = chemCib.split('/').map(function (s) { return s.trim(); }).filter(Boolean);
       var domN = normaliserQR_(dom), domCourtN = normaliserQR_(dom.replace(/^\d+\s*·\s*/, ''));
