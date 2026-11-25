@@ -155,7 +155,7 @@ test('creerRappelExpirationAgenda_ : J-90/J-30 idempotents (agenda-exp|), lien D
   assert.strictEqual(id30, 'evt-exp-2');
   assert.ok(index['agenda-exp|FICTIF_EXP_01|90|2027-02-15']);
   assert.ok(index['agenda-exp|FICTIF_EXP_01|30|2027-02-15']);
-  assert.ok(events[0].description.includes('https://drive.google.com/file/d/FICTIF_EXP_01/view'));
+  assert.strictEqual(events[0].description, 'Lien Drive : https://drive.google.com/file/d/FICTIF_EXP_01/view');
   assert.ok(events[0].titre.includes('AssurNord') && events[0].titre.includes('(J-90)'));
 
   // Idempotence stricte + respect freinBudget

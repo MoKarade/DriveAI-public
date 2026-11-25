@@ -260,7 +260,7 @@ test('Radar d expirations (#9) : Agenda J-90/J-30 idempotent, lien Drive, titre 
   const evImmi = events.find((e) => e.description.includes('FICTIF_IMMI_EXP'));
   assert.ok(evImmi && evImmi.titre.startsWith('DriveAI · Échéance document à vérifier'));
   assert.ok(!evImmi.titre.includes('IRCC') && !evImmi.titre.includes('Permis'), 'zéro détail sensible dans le titre Agenda en zone protégée');
-  assert.ok(evImmi.description.includes('https://drive.google.com/file/d/FICTIF_IMMI_EXP/view'));
+  assert.strictEqual(evImmi.description, 'Lien Drive : https://drive.google.com/file/d/FICTIF_IMMI_EXP/view');
 
   // 2e passage : idempotent (0 nouvel événement Agenda, 0 nouvelle carte Copilote)
   c.reinitialiserAgendaRun_();
