@@ -268,6 +268,25 @@ describe('i18n (FR / EN)', () => {
     expect(t('copiloteTotalAReclamer', 'fr')).toContain('{total}');
     expect(t('copiloteTotalAReclamer', 'en')).toContain('{total}');
   });
+
+  it('les 24 clés Copilote Lot 4B-2 sont non vides en FR et EN avec {n}', () => {
+    const clesLot4B2: CleTexte[] = [
+      'copiloteSemaineActions', 'copiloteQuestionPlaceholder', 'copiloteQuestionBtn', 'copiloteQuestionIa',
+      'copiloteQuestionLocal', 'copiloteChecklistsTitre', 'copiloteChecklistsVide', 'copiloteTermineBadge',
+      'copilotePackBtn', 'copilotePackPret', 'copiloteFichesTitre', 'copiloteFichesVide', 'copiloteLectureSeule',
+      'copiloteFicheDocs', 'copiloteFicheEcheances', 'copiloteReglesTitre', 'copiloteReglesVide',
+      'copiloteReglePlaceholder', 'copiloteRegleCreer', 'copiloteReglePropose', 'copiloteRegleActiver',
+      'copiloteRegleCouper', 'copiloteRegleSuppr', 'copiloteRegleVal',
+    ];
+    for (const cle of clesLot4B2) {
+      expect(t(cle, 'fr').trim().length, `fr.${cle}`).toBeGreaterThan(0);
+      expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
+    }
+    for (const cle of ['copilotePackPret', 'copiloteFicheDocs', 'copiloteFicheEcheances', 'copiloteRegleVal'] as const) {
+      expect(t(cle, 'fr')).toContain('{n}');
+      expect(t(cle, 'en')).toContain('{n}');
+    }
+  });
 });
 
 describe('i18n — gardes localStorage (GAP-3)', () => {

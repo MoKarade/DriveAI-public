@@ -27,6 +27,7 @@ export interface DonneesEtat {
   copiloteBrut?: string[][];  // onglet Copilote (Lot 2B) — cartes proactives & démarches
   liensBrut?: string[][];     // onglet Liens (Lot 2B) — courriels liés aux documents Drive
   signauxBrut?: string[][];   // onglet Signaux (Lot 3B) — factures, expirations & remboursements
+  entitesBrut?: string[][];   // onglet Entités (Lot 4B-2) — sujets de vie pour Fiches 360°
 }
 
 interface EtatGlobal {
@@ -60,7 +61,7 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         viderCachePlages(); // relire VRAIMENT (le cache 60 s servirait la même photo)
         abonnesProgression.forEach((cb) => cb());
       }
-      const [index, sante, journal, reglages, telemetrie, couts, reorg, actions, copilote, liens, signaux] = await Promise.all([
+      const [index, sante, journal, reglages, telemetrie, couts, reorg, actions, copilote, liens, signaux, entites] = await Promise.all([
         // Fenêtre OUVERTE (`A2:H`, sans borne haute) — JAMAIS `A2:H<N>` : l'Index est append-only
         // (garde-fou §2) et le reset C28-33 y écrit DEUX lignes par fichier (`tri33|` puis `tri33p|`).
         // Une borne de TÊTE fige l'app EN SILENCE dès qu'elle est franchie (zéro erreur, zéro log :
@@ -86,6 +87,7 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         lirePlage('Copilote', 'A2:J').catch(() => [] as string[][]),
         lirePlage('Liens', 'A2:H').catch(() => [] as string[][]),
         lirePlage('Signaux', 'A2:L').catch(() => [] as string[][]),
+        lirePlage('Entités', 'A2:I').catch(() => [] as string[][]),
       ]);
       setDonnees({
         index: etatCourantIndex(interpreterIndex(index)),
@@ -96,6 +98,7 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         copiloteBrut: copilote,
         liensBrut: liens,
         signauxBrut: signaux,
+        entitesBrut: entites,
       });
       setErreur('');
       setSynchroA(new Date());

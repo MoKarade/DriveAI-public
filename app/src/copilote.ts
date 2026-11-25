@@ -286,8 +286,135 @@ export function liensPourCarte(carte: CarteCopilote, liens: readonly LienMailDri
   return out;
 }
 
+const normTxt = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+const estZoneProtegee = (domaine: string, chemin: string) => [domaine, ...chemin.split('/')].some((s) => { const n = normTxt(s); return !!n && (ZONES_PROT_COPILOTE.has(n) || n.startsWith('_') || /^00\s*·/.test(n)); });
+const parseJsonObj = (brut: unknown): Record<string, unknown> => { try { const p = brut ? JSON.parse(String(brut)) : null; return p && typeof p === 'object' && !Array.isArray(p) ? p as Record<string, unknown> : {}; } catch { return {}; } };
+const hasProp = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+/** Valide strictement qu'une URL pointe vers Drive, Docs ou Gmail (PURE). */
+export const urlDriveSure = (url: unknown): string | undefined => { const u = typeof url === 'string' ? url.trim() : ''; return /^https:\/\/(drive|docs|mail)\.google\.com\//.test(u) ? u : undefined; };
 /** Vrai si la carte peut basculer en mode automatique (PURE). */
-export function peutPasserEnAuto(carte: CarteCopilote): boolean {
-  if (carte.statut !== 'proposé' || carte.validations < 3 || !TYPES_AUTO.has(carte.type)) return false;
-  return ![carte.domaine, ...carte.chemin.split('/')].some((s) => { const n = s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim(); return !!n && (ZONES_PROT_COPILOTE.has(n) || n.startsWith('_') || /^00\s*·/.test(n)); });
+export const peutPasserEnAuto = (c: CarteCopilote): boolean => c.statut === 'proposé' && c.validations >= 3 && TYPES_AUTO.has(c.type) && !estZoneProtegee(c.domaine, c.chemin);
+
+interface EntiteCopilote { entite: string; domaine: string; categorie: string; type: string; statut: string; dossierId: string; ajouteeLe: string; variante: string; vuNFois: number }
+interface ItemChecklistCopilote { cle: string; libelle: string; fait: boolean; fileId?: string; nb?: number }
+export interface ChecklistCopilote { id: string; type: 'checklist' | 'changement-vie'; titre: string; demarche: string; packCle: string; statut: string; items: ItemChecklistCopilote[]; faits: number; total: number; termine: boolean }
+export interface RegleCopilote { id: string; phrase: string; domaine: string; chemin: string; auto: boolean; validations: number; statut: string; canal: string; action: string; zoneProtegee: boolean }
+type CategorieFiche360 = 'vehicule' | 'logement' | 'employeur' | 'voyage' | 'immigration' | 'anna' | 'organisme';
+export interface Fiche360 { id: string; titre: string; categorie: CategorieFiche360; domaine: string; chemin: string; lectureSeule: boolean; docs: Array<{ fileId: string; nom: string; date: string; lienDrive?: string }>; nbDocs: number; liensMail: LienMailDrive[]; echeances: Array<{ label: string; date: string }>; totalMontant: number; devise: string; fileIdsPack: string[] }
+export interface ActionSemaine { id: string; priorite: 1 | 2 | 3; type: 'alerte' | 'demarche' | 'auto' | 'pack' | 'cascade'; titre: string; detail: string; packCle?: string }
+
+/** Interprète `Entités!A2:I` en ignorant la ligne d'en-tête éventuelle (PURE). */
+export function interpreterEntites(brut: readonly string[][] = []): EntiteCopilote[] {
+  return brut.flatMap((r) => {
+    const entite = String(r[0] ?? '').trim();
+    return !entite || entite === 'Entité' ? [] : [{ entite, domaine: String(r[1] ?? '').trim(), categorie: String(r[2] ?? '').trim(), type: String(r[3] ?? '').trim(), statut: String(r[4] ?? '').trim(), dossierId: String(r[5] ?? '').trim(), ajouteeLe: String(r[6] ?? '').trim(), variante: String(r[7] ?? '').trim(), vuNFois: Number(r[8]) || 0 }];
+  });
+}
+/** Extrait checklists par démarche (#13) et plan « Changement de vie » (#14) depuis `Copilote!A2:J` (PURE). */
+export function interpreterChecklistsCopilote(copiloteBrut: readonly string[][] = [], cochesLocaux: Readonly<Record<string, boolean>> = {}): ChecklistCopilote[] {
+  return copiloteBrut.flatMap((r) => {
+    const id = String(r[0] ?? '').trim(), type = String(r[3] ?? '').trim(), statut = String(r[8] ?? '').trim();
+    if (!id || id === 'Id' || statut === 'ignoré' || (type !== 'checklist' && type !== 'changement-vie')) return [];
+    const p = parseJsonObj(r[7]), titre = String(r[6] ?? '').trim(), demarche = String(p.dem ?? titre).trim() || titre;
+    const brutItems = type === 'checklist' ? (Array.isArray(p.items) ? p.items : []) : (Array.isArray(p.orgs) ? p.orgs : []);
+    const items: ItemChecklistCopilote[] = brutItems.flatMap((it) => {
+      if (!it || typeof it !== 'object') return [];
+      const o = it as Record<string, unknown>, cle = String(o.k ?? '').trim(), libelle = String(type === 'checklist' ? (o.l ?? cle) : (o.n ?? cle)).trim();
+      if (!cle || !libelle) return [];
+      const kLoc = `${id}|${cle}`, fait = hasProp(cochesLocaux, kLoc) ? Boolean(cochesLocaux[kLoc]) : Boolean(o.ok);
+      return [{ cle, libelle, fait, ...(o.f ? { fileId: String(o.f) } : {}), ...(typeof o.nb === 'number' ? { nb: o.nb } : {}) }];
+    });
+    const faits = items.filter((x) => x.fait).length, total = items.length;
+    return [{ id, type, titre: titre || demarche, demarche, packCle: type === 'changement-vie' ? 'changement-vie' : normTxt(demarche), statut, items, faits, total, termine: (total > 0 && faits === total) || (total === 0 && statut === 'terminé') }];
+  });
+}
+/** Extrait les règles en 1 phrase (#19) depuis `Copilote!A2:J` (PURE). */
+export function interpreterReglesCopilote(copiloteBrut: readonly string[][] = [], etatsLocaux: Readonly<Record<string, { auto?: boolean; supprime?: boolean }>> = {}): RegleCopilote[] {
+  return copiloteBrut.flatMap((r) => {
+    const id = String(r[0] ?? '').trim(), type = String(r[3] ?? '').trim(), statut = String(r[8] ?? '').trim();
+    if (!id || id === 'Id' || type !== 'regle-auto' || statut === 'ignoré' || etatsLocaux[id]?.supprime) return [];
+    const p = parseJsonObj(r[7]), alors = parseJsonObj(p.alors), dom = String(p.domaine ?? r[4] ?? '').trim(), chm = String(p.cible ?? r[5] ?? '').trim();
+    const zoneProtegee = estZoneProtegee(dom, chm), loc = hasProp(etatsLocaux, id) ? etatsLocaux[id] : undefined;
+    return [{ id, phrase: String(p.phrase ?? r[6] ?? '').trim(), domaine: dom, chemin: chm, auto: !zoneProtegee && (loc?.auto ?? (statut === 'auto' || Boolean(p.auto))), validations: Math.max(Number(r[9]) || 0, Number(p.validations) || 0), statut, canal: String(alors.canal ?? 'les-deux'), action: String(alors.action ?? 'deplacer'), zoneProtegee }];
+  });
+}
+function catFiche(domaine: string, chemin: string, type = '', cat = ''): CategorieFiche360 | null {
+  const n = normTxt(`${domaine}/${chemin}/${type}/${cat}`);
+  if (n.includes('04 · immigration') || n.includes('immigration')) return 'immigration';
+  if (n.split('/').some((s) => s.trim() === 'anna')) return 'anna';
+  if (n.includes('vehicule') || n.includes('voiture')) return 'vehicule';
+  if (n.includes('logement')) return 'logement';
+  if (n.includes('carriere') || n.includes('employeur')) return 'employeur';
+  return n.includes('voyage') ? 'voyage' : null;
+}
+/** Construit les Fiches 360° par sujet de vie (#17), incluant `04 · Immigration` et `Anna` en lecture seule (PURE). */
+export function construireFiches360(donnees: { index: readonly LigneIndex[]; signaux: readonly LigneSignal[]; liens: readonly LienMailDrive[]; entites: readonly EntiteCopilote[] }): Fiche360[] {
+  const fiches = new Map<string, Fiche360 & { fids: Set<string>; keysMail: Set<string> }>();
+  const ensure = (id: string, titre: string, categorie: CategorieFiche360, domaine: string, chemin: string) => {
+    const ex = fiches.get(id); if (ex) return ex;
+    const f = { id, titre, categorie, domaine, chemin, lectureSeule: categorie === 'immigration' || categorie === 'anna' || estZoneProtegee(domaine, chemin), docs: [], nbDocs: 0, liensMail: [], echeances: [], totalMontant: 0, devise: 'CAD', fileIdsPack: [], fids: new Set<string>(), keysMail: new Set<string>() };
+    fiches.set(id, f); return f;
+  };
+  for (const e of donnees.entites) {
+    if (e.statut === 'ignoré') continue;
+    const cat = catFiche(e.domaine, e.entite, e.type, e.categorie) ?? 'organisme';
+    if (e.statut === 'validée' || cat === 'immigration' || cat === 'anna') ensure(`${cat}|${normTxt(e.entite)}`, e.entite, cat, e.domaine, e.entite);
+  }
+  const matchFiche = (domaine: string, chemin: string, nom = '') => {
+    const txt = normTxt(`${domaine}/${chemin}/${nom}`);
+    for (const f of fiches.values()) if (txt.includes(normTxt(f.titre))) return f;
+    const cat = catFiche(domaine, chemin);
+    if (cat === 'immigration') return ensure('immigration|04', '04 · Immigration', 'immigration', '04 · Immigration', '04 · Immigration');
+    if (cat === 'anna') return ensure('anna|anna', 'Anna', 'anna', 'Anna', 'Anna');
+    const segs = chemin.split('/').map((s) => s.trim()).filter(Boolean);
+    if (cat && segs.length >= 2) {
+      const idx = segs.findIndex((s, i) => i > 0 && /vehicule|logement|voyage|carriere/.test(normTxt(s)));
+      const titre = segs[idx >= 0 && segs[idx + 1] ? idx + 1 : 1]!;
+      if (titre && !/^\d{4}$/.test(titre)) return ensure(`${cat}|${normTxt(titre)}`, titre, cat, domaine, chemin);
+    }
+    return null;
+  };
+  for (const l of donnees.index) {
+    const chm = String(l.chemin ?? '').trim(), dom = String(l.domaine ?? '').trim(), fid = fileIdDepuisCle(l.cle);
+    if (!fid || !chm || /^(_doublons|_technique|_medias|00\s*·)/.test(normTxt(chm))) continue;
+    const f = matchFiche(dom, chm, l.fichier); if (!f) continue;
+    f.nbDocs++;
+    if (!f.fids.has(fid)) { f.fids.add(fid); if (f.fileIdsPack.length < 25) f.fileIdsPack.push(fid); if (f.docs.length < 5) f.docs.push({ fileId: fid, nom: l.fichier, date: l.traiteLe, lienDrive: lienDrivePourLigne(l) }); }
+  }
+  for (const s of donnees.signaux) {
+    if (!s.fileId || s.categorie === 'aucun') continue;
+    const f = matchFiche(s.domaine, s.chemin, s.fournisseur); if (!f) continue;
+    if (!f.fids.has(s.fileId)) { f.fids.add(s.fileId); if (f.fileIdsPack.length < 25) f.fileIdsPack.push(s.fileId); }
+    if (s.montant) { f.totalMontant = Math.round((f.totalMontant + s.montant) * 100) / 100; f.devise = s.devise; }
+    for (const [label, date] of [[s.categorie || s.fournisseur || 'Échéance', s.dateExpiration], ['Garantie', s.finGarantie], ['Retour', s.delaiRetour]] as const) if (date && f.echeances.length < 6) f.echeances.push({ label, date });
+  }
+  for (const m of donnees.liens) {
+    const f = matchFiche(m.domaine, m.chemin, m.fichier); if (!f) continue;
+    const k = `${m.threadId}|${m.fileId}`;
+    if (!f.keysMail.has(k) && f.liensMail.length < 4) { f.keysMail.add(k); f.liensMail.push(m); }
+  }
+  const ORDRE: Record<CategorieFiche360, number> = { vehicule: 0, logement: 1, employeur: 2, voyage: 3, organisme: 4, immigration: 5, anna: 6 };
+  return [...fiches.values()].filter((f) => f.nbDocs > 0 || f.echeances.length > 0 || f.liensMail.length > 0 || f.lectureSeule).sort((a, b) => ORDRE[a.categorie] - ORDRE[b.categorie] || b.nbDocs - a.nbDocs).map(({ fids: _f, keysMail: _k, ...reste }) => reste);
+}
+/** Consolide la liste priorisée « Actions utiles de la semaine » (#20 complet, PURE). */
+export function construireActionsSemaine(donnees: { vueSignaux: ReturnType<typeof construireVueSignauxCopilote>; checklists: readonly ChecklistCopilote[]; regles: readonly RegleCopilote[]; fiches: readonly Fiche360[] }): ActionSemaine[] {
+  const { vueSignaux: v, checklists, regles, fiches } = donnees;
+  const corb = v.propositions.filter((c) => c.type === 'alerte-corbeille').length;
+  const dem = v.propositions.filter((c) => c.type === 'demarche-active').length;
+  const autoCards = v.propositions.filter(peutPasserEnAuto).length;
+  const autoReg = regles.filter((r) => !r.auto && !r.zoneProtegee && r.validations >= 3).length;
+  const autres = v.propositions.length - corb - dem - autoCards;
+  const nExp = v.expirations.length + v.signauxRepli.filter((s) => s.section === 'expiration').length;
+  const nArg = v.argent.length + v.signauxRepli.filter((s) => s.section === 'argent').length;
+  const out: ActionSemaine[] = [];
+  if (corb > 0) out.push({ id: 'act-corb', priorite: 1, type: 'alerte', titre: 'Corbeille sensible à vérifier', detail: `${corb} fichier(s)` });
+  if (nExp > 0) out.push({ id: 'act-exp', priorite: 1, type: 'alerte', titre: 'Expirations & pièces à vérifier', detail: `${nExp} élément(s)` });
+  if (v.factures.length > 0) out.push({ id: 'act-fac', priorite: 1, type: 'alerte', titre: 'Alertes factures & renouvellements', detail: `${v.factures.length} alerte(s)` });
+  if (nArg > 0) out.push({ id: 'act-arg', priorite: 1, type: 'alerte', titre: 'Remboursements & retours à réclamer', detail: `${nArg} dossier(s)` });
+  if (dem > 0) out.push({ id: 'act-dem', priorite: 2, type: 'demarche', titre: 'Démarches en cours', detail: `${dem} active(s)` });
+  for (const ch of checklists) if (!ch.termine) out.push({ id: `act-chk-${ch.id}`, priorite: 2, type: 'demarche', titre: ch.titre, detail: `${ch.faits}/${ch.total}`, packCle: ch.packCle });
+  if (autoCards + autoReg > 0) out.push({ id: 'act-auto', priorite: 2, type: 'auto', titre: 'Passage en mode auto prêt', detail: `${autoCards + autoReg} geste(s) (≥ 3 val.)` });
+  if (autres > 0) out.push({ id: 'act-cas', priorite: 3, type: 'cascade', titre: 'Rangement Drive proposé', detail: `${autres} proposition(s)` });
+  for (const f of fiches.slice(0, 2)) if (f.fileIdsPack.length > 0) out.push({ id: `act-pack-${f.id}`, priorite: 3, type: 'pack', titre: `Pack prêt : ${f.titre}`, detail: `${f.fileIdsPack.length} doc(s)`, packCle: f.titre });
+  return out.slice(0, 8);
 }

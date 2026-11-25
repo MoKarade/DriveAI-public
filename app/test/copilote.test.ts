@@ -9,16 +9,22 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { interpreterIndex } from '../src/etat';
 import type { DonneesEtat } from '../src/etatGlobal';
 import {
+  construireActionsSemaine,
+  construireFiches360,
   construireVueSignauxCopilote,
   extraireMouvementsDrive,
   filtrerMouvementsDrive,
   formaterMontantSignal,
   interpreterCartesCopilote,
+  interpreterChecklistsCopilote,
+  interpreterEntites,
   interpreterLiens,
+  interpreterReglesCopilote,
   interpreterSignaux,
   liensPourCarte,
   peutPasserEnAuto,
   syntheseSemaineCopilote,
+  urlDriveSure,
 } from '../src/copilote';
 
 const mockEtat = vi.hoisted(() => ({
@@ -33,6 +39,34 @@ const mockEtat = vi.hoisted(() => ({
     message: 'Décision appliquée.',
   })),
   annuler: vi.fn(async () => 'Action annulée.'),
+  creerPack: vi.fn(async (opts: { pack: string; fileIds?: string[] }) => ({
+    ok: true,
+    dossierId: 'pack-1',
+    dossierUrl: 'https://drive.google.com/drive/folders/pack-1',
+    nbRaccourcis: opts.fileIds?.length || 2,
+    message: 'Pack prêt.',
+  })),
+  majChecklist: vi.fn(async (opts: { checklistId?: string; coche?: boolean }) => ({
+    ok: true,
+    checklistId: opts.checklistId || 'chk-1',
+    statut: opts.coche ? 'terminé' as const : 'actif' as const,
+    message: 'Checklist à jour.',
+  })),
+  poserQuestion: vi.fn(async (q: string) => ({
+    ok: true,
+    reponse: `Réponse pour : ${q}`,
+    llmUtilise: true,
+    sources: [
+      { nom: 'Bail.pdf', lien: 'https://drive.google.com/file/d/f-bail/view', fileId: 'f-bail' },
+      { nom: 'Lien suspect', lien: 'javascript:alert(1)' },
+    ],
+  })),
+  gererRegle: vi.fn(async (opts: { mode: string; regleId?: string }) => ({
+    ok: true,
+    regleId: opts.regleId || 'reg-new',
+    auto: opts.mode === 'basculer-auto',
+    message: 'Règle mise à jour.',
+  })),
 }));
 
 vi.mock('../src/etatGlobal', () => ({
@@ -48,6 +82,10 @@ vi.mock('../src/google', () => ({
   MARQUEUR_DROITS_FICHIER: 'droits-insuffisants-sur-element',
   executerDecisionCopilote: mockEtat.executer,
   annulerActionMoteur: mockEtat.annuler,
+  creerPackCopilote: mockEtat.creerPack,
+  majChecklistCopilote: mockEtat.majChecklist,
+  poserQuestionCopilote: mockEtat.poserQuestion,
+  gererRegleCopilote: mockEtat.gererRegle,
 }));
 
 import { Copilote } from '../src/vues/Copilote';
@@ -671,5 +709,182 @@ describe('copilote.ts & Copilote.tsx — Signaux, factures & argent oublié (Lot
       ],
     });
     expect(mvtsLimites).toHaveLength(3);
+  });
+});
+
+describe('copilote.ts & Copilote.tsx — Lot 4B-2 (Fiches 360°, Checklists, Packs, Questions IA, Règles & Semaine)', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('urlDriveSure, interpreterEntites, interpreterChecklistsCopilote et interpreterReglesCopilote couvrent tous les cas limites', () => {
+    expect(urlDriveSure('https://drive.google.com/file/d/f1/view')).toBe('https://drive.google.com/file/d/f1/view');
+    expect(urlDriveSure('https://docs.google.com/document/d/d1')).toBe('https://docs.google.com/document/d/d1');
+    expect(urlDriveSure('https://mail.google.com/mail/u/0/#inbox/t1')).toBe('https://mail.google.com/mail/u/0/#inbox/t1');
+    expect(urlDriveSure('javascript:alert(1)')).toBeUndefined();
+    expect(urlDriveSure('http://drive.google.com/file/d/1')).toBeUndefined();
+    expect(urlDriveSure(null)).toBeUndefined();
+
+    expect(interpreterEntites()).toEqual([]);
+    const entites = interpreterEntites([
+      ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'],
+      ['Voiture Exemple', '03 · Logement & véhicule', 'Véhicule', 'Véhicule', 'validée', 'd-veh', '2026-06-20', '', '6'],
+      ['Ancienne', '02 · Finances', '', 'Organisme', 'ignoré', '', '', '', '0'],
+      ['', '02 · Finances'],
+    ]);
+    expect(entites).toHaveLength(2);
+    expect(entites[0]!.vuNFois).toBe(6);
+
+    expect(interpreterChecklistsCopilote()).toEqual([]);
+    const chks = interpreterChecklistsCopilote([
+      ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+      ['chk-1', '2026-07-06', 'checklist', 'checklist', '03', '03', 'Checklist Logement', '{"dem":"Logement","items":[{"k":"bail","l":"Bail","ok":1,"f":"f1"},null,{"k":"","l":"Vide"},{"k":"assur","l":"Assurance","ok":0}]}', 'actif', '0'],
+      ['chg-1', '2026-07-06', 'checklist', 'changement-vie', '02', '02', 'Changement vie', '{"orgs":[{"k":"b1","n":"Bellerives","ok":0,"nb":3}]}', 'actif', '0'],
+      ['chk-bad', '2026-07-06', 'checklist', 'checklist', '02', '02', 'Vide', '{malforme', 'terminé', '0'],
+      ['chk-ign', '2026-07-06', 'checklist', 'checklist', '02', '02', 'Ign', '{}', 'ignoré', '0'],
+    ], { 'chk-1|assur': true });
+    expect(chks).toHaveLength(3);
+    expect(chks[0]).toMatchObject({ faits: 2, total: 2, termine: true, packCle: 'logement' });
+    expect(chks[1]).toMatchObject({ faits: 0, total: 1, termine: false, packCle: 'changement-vie' });
+    expect(chks[2]!.termine).toBe(true);
+
+    expect(interpreterReglesCopilote()).toEqual([]);
+    const regs = interpreterReglesCopilote([
+      ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'],
+      ['r-1', '2026-07-06', 'regle', 'regle-auto', '02 · Finances', '02 · Finances/Gaz', 'Gaz', '{"phrase":"Classer gaz","domaine":"02 · Finances","cible":"02 · Finances/Gaz","alors":{"canal":"drive","action":"deplacer"},"auto":false,"validations":3}', 'proposé', '2'],
+      ['r-imm', '2026-07-06', 'regle', 'regle-auto', '04 · Immigration', '04 · Immigration/Permis', 'Imm', '{"auto":true}', 'auto', '5'],
+      ['r-sup', '2026-07-06', 'regle', 'regle-auto', '02 · Finances', '02 · Finances', 'Suppr', '{}', 'proposé', '0'],
+      ['r-ign', '2026-07-06', 'regle', 'regle-auto', '02 · Finances', '02 · Finances', 'Ign', '{}', 'ignoré', '0'],
+    ], { 'r-1': { auto: true }, 'r-sup': { supprime: true } });
+    expect(regs).toHaveLength(2);
+    expect(regs[0]).toMatchObject({ auto: true, validations: 3, zoneProtegee: false });
+    expect(regs[1]).toMatchObject({ auto: false, zoneProtegee: true });
+  });
+
+  it('construireFiches360 et construireActionsSemaine couvrent 04 · Immigration/Anna RO, plafond <= 25 fileIds et priorités P1-P3', () => {
+    const index = interpreterIndex([
+      ['drive|f-veh', '2026-07-06', '2026-07-06_Devis.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule/Véhicule/Voiture Exemple', 'classé', '', ''],
+      ['drive|f-imm', '2026-07-05', '2026-07-05_Permis.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', '', ''],
+      ['drive|f-anna', '2026-07-04', '2026-07-04_Note_Anna.pdf', '08 · Perso & projets', '08 · Perso & projets/Anna', 'manuel', '', ''],
+      ['drive|f-emp', '2026-07-03', '2026-07-03_Contrat.pdf', '05 · Carrière', '05 · Carrière/Employeur Exemple', 'classé', '', ''],
+      ['drive|f-voy', '2026-07-02', '2026-07-02_Billet.pdf', '08 · Perso & projets', '08 · Perso & projets/Voyages/Vacances Exemple', 'classé', '', ''],
+      ['drive|f-sys', '2026-07-01', 'junk.pdf', '', '_Doublons', 'doublon', '', ''],
+      ...Array.from({ length: 28 }, (_, i) => ['drive|f-bel-' + i, '2026-07-01', `2026-07_Releve_${i}.pdf`, '02 · Finances', '02 · Finances/Bellerives', 'classé', '', '']),
+    ]);
+    const entites = interpreterEntites([
+      ['Bellerives', '02 · Finances', '', 'Compte financier', 'validée', 'd-bel', '', '', '10'],
+      ['12 rue Exemple', '03 · Logement & véhicule', 'Logement', 'Logement', 'validée', 'd-log', '', '', '4'],
+    ]);
+    const signaux = interpreterSignaux([
+      ['f-veh', 'Assurance auto', 'Assureur', '03 · Logement & véhicule', '03 · Logement & véhicule/Véhicule/Voiture Exemple', '2026-07-01', '2026-09-01', '120', 'CAD', '2026-10-01', '2026-07-20', ''],
+      ['f-aucun', 'aucun', '', '02 · Finances', '02 · Finances', '', '2026-09-01', '', 'CAD', '', '', ''],
+    ]);
+    const liens = interpreterLiens([
+      ['2026-07-05', 't-imm', 'm-1', 'portail@exemple.ca', '04 · Immigration', '04 · Immigration/Permis', 'f-imm', '2026-07-05_Permis.pdf'],
+    ]);
+    const fiches = construireFiches360({ index, signaux, liens, entites });
+    expect(fiches.find((f) => f.categorie === 'immigration')?.lectureSeule).toBe(true);
+    expect(fiches.find((f) => f.categorie === 'anna')?.lectureSeule).toBe(true);
+    expect(fiches.find((f) => f.titre === 'Bellerives')?.fileIdsPack.length).toBeLessThanOrEqual(25);
+    expect(fiches.find((f) => f.titre === 'Voiture Exemple')).toMatchObject({ lectureSeule: false, totalMontant: 120 });
+
+    const cartes = interpreterCartesCopilote([
+      ['c-corb', '2026-07-06', 'carte', 'alerte-corbeille', '04 · Immigration', '04 · Immigration', 'Corbeille', '{}', 'proposé', '0'],
+      ['c-dem', '2026-07-06', 'demarche', 'demarche-active', '03 · Logement', '03 · Logement', 'Démarche', '{}', 'actif', '0'],
+      ['c-auto', '2026-07-06', 'carte', 'cascade', '02 · Finances', '02 · Finances/Bellerives', 'Cascade auto', '{}', 'proposé', '3'],
+      ['c-cas', '2026-07-06', 'carte', 'cascade', '02 · Finances', '02 · Finances/Bellerives', 'Cascade', '{}', 'proposé', '1'],
+      ['c-exp', '2026-07-06', 'carte', 'expiration', '04 · Immigration', '04 · Immigration', 'Expiration', '{}', 'proposé', '0'],
+      ['c-fac', '2026-07-06', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances', 'Hausse', '{}', 'proposé', '0'],
+      ['c-arg', '2026-07-06', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb', '{}', 'proposé', '0'],
+    ]);
+    const vueSignaux = construireVueSignauxCopilote(cartes, []);
+    const checklists = interpreterChecklistsCopilote([['chk-1', '2026-07-06', 'checklist', 'checklist', '03', '03', 'Logement', '{"items":[{"k":"a","l":"A","ok":0}]}', 'actif', '0']]);
+    const regles = interpreterReglesCopilote([['r-auto', '2026-07-06', 'regle', 'regle-auto', '02 · Finances', '02 · Finances', 'Règle auto prête', '{"validations":3}', 'proposé', '3']]);
+    const actions = construireActionsSemaine({ vueSignaux, checklists, regles, fiches });
+    expect(actions.length).toBeLessThanOrEqual(8);
+    expect(actions[0]!.priorite).toBe(1);
+    expect(actions.some((a) => a.type === 'auto')).toBe(true);
+  });
+
+  it('rend Questions IA, Checklists + Pack 1-clic, Fiches 360° (incl. Immigration/Anna RO) et Règles 1 phrase en FR/EN', async () => {
+    mockEtat.donnees = {
+      index: interpreterIndex([
+        ['drive|f-veh', '2026-07-06', '2026-07-06_Devis_Garage.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule/Véhicule/Voiture Exemple', 'classé', '', ''],
+        ['drive|f-imm', '2026-07-05', '2026-07-05_Permis.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', '', ''],
+        ['drive|f-anna', '2026-07-04', '2026-07-04_Note_Anna.pdf', '08 · Perso & projets', '08 · Perso & projets/Anna', 'manuel', '', ''],
+      ]),
+      santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      entitesBrut: [
+        ['Entité', 'Domaine', 'Catégorie', 'Type', 'Statut', 'Dossier ID', 'Ajoutée le', 'Variante possible ?', 'Vu N fois'],
+        ['Voiture Exemple', '03 · Logement & véhicule', 'Véhicule', 'Véhicule', 'validée', 'd-veh', '2026-06-20', '', '4'],
+      ],
+      copiloteBrut: [
+        ['chk-1', '2026-07-06', 'checklist', 'checklist', '03', '03', 'Checklist Logement', '{"dem":"Logement","items":[{"k":"bail","l":"Bail signé","ok":1,"f":"f-bail"},{"k":"assur","l":"Assurance habitation","ok":0}]}', 'actif', '0'],
+        ['reg-1', '2026-07-06', 'regle', 'regle-auto', '02 · Finances', '02 · Finances/Gaz', 'Classer gaz', '{"phrase":"Classer gaz dans Finances","domaine":"02 · Finances","cible":"02 · Finances/Gaz","auto":false,"validations":3}', 'proposé', '3'],
+        ['reg-imm', '2026-07-06', 'regle', 'regle-auto', '04 · Immigration', '04 · Immigration/Permis', 'Imm', '{"phrase":"Règle Immigration","domaine":"04 · Immigration","cible":"04 · Immigration/Permis","auto":false,"validations":4}', 'proposé', '4'],
+      ],
+      signauxBrut: [
+        ['f-veh', 'Assurance auto', 'Assureur', '03 · Logement & véhicule', '03 · Logement & véhicule/Véhicule/Voiture Exemple', '2026-07-01', '2026-09-15', '150', 'CAD', '', '', ''],
+      ],
+      liensBrut: [
+        ['2026-07-05', 't-imm', 'm-1', 'portail@exemple.ca', '04 · Immigration', '04 · Immigration/Permis', 'f-imm', '2026-07-05_Permis.pdf'],
+      ],
+    };
+
+    const { rerender } = render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.getByText('Priorités de la semaine')).toBeDefined();
+
+    // #18 Question IA
+    const champQ = screen.getByPlaceholderText('Poser une question sur vos documents…');
+    fireEvent.change(champQ, { target: { value: 'Où est mon bail ?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Demander' }));
+    await vi.waitFor(() => expect(screen.getByText('Réponse pour : Où est mon bail ?')).toBeDefined());
+    expect(mockEtat.poserQuestion).toHaveBeenCalledWith('Où est mon bail ?');
+    expect(screen.getByRole('link', { name: /Bail\.pdf/ })).toBeDefined();
+    expect(screen.queryByRole('link', { name: /Lien suspect/ })).toBeNull();
+
+    // #13 & #15 Checklist + Pack 1-clic
+    const cb = screen.getByRole('checkbox', { name: /Assurance habitation/ });
+    expect(cb.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(cb);
+    await vi.waitFor(() => expect(cb.getAttribute('aria-checked')).toBe('true'));
+    expect(mockEtat.majChecklist).toHaveBeenCalledWith({ checklistId: 'chk-1', demarche: 'Logement', item: 'assur', coche: true });
+
+    await vi.waitFor(() => expect((screen.getAllByRole('button', { name: /Créer le pack 1-clic/ })[0] as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getAllByRole('button', { name: /Créer le pack 1-clic/ })[0]!);
+    await vi.waitFor(() => expect(screen.getByRole('link', { name: /Ouvrir le pack/ })).toBeDefined());
+    expect(mockEtat.creerPack).toHaveBeenCalled();
+
+    // #17 Fiches 360° : bascule vers 04 · Immigration (RO + Pack autorisé) et Anna (RO)
+    fireEvent.click(screen.getByRole('tab', { name: /04 · Immigration/ }));
+    expect(screen.getAllByText('Lecture seule').length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getByRole('tab', { name: /Anna/ }));
+    expect(screen.getByText('2026-07-04_Note_Anna.pdf')).toBeDefined();
+
+    // #19 Règles : créer, basculer auto, supprimer ; reg-imm ne propose pas Mode auto
+    const champR = screen.getByPlaceholderText('Ex. : classer les factures Gaz dans Finances');
+    fireEvent.change(champR, { target: { value: 'Classer factures eau dans Finances' } });
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Ajouter' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Ajouter' }));
+    await vi.waitFor(() => expect(screen.getByText('Classer factures eau dans Finances')).toBeDefined());
+    expect(mockEtat.gererRegle).toHaveBeenCalledWith({ mode: 'creer', phrase: 'Classer factures eau dans Finances' });
+
+    await vi.waitFor(() => expect((screen.getAllByRole('button', { name: 'Mode auto' })[0] as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Mode auto' })[0]!);
+    await vi.waitFor(() => expect(mockEtat.gererRegle).toHaveBeenCalledWith({ mode: 'basculer-auto', regleId: 'reg-new' }));
+    await vi.waitFor(() => expect((screen.getAllByRole('button', { name: 'Supprimer' })[0] as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Supprimer' })[0]!);
+    await vi.waitFor(() => expect(screen.queryByText('Classer factures eau dans Finances')).toBeNull());
+
+    // Vérification erreur WebApp sur question
+    await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Demander' }) as HTMLButtonElement).disabled).toBe(false));
+    mockEtat.poserQuestion.mockRejectedValueOnce(new Error('Quota atteint'));
+    fireEvent.click(screen.getByRole('button', { name: 'Demander' }));
+    await vi.waitFor(() => expect(screen.getByRole('alert')).toBeDefined());
+
+    rerender(createElement(Copilote, { langue: 'en', onAller: () => {} }));
+    expect(screen.getByText('360° subject sheets')).toBeDefined();
+    expect(screen.getByText('1-sentence rules')).toBeDefined();
   });
 });

@@ -17,6 +17,8 @@ const INDEX: string[][] = [
   ['drive|f-002', '2026-07-06T14:07:42', '2026-06-28_Relevé_Bellerives.pdf', '02 · Finances', '02 · Finances/Bellerives/Relevés/2026', 'classé', 'a1b2c3d4', '0.91'],
   ['messageId-003|0|bail.pdf|90210', '2026-07-05T09:15:00', '2026-06-15_Bail_Immeubles Tremblay.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule/Logement/12 rue Exemple/Bail & contrat', 'classé', 'b4d455aa', '0.88'],
   ['drive|f-014', '2026-07-05T10:30:05', '2026-05-20_Passeport_Alex Exemple.pdf', '01 · Administratif & identité', '01 · Administratif & identité/Passeport', 'classé', 'c0ffee00', '0.97'],
+  ['drive|f-016', '2026-07-05T10:40:00', '2026-06-10_Permis_Travail_Exemple.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', 'c0ffee01', ''],
+  ['drive|f-017', '2026-07-05T10:45:00', '2026-06-12_Dossier_Anna_Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets/Anna', 'manuel', 'c0ffee02', ''],
   ['messageId-005|0|photo.jpg|55000', '2026-07-04T18:22:37', '2026-07-04_Photo_Copie.jpg', '', '_Doublons', 'doublon', 'e3b0c442', ''],
   ['drive|f-006', '2026-07-04T19:01:12', 'export-facebook.html', '', '_Technique', 'technique', 'deadbeef', ''],
   ['tache|msg-007|4f2a', '2026-07-03T08:45:00', 'RDV garage — pneus été', '', '', 'tache', '', ''],
@@ -142,6 +144,9 @@ const COPILOTE: string[][] = [
   ['cop-demo-5', '2026-07-06T11:30:00', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances/2026', 'Hausse facture Cablonet : 89 CAD (médiane 65 CAD, +37 %)', '{"cle":"hausse|f-001","fileId":"f-001","fournisseur":"Cablonet","montant":89,"mediane":65,"devise":"CAD","ecartPct":37}', 'proposé', '0'],
   ['cop-demo-6', '2026-07-06T11:00:00', 'carte', 'remboursement', '05 · Santé', '05 · Santé/Reçus', 'Remboursement à réclamer : 1 reçu(s) (125 CAD)', '{"cle":"remboursement|CAD","ids":["f-009"],"montantTotal":125,"devise":"CAD","nbRecus":1}', 'proposé', '0'],
   ['cop-demo-7', '2026-07-06T10:30:00', 'carte', 'retour-garantie', '03 · Logement & véhicule', '03 · Logement & véhicule', 'Fin de garantie : Magasin Exemple le 2026-07-25 (J-19)', '{"cle":"garantie|f-008","fileId":"f-008","sousType":"garantie","fournisseur":"Magasin Exemple","echeance":"2026-07-25","joursRestants":19}', 'proposé', '0'],
+  ['cop-chk-1', '2026-07-06T10:00:00', 'checklist', 'checklist', '03 · Logement & véhicule', '03 · Logement & véhicule/Logement', 'Checklist Logement', '{"cle":"chk|logement","dem":"Logement","items":[{"k":"bail","l":"Bail signé","ok":1,"f":"f-004"},{"k":"assur","l":"Assurance habitation","ok":0}]}', 'actif', '0'],
+  ['cop-chg-1', '2026-07-06T09:50:00', 'checklist', 'changement-vie', '02 · Finances', '02 · Finances', 'Plan changement de vie (18 mois)', '{"cle":"chg|18m","orgs":[{"k":"bellerives","n":"Bellerives","ok":1,"nb":2},{"k":"hydro","n":"Hydro-Québec","ok":0,"nb":1}]}', 'actif', '0'],
+  ['cop-reg-1', '2026-07-06T09:40:00', 'regle', 'regle-auto', '02 · Finances', '02 · Finances/2026', 'Classer les factures Hydro-Québec dans Finances', '{"cle":"reg|hydro","phrase":"Classer les factures Hydro-Québec dans Finances","domaine":"02 · Finances","cible":"02 · Finances/2026","alors":{"canal":"les-deux","action":"deplacer"},"auto":false,"validations":3}', 'proposé', '3'],
 ];
 const SIGNAUX: string[][] = [
   ['f-009', 'Reçu clinique', 'Clinique Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-07-01', '', '125', 'CAD', '', '', 'a-reclamer'],
