@@ -619,11 +619,13 @@ function genererBrouillonReponse_(expediteur, sujet, corps, opts) {
   var contenu = contexteFil_(expediteur, sujet, corps, opts);
   var texte = appelTriLlm_(promptBrouillon_(), contenu, CONFIG.LLM_MAX_TOKENS_BROUILLON, true);
   var rep = texte ? parserBrouillon_(texte) : null;
-  if (rep && opts && Array.isArray(opts.referencesDrive) && opts.referencesDrive.length && rep.indexOf('https://drive.google.com/file/d/') === -1) {
+  if (rep && opts && Array.isArray(opts.referencesDrive) && opts.referencesDrive.length) {
     var ref0 = opts.referencesDrive[0];
-    if (ref0 && ref0.lien) {
-      var annexe = '\n\nRéférence Drive : ' + String(ref0.nom || ref0.fileId || 'Pièce') + ' — ' + ref0.lien;
-      rep = (rep + annexe).length <= 1500 ? (rep + annexe) : (annexe.length < 1460 ? rep.slice(0, 1500 - annexe.length) + annexe : (rep + annexe).slice(0, 1500));
+    if (ref0 && ref0.lien && rep.indexOf(ref0.lien) === -1) {
+      rep = rep.replace(/\s*https:\/\/drive\.google\.com\/file\/d\/[^\s]*$/, '').trim();
+      var nomRef = String(ref0.nom || ref0.fileId || 'Pièce').replace(/\s+/g, ' ').trim().slice(0, 80);
+      var annexe = '\n\nRéférence Drive : ' + nomRef + ' — ' + ref0.lien;
+      rep = (rep + annexe).length <= 1500 ? (rep + annexe) : (annexe.length <= 1500 ? rep.slice(0, 1500 - annexe.length) + annexe : ref0.lien.slice(0, 1500));
     }
   }
   return rep;

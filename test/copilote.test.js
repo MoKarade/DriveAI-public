@@ -717,6 +717,22 @@ test('#19 serialiserActionCopilote_, regle-auto (sync ActionJson.auto & passage 
   assert.ok(sJson.length <= 500 && sJson !== '{}', 'ActionJson borné sans repli {}');
   assert.strictEqual(JSON.parse(sJson).cle, 'regle|long');
 
+  // Non-régression #19 : phrase (240 car.) est tronquée AVANT si.mots (6 mots-clés conservés intacts)
+  const regle6Mots = {
+    cle: 'regle|hydro-exemple|les-deux|02-finances',
+    phrase: 'Si facture hydroexemple electricite quebecois renouvellement automatique contrat annuel alors ranger dans 02 · Finances/Hydro-Exemple et marquer important ' + 'x'.repeat(85),
+    domaine: '02 · Finances',
+    cible: '02 · Finances/Hydro-Exemple',
+    si: { mots: ['facture', 'hydroexemple', 'electricite', 'quebecois', 'renouvellement', 'automatique'] },
+    alors: { canal: 'les-deux', action: 'deplacer', libelle: 'Finances', domaine: '02 · Finances', cible: '02 · Finances/Hydro-Exemple', important: true, archiver: false },
+    auto: false,
+    validations: 0,
+  };
+  assert.strictEqual(regle6Mots.phrase.length, 240);
+  const s6 = c.serialiserActionCopilote_(regle6Mots);
+  assert.ok(s6.length <= 500 && s6 !== '{}');
+  assert.strictEqual(JSON.parse(s6).si.mots.length, 6, 'les 6 mots-clés si.mots doivent être conservés avant troncature phrase');
+
   // passer-auto / desactiver-auto synchronisent ActionJson.auto
   assert.strictEqual(c.executerDecisionCopilote_({ id: 'cop-reg-1', decision: 'passer-auto' }).statut, 'auto');
   assert.strictEqual(JSON.parse(sh.sheets.Copilote[1][7]).auto, true);

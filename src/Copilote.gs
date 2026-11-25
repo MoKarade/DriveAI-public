@@ -50,10 +50,10 @@ function serialiserActionCopilote_(obj) {
     var minL = k === 'ids' ? 1 : 0;
     while (s.length > 500 && Array.isArray(copie[k]) && copie[k].length > minL) { copie[k].pop(); s = JSON.stringify(copie); }
   });
-  while (s.length > 500 && copie.si && Array.isArray(copie.si.mots) && copie.si.mots.length > 1) { copie.si.mots.pop(); s = JSON.stringify(copie); }
   [120, 40, 0].forEach(function (lim) {
     if (s.length > 500 && typeof copie.phrase === 'string') { copie.phrase = copie.phrase.slice(0, lim); s = JSON.stringify(copie); }
   });
+  while (s.length > 500 && copie.si && Array.isArray(copie.si.mots) && copie.si.mots.length > 1) { copie.si.mots.pop(); s = JSON.stringify(copie); }
   return s.length <= 500 ? s : '{}';
 }
 

@@ -70,9 +70,15 @@ function repondreQuestionCopilote_(payload) {
 }
 function toucheZoneOuActionInterditeRegle_(texte, domaine, cible) {
   var n = normaliserQR_(texte);
-  if (/\b(supprimer|supprime|effacer|efface|detruire|detruit|corbeille|vider|retirer\s+libell|enlever\s+libell|supprimer\s+libell|sendemail|envoyer\s+(?:un\s+)?mail|envoyer\s+(?:un\s+)?courriel|transferer|repondre\s+automatiquement|spam)\b/.test(n)) return true;
+  if (/\b(supprimer|supprime|effacer|efface|detruire|detruit|corbeille|vider|sendemail|transferer|repondre\s+automatiquement|spam)\b/.test(n)) return true;
+  if (/\b(?:retirer|enlever|supprimer)\s+(?:(?:un|une|le|la|les|des|l)\s+)?(?:libell|etiqu)[a-z]*\b/.test(n) || /\benvoyer\s+(?:(?:un|une|des|les)\s+)?(?:mail|courriel)s?\b/.test(n)) return true;
   if (/\b(04\s*·\s*immigration|immigration|ircc|csq|caq|anna|00\s*·\s*packs|00\s*·\s*a\s*trier|00\s*·\s*a\s*verifier|_technique|_doublons|_medias|donnees\s*&\s*exports)\b/.test(n)) return true;
   return typeof estZoneProtegeeCopilote_ === 'function' && (estZoneProtegeeCopilote_(cible, domaine) || estZoneProtegeeCopilote_(texte, domaine));
+}
+function regleEstInterditeQR_(r, a) {
+  var al = (a && a.alors) || {}, z = [r && r.chemin, r && r.domaine, a && a.domaine, a && a.cible, a && a.phrase, al.domaine, al.cible, al.libelle];
+  if (toucheZoneOuActionInterditeRegle_(z.filter(Boolean).join(' '), (a && a.domaine) || al.domaine || (r && r.domaine) || '', (a && a.cible) || al.cible || (r && r.chemin) || '')) return true;
+  return typeof estZoneProtegeeCopilote_ === 'function' && [a && a.domaine, al.domaine, al.libelle, al.cible].some(function (v) { return !!(v && estZoneProtegeeCopilote_(v, v)); });
 }
 /** PURE (#19) — Parse une règle en 1 phrase en français, rejette destruction ou zone protégée. */
 function parserPhraseRegle_(phrase, domainesConnus, libellesConnus) {
@@ -108,9 +114,10 @@ function parserRegleViaLlm_(phrase) {
   try {
     var raw = appelAnthropicTexte_(mod, 'Convertis en JSON {"mots":[],"canal":"drive|gmail|les-deux","action":"deplacer|libeller|important|archiver","domaine":"","cible":"","libelle":"","important":false,"archiver":false} ou null.', phrase, 220);
     var a = raw ? raw.indexOf('{') : -1, b = raw ? raw.lastIndexOf('}') : -1, o = (a !== -1 && b > a) ? JSON.parse(raw.slice(a, b + 1)) : null;
-    if (!o || !Array.isArray(o.mots) || !o.mots.length || toucheZoneOuActionInterditeRegle_(phrase + ' ' + (o.cible || ''), o.domaine || '', o.cible || '')) return null;
+    var okAct = { deplacer: 1, libeller: 1, important: 1, archiver: 1 }, okCan = { drive: 1, gmail: 1, 'les-deux': 1 };
+    if (!o || !Array.isArray(o.mots) || !o.mots.length || !okAct[o.action] || !okCan[o.canal] || toucheZoneOuActionInterditeRegle_([phrase, o.cible, o.libelle, o.domaine].join(' '), o.domaine || '', o.cible || '') || (typeof estZoneProtegeeCopilote_ === 'function' && o.libelle && estZoneProtegeeCopilote_(o.libelle, o.domaine || ''))) return null;
     var mots = o.mots.map(function (m) { return normaliserQR_(m); }).filter(Boolean).slice(0, 6);
-    return mots.length ? { cle: 'regle|' + normaliserQR_(mots.join('-') + '|' + (o.cible || o.libelle || o.action)).slice(0, 64), phrase: phrase, domaine: String(o.domaine || ''), cible: String(o.cible || o.domaine || ''), si: { mots: mots }, alors: { canal: o.canal || 'les-deux', action: o.action || 'deplacer', libelle: String(o.libelle || ''), domaine: String(o.domaine || ''), cible: String(o.cible || ''), important: !!o.important, archiver: !!o.archiver }, auto: false, validations: 0 } : null;
+    return mots.length ? { cle: 'regle|' + normaliserQR_(mots.join('-') + '|' + (o.cible || o.libelle || o.action)).slice(0, 64), phrase: phrase, domaine: String(o.domaine || ''), cible: String(o.cible || o.domaine || ''), si: { mots: mots }, alors: { canal: o.canal, action: o.action, libelle: String(o.libelle || ''), domaine: String(o.domaine || ''), cible: String(o.cible || ''), important: !!o.important, archiver: !!o.archiver }, auto: false, validations: 0 } : null;
   } catch (e) { return null; } finally { if (typeof flushUsage_ === 'function') { try { flushUsage_(); } catch (eF) {} } }
 }
 function lireReglesCopilote_(seulementAuto) {
@@ -145,7 +152,7 @@ function executerRegleCopilote_(payload) {
   var act = typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(carte.actionJson) : {};
   if (mode === 'basculer-auto') {
     if (carte.statut === 'ignoré') return { ok: false, erreur: 'règle désactivée' };
-    if (toucheZoneOuActionInterditeRegle_(carte.chemin, carte.domaine, act.cible || carte.chemin)) return { ok: false, erreur: 'zone protégée — mode auto interdit' };
+    if (regleEstInterditeQR_(carte, act)) return { ok: false, erreur: 'zone protégée — mode auto interdit' };
     var nAuto = carte.statut !== 'auto'; act.auto = nAuto;
     fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(nAuto ? 'auto' : 'proposé');
     return { ok: true, regleId: regleId, auto: nAuto, message: nAuto ? 'Mode automatique activé.' : 'Mode automatique désactivé.' };
@@ -159,7 +166,7 @@ function incrementerValidationRegle_(regleId) {
   for (var i = 0; i < cartes.length; i++) if (cartes[i].id === regleId && cartes[i].type === 'regle-auto') { carte = cartes[i]; break; }
   if (!carte || carte.statut === 'ignoré' || typeof feuille_ !== 'function') return null;
   var act = typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(carte.actionJson) : {};
-  if (toucheZoneOuActionInterditeRegle_(carte.chemin, carte.domaine, act.cible || carte.chemin)) return null;
+  if (regleEstInterditeQR_(carte, act)) return null;
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, nbVal = (Number(carte.validations) || 0) + 1, auto = carte.statut === 'auto' || nbVal >= seuil, fSheet = feuille_('Copilote');
   act.validations = nbVal; if (auto) act.auto = true;
   fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(auto ? 'auto' : 'proposé'); fSheet.getRange(carte.row, 10).setValue(nbVal);
@@ -170,7 +177,7 @@ function appliquerReglesGmail_(reglesAuto, ctxFil) {
   var c = ctxFil || {}, txt = normaliserQR_([c.expediteur, c.adresse, c.sujet].concat(c.nomsPj || []).join(' ')), adr = String(c.adresse || '').toLowerCase(), cands = Array.isArray(c.candidats) ? c.candidats : [];
   for (var i = 0; i < (reglesAuto || []).length; i++) {
     var r = reglesAuto[i], a = r && r.actionJson ? (typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(r.actionJson) : {}) : (r || {});
-    if (!a || !a.si || !a.alors || a.alors.canal === 'drive' || toucheZoneOuActionInterditeRegle_(r.chemin || '', r.domaine || '', a.cible || '')) continue;
+    if (!a || !a.si || !a.alors || a.alors.canal === 'drive' || regleEstInterditeQR_(r, a)) continue;
     if (a.si.exp && adr !== String(a.si.exp).toLowerCase()) continue;
     var mots = Array.isArray(a.si.mots) ? a.si.mots : [];
     if ((!mots.length && !a.si.exp) || mots.some(function (m) { return txt.indexOf(normaliserQR_(m)) === -1; })) continue;
@@ -185,7 +192,7 @@ function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
   (lignesIndex || []).forEach(function (l) { var fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(l) : String(l[8] || '').trim(); if (fid) { if (!parId[fid]) ordre.push(fid); parId[fid] = l; } });
   for (var i = 0; i < regles.length && (traitees + creees) < maxRestant && !(depasse && depasse()); i++) {
     var r = regles[i], a = typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(r.actionJson) : {};
-    if (!a.si || !a.alors || a.alors.canal === 'gmail' || toucheZoneOuActionInterditeRegle_(r.chemin, r.domaine, a.cible)) continue;
+    if (!a.si || !a.alors || a.alors.canal === 'gmail' || regleEstInterditeQR_(r, a)) continue;
     var mots = Array.isArray(a.si.mots) ? a.si.mots : [], dom = String(a.domaine || r.domaine || '').trim(), chemCib = String(a.cible || r.chemin || dom).trim();
     if (!mots.length || !dom || typeof CONFIG === 'undefined' || !CONFIG.DOMAINES || !CONFIG.DOMAINES[dom]) continue;
     var cibId = CONFIG.DOMAINES[dom];

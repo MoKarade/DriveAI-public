@@ -273,3 +273,61 @@ test('#19 executerRegleCopilote_, incrementerValidationRegle_, appliquerReglesGm
   assert.strictEqual(w.sheets.Copilote[1][8], 'ignoré');
   assert.strictEqual(w.c.lireReglesCopilote_(false).length, 0);
 });
+
+test('#19 non-régression : articles français interdits, liste blanche LLM et défense en profondeur pré-injection Copilote', () => {
+  const w = ctxQR({
+    folders: {
+      FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM02'] },
+      FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: ['FICTIF_TEST_DOCHYD_001'], folders: [] },
+    },
+    files: {
+      FICTIF_TEST_DOCHYD_001: { id: 'FICTIF_TEST_DOCHYD_001', name: '2026-10-01_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_DOM02'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|FICTIF_TEST_DOCHYD_001', '2026-10-01', '2026-10-01_Facture_Hydro-Exemple.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', 'FICTIF_TEST_DOCHYD_001'],
+      ],
+    },
+  });
+
+  // Retrait de libellés avec articles / pluriels et envoi de courriel bloqués à la création
+  for (const phrase of [
+    'Si mail Hydro alors retirer le libellé Finances',
+    'Si mail Hydro alors enlever les libellés Finances',
+    'Si mail Hydro alors supprimer l\'étiquette Finances',
+    'Si document Hydro alors envoyer des courriels',
+  ]) {
+    assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'creer', phrase }).ok, false, phrase);
+  }
+
+  // parserRegleViaLlm_ rejette action/canal hors liste blanche et libelle/domaine protégés
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'supprimer', domaine: '', cible: '', libelle: 'Finances' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'sms', action: 'libeller', domaine: '', cible: '', libelle: 'Finances' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'libeller', domaine: '', cible: '', libelle: 'Immigration' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+  w.c.appelAnthropicTexte_ = () => JSON.stringify({ mots: ['document'], canal: 'gmail', action: 'libeller', domaine: '', cible: '', libelle: 'Anna' });
+  assert.strictEqual(w.c.parserRegleViaLlm_('Si doc alors classer vite'), null);
+
+  // appliquerReglesGmail_ bloque une ligne Copilote pré-injectée si colonnes vides mais ActionJson protégé
+  const reglesPiegees = [
+    { id: 'cop-mal-04', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, domaine: '04 · Immigration', alors: { canal: 'gmail', action: 'libeller', libelle: 'Finances' }, auto: true }) },
+    { id: 'cop-mal-anna', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'gmail', action: 'libeller', libelle: 'Anna' }, auto: true }) },
+    { id: 'cop-mal-alors', domaine: '', chemin: '', statut: 'auto', actionJson: JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'gmail', action: 'libeller', domaine: '04 · Immigration', libelle: 'Finances' }, auto: true }) },
+  ];
+  assert.strictEqual(w.c.appliquerReglesGmail_(reglesPiegees, {
+    expediteur: 'Hydro <factures@exemple.test>', adresse: 'factures@exemple.test',
+    sujet: 'Facture Hydro octobre', nomsPj: [], zoneProtegee: false, candidats: ['Finances', 'Anna'],
+  }), null);
+
+  // appliquerReglesDriveCopilote_ bloque également une ligne pré-injectée visant 04 · Immigration / 00 · Packs dans ActionJson
+  w.sheets.Copilote.push(
+    ['cop-drv-04', new Date(), 'regle', 'regle-auto', '', '', 'Piège', JSON.stringify({ si: { mots: ['hydro'] }, domaine: '04 · Immigration', alors: { canal: 'drive', action: 'deplacer', domaine: '04 · Immigration', cible: '04 · Immigration' }, auto: true }), 'auto', 3],
+    ['cop-drv-pk', new Date(), 'regle', 'regle-auto', '', '', 'Piège', JSON.stringify({ si: { mots: ['hydro'] }, alors: { canal: 'drive', action: 'deplacer', domaine: '02 · Finances', cible: '00 · Packs' }, auto: true }), 'auto', 3]
+  );
+  const resDrv = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(resDrv.traitees, 0);
+  assert.strictEqual(resDrv.creees, 0);
+});

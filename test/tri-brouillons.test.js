@@ -247,6 +247,26 @@ test('#16 chercherReferencesDriveBrouillon_, contexteFil_ et genererBrouillonRep
   assert.strictEqual(wNul.c.genererBrouillonReponse_('c@exemple.test', 'Notif', 'Info', {
     referencesDrive: [{ fileId: 'FICTIF_REF_01', nom: 'Doc.pdf', lien: 'https://drive.google.com/file/d/FICTIF_REF_01/view' }],
   }), null);
+
+  // Non-régression #16 : nom très long ou URL Drive tronquée par parserBrouillon_ -> URL complète garantie <= 1500 car.
+  const lienLong = 'https://drive.google.com/file/d/FICTIF_TEST_TRUNC_0001/view';
+  const wNomLong = creerContexteTriComplet({
+    reponseBrouillon: JSON.stringify({ reponse: 'Bonjour, voici les détails demandés. ' + 'A'.repeat(1420) }),
+  });
+  const repNomLong = wNomLong.c.genererBrouillonReponse_('c@exemple.test', 'Facture', 'Bonjour', {
+    referencesDrive: [{ fileId: 'FICTIF_TEST_TRUNC_0001', nom: 'N'.repeat(1450), lien: lienLong }],
+  });
+  assert.ok(repNomLong && repNomLong.length <= 1500);
+  assert.ok(repNomLong.indexOf(lienLong) !== -1, 'URL Drive complète présente malgré ref0.nom long');
+
+  const wUrlCoupe = creerContexteTriComplet({
+    reponseBrouillon: JSON.stringify({ reponse: 'B'.repeat(1460) + ' ' + lienLong }),
+  });
+  const repUrlCoupe = wUrlCoupe.c.genererBrouillonReponse_('c@exemple.test', 'Facture', 'Bonjour', {
+    referencesDrive: [{ fileId: 'FICTIF_TEST_TRUNC_0001', nom: 'Facture_Hydro.pdf', lien: lienLong }],
+  });
+  assert.ok(repUrlCoupe && repUrlCoupe.length <= 1500);
+  assert.ok(repUrlCoupe.indexOf(lienLong) !== -1, 'URL Drive complète restaurée après troncature à 1500 car.');
 });
 
 test('#16 trierFil_ : injecte les pièces Drive depuis Index/Liens dans createDraftReply sans fuite Index/Journal', () => {
