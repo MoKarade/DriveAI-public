@@ -305,6 +305,9 @@ const CONTRAT = [
   // Copilote proactif (Lot 2A, #5/#6 — Copilote.gs / WebApp.gs / DriveRest.gs)
   'executerEtapeCopilote_', 'executerDecisionCopilote_', 'actionCopiloteExecuter_',
   'restaurerFichierRest_', 'candidatsCascade_', 'proposerCascadeDossier_',
+  // Copilote démarche en cours & Pont Drive → Gmail (Lot 2B, #7/#8)
+  'detecterDemarcheEnCours_', 'analyserDemarchesCopilote_', 'groupeDemarcheChemin_',
+  'orienterPontDriveGmail_', 'pontDriveParAdresse_', 'contexteDrivePourFil_', 'liensPontCache_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

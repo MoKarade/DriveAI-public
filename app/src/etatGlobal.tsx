@@ -24,6 +24,8 @@ export interface DonneesEtat {
   coutsBrut: string[][];      // onglet Coûts (C28-58) — graphique « Réglages » (idée Marc, 29/09)
   reorgBrut?: string[][];     // onglet Réorg (propositions + dossiers vides) — synthèse R3
   actionsBrut?: string[][];   // onglet Actions (ADR-0081 vague 3b) — journal réversible
+  copiloteBrut?: string[][];  // onglet Copilote (Lot 2B) — cartes proactives & démarches
+  liensBrut?: string[][];     // onglet Liens (Lot 2B) — courriels liés aux documents Drive
 }
 
 interface EtatGlobal {
@@ -57,7 +59,7 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         viderCachePlages(); // relire VRAIMENT (le cache 60 s servirait la même photo)
         abonnesProgression.forEach((cb) => cb());
       }
-      const [index, sante, journal, reglages, telemetrie, couts, reorg, actions] = await Promise.all([
+      const [index, sante, journal, reglages, telemetrie, couts, reorg, actions, copilote, liens] = await Promise.all([
         // Fenêtre OUVERTE (`A2:H`, sans borne haute) — JAMAIS `A2:H<N>` : l'Index est append-only
         // (garde-fou §2) et le reset C28-33 y écrit DEUX lignes par fichier (`tri33|` puis `tri33p|`).
         // Une borne de TÊTE fige l'app EN SILENCE dès qu'elle est franchie (zéro erreur, zéro log :
@@ -80,6 +82,8 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         lirePlage('Coûts', 'A2:D40').catch(() => [] as string[][]),
         lirePlage('Réorg', 'A2:H').catch(() => [] as string[][]),
         lirePlage('Actions', 'A2:H').catch(() => [] as string[][]),
+        lirePlage('Copilote', 'A2:J').catch(() => [] as string[][]),
+        lirePlage('Liens', 'A2:H').catch(() => [] as string[][]),
       ]);
       setDonnees({
         index: etatCourantIndex(interpreterIndex(index)),
@@ -87,6 +91,8 @@ export function FournisseurEtat({ children }: { children: ReactNode }) {
         reglagesBrut: reglages, telemetrieBrut: telemetrie, coutsBrut: couts,
         reorgBrut: reorg,
         actionsBrut: actions,
+        copiloteBrut: copilote,
+        liensBrut: liens,
       });
       setErreur('');
       setSynchroA(new Date());

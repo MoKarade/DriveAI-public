@@ -43,7 +43,10 @@ function serialiserActionCopilote_(obj) {
   var copie = {};
   if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) { copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : obj[k]; });
   var s = JSON.stringify(copie);
-  while (s.length > 500 && Array.isArray(copie.ids) && copie.ids.length > 1) { copie.ids.pop(); s = JSON.stringify(copie); }
+  ['echeances', 'tids', 'ids'].forEach(function (k) {
+    var minL = k === 'ids' ? 1 : 0;
+    while (s.length > 500 && Array.isArray(copie[k]) && copie[k].length > minL) { copie[k].pop(); s = JSON.stringify(copie); }
+  });
   return s.length <= 500 ? s : '{}';
 }
 
@@ -100,7 +103,7 @@ function enregistrerCarteCopilote_(carte) {
     var c = existantes[i];
     if (c.type !== carte.type || (!COPILOTE_STATUTS_OUVERTS[c.statut] && c.statut !== 'ignoré')) continue;
     var memeCible = cible && cibleActionCopilote_(parserActionCopilote_(c.actionJson)) === cible;
-    if (!memeCible && !(carte.type === 'cascade' && carte.chemin && c.chemin === carte.chemin)) continue;
+    if (!memeCible && !((carte.type === 'cascade' || carte.type === 'demarche-active') && carte.chemin && c.chemin === carte.chemin)) continue;
     if (c.statut === 'ignoré') return { id: '', cree: false };
     if (!ouverte) ouverte = c;
   }
@@ -175,7 +178,7 @@ function executerDecisionCopilote_(corps) {
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, action = parserActionCopilote_(carte.actionJson), nbVal = carte.validations;
 
   if (decision === 'ignorer' || decision === 'desactiver-auto' || decision === 'passer-auto') {
-    if (decision === 'passer-auto' && (carte.type === 'alerte-corbeille' || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) return { ok: false, erreur: 'mode auto interdit sur cette carte' };
+    if (decision === 'passer-auto' && (carte.type === 'alerte-corbeille' || carte.type === 'demarche-active' || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) return { ok: false, erreur: 'mode auto interdit sur cette carte' };
     var ns = decision === 'ignorer' ? 'ignoré' : (decision === 'passer-auto' ? 'auto' : 'proposé');
     fSheet.getRange(carte.row, 9).setValue(ns);
     return { ok: true, id: id, statut: ns, actionIds: [], nbValidations: nbVal, proposerAuto: false, message: 'Statut mis à jour.' };
@@ -315,6 +318,63 @@ function detecterCascadeTickCopilote_(lignes, depasse, maxRestant) {
   return creees;
 }
 
+/** Groupe démarche `{ domaine, chemin }` — inclut `04` & `Anna`, exclut zones système, retire `/YYYY`. PURE. */
+function groupeDemarcheChemin_(chemin, domaine) {
+  var segs = String(chemin || '').split('/').map(function (s) { return s.trim(); }).filter(Boolean);
+  var sys = { '00 · a trier': 1, '00 · a verifier': 1, '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1 };
+  if (!segs.length || (domaine ? [domaine] : []).concat(segs).some(function (seg) {
+    var n = normaliserCopilote_(seg); return !n || sys[n] || n.charAt(0) === '_' || /^00\s*·/.test(n);
+  })) return null;
+  while (segs.length > 1 && /^\d{4}$/.test(segs[segs.length - 1])) segs.pop();
+  return { domaine: String(domaine || segs[0] || '').trim(), chemin: segs.join('/') };
+}
+
+/** PURE — Détecte les démarches en cours (`>= minMvts` sur `jours` j), incl. `04`/`Anna` en lecture seule, 0 PII. */
+function analyserDemarchesCopilote_(indexLignes, liensLignes, maintenantMs, jours, minMvts) {
+  var maint = typeof maintenantMs === 'number' && !isNaN(maintenantMs) ? maintenantMs : Date.now(), seuilMs = maint - (jours > 0 ? jours : 7) * 86400000, seuil = minMvts > 0 ? minMvts : 3;
+  var today = new Date(maint).toISOString().slice(0, 10), agenda = {}, parId = {}, ordre = [], parChem = {}, groupes = [];
+  (indexLignes || []).forEach(function (r) {
+    var cle = String(r[0] || '').trim();
+    if (cle.indexOf('epingle|') === 0) return;
+    if (cle.indexOf('agenda|') === 0) { var pts = cle.split('|'), ech = String(r[4] || pts[2] || '').trim(); if (pts[1] && /^\d{4}-\d{2}-\d{2}$/.test(ech) && ech >= today) (agenda[pts[1]] = agenda[pts[1]] || []).push(ech); return; }
+    var fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(r) : String(r[8] || '').trim();
+    if (fid) { if (!parId[fid]) ordre.push(fid); parId[fid] = r; }
+  });
+  ordre.forEach(function (fid) {
+    var l = parId[fid], st = String(l[5] || '').trim(), g = (st === 'classé' || st === 'déplacé' || st === 'manuel') ? groupeDemarcheChemin_(l[4], l[3]) : null;
+    if (!g) return;
+    var grp = parChem[g.chemin] || (parChem[g.chemin] = { domaine: g.domaine, chemin: g.chemin, nbMvts: 0, nbDocs: 0, ids: [], idSet: {}, tids: [], tidSet: {} });
+    if (!grp.nbDocs) groupes.push(grp);
+    grp.nbDocs++; grp.idSet[fid] = true; grp.ids.push(fid);
+    var ts = l[1] instanceof Date ? l[1].getTime() : Date.parse(String(l[1] || '').trim().replace(' ', 'T'));
+    if (!isNaN(ts) && ts >= seuilMs && ts <= maint) grp.nbMvts++;
+  });
+  var retenus = groupes.filter(function (x) { return x.nbMvts >= seuil; });
+  (Array.isArray(liensLignes) ? liensLignes : []).forEach(function (lr) {
+    var tid = String(lr[1] || '').trim(), lfid = String(lr[6] || '').trim(), lg = groupeDemarcheChemin_(lr[5], lr[4]);
+    if (tid) retenus.forEach(function (rg) { if ((rg.idSet[lfid] || (lg && lg.chemin === rg.chemin)) && !rg.tidSet[tid] && rg.tids.length < 10) { rg.tidSet[tid] = true; rg.tids.push(tid); } });
+  });
+  return retenus.map(function (rg) {
+    var eSet = {}, echs = []; rg.tids.forEach(function (tid) { (agenda[tid] || []).forEach(function (d) { if (!eSet[d]) { eSet[d] = true; echs.push(d); } }); });
+    return { domaine: rg.domaine, chemin: rg.chemin, nbMvts: rg.nbMvts, nbDocs: rg.nbDocs, ids: rg.ids.slice(-12), tids: rg.tids, echeances: echs.sort().slice(0, 5) };
+  }).sort(function (a, b) { return b.nbMvts - a.nbMvts || b.nbDocs - a.nbDocs || (a.chemin < b.chemin ? -1 : 1); });
+}
+
+function lireLiensCopilote_() {
+  try { var f = feuille_('Liens'), dern = f ? f.getLastRow() : 0, deb = Math.max(2, dern - 499); return dern >= 2 ? f.getRange(deb, 1, dern - deb + 1, 8).getValues() : []; } catch (e) { return []; }
+}
+
+function detecterDemarcheEnCours_(lignes, depasse, maxRestant) {
+  if (depasse && depasse()) return 0;
+  var demarches = analyserDemarchesCopilote_(lignes, lireLiensCopilote_(), Date.now(), 7, 3), creees = 0;
+  for (var i = 0; i < demarches.length && creees < maxRestant && !(depasse && depasse()); i++) {
+    var d = demarches[i];
+    if (enregistrerCarteCopilote_({ categorie: 'demarche', type: 'demarche-active', domaine: d.domaine, chemin: d.chemin,
+      titre: 'Démarche en cours : ' + d.chemin + ' (' + d.nbMvts + ' mvts / 7 j)', statut: 'actif', action: d }).cree) creees++;
+  }
+  return creees;
+}
+
 /** Étape Copilote appelée par le tick (`Main.gs`), bornée par `COPILOTE_BUDGET_MS` et `COPILOTE_MAX_PAR_RUN`. */
 function executerEtapeCopilote_(estBudgetDepasse) {
   if (typeof CONFIG === 'undefined' || !CONFIG.COPILOTE_ACTIF) return { traitees: 0, creees: 0 };
@@ -328,5 +388,6 @@ function executerEtapeCopilote_(estBudgetDepasse) {
   var lignes = lireLignesIndexCopilote_(), creees = detecterCorbeilleSensibleCopilote_(lignes, depasse, maxRun);
   if (creees < maxRun && !depasse()) creees += detecterCascadeTickCopilote_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterDoublonsEtVidesCopilote_(depasse, maxRun - creees);
+  if (creees < maxRun && !depasse()) creees += detecterDemarcheEnCours_(lignes, depasse, maxRun - creees);
   return { traitees: traitees, creees: creees };
 }

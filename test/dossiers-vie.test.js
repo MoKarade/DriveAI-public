@@ -447,3 +447,59 @@ test('dossiersVieCache_ : lit 9 colonnes (FileId col I) pour dédupliquer PJ Gma
   assert.strictEqual(c.enregistrerDossierVieDirect_('08 · Perso & projets', 'Vacances', '08 · Perso & projets/_Medias/Vacances'), false);
   assert.strictEqual(props.has('DriveAI_DOSSIERS_VIE_DIRECTS'), false);
 });
+
+test('Pont Drive → Gmail (#8) : purge ancienChemin, orienterPontDriveGmail_, booster PJ et contexteDrivePourFil_ hors zones protégées', () => {
+  const props = new Map();
+  const store = fakeSheetStore({
+    Index: [
+      ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId'],
+      ['drive|FID_B1', '2026-10-01', '2026-10-01_Releve_Bellerives.pdf', '02 · Finances', '02 · Finances/Compte Principal', 'classé', '', '', 'FID_B1'],
+    ],
+    Liens: [
+      ['Horodatage', 'ThreadId', 'MessageId', 'Expéditeur', 'Domaine', 'Chemin', 'FileId', 'Fichier'],
+      ['2026-10-01', 'thr-1', 'msg-1', 'releves@bellerives.test', '02 · Finances', '02 · Finances/Ancien Bellerives', 'FID_B1', '2026-10-01_Releve_Bellerives.pdf'],
+    ],
+  });
+  const c = load(['DossiersVie.gs'], {
+    ss_: () => store.ss,
+    triApprisCache_: () => ({ 'alertes@alphatek.test': 'Carrière', 'ami@gmail.test': 'Perso' }),
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => (props.has(k) ? props.get(k) : null),
+        setProperty: (k, v) => props.set(k, String(v)),
+      }),
+    },
+  });
+  c.reinitialiserDossiersVieCache_();
+
+  // Purge de l'ancien chemin dans DriveAI_DOSSIERS_VIE_DIRECTS au renommage
+  c.enregistrerDossierVieDirect_('02 · Finances', 'Ancien Bellerives', '02 · Finances/Ancien Bellerives', '2026-11-20');
+  c.enregistrerDossierVieDirect_('02 · Finances', 'Compte Principal', '02 · Finances/Compte Principal', '2026-11-24', '02 · Finances/Ancien Bellerives');
+  const directs = JSON.parse(props.get('DriveAI_DOSSIERS_VIE_DIRECTS'));
+  assert.strictEqual(directs.some((d) => d[0] === '02 · Finances/Ancien Bellerives'), false);
+  assert.strictEqual(directs.some((d) => d[0] === '02 · Finances/Compte Principal'), true);
+
+  // Zones protégées/système exclues du pont
+  assert.strictEqual(c.orienterPontDriveGmail_('04 · Immigration', 'Permis', '04 · Immigration/Permis', ''), 0);
+  assert.strictEqual(c.orienterPontDriveGmail_('Anna', 'Sante', 'Anna/Sante', ''), 0);
+
+  // Oriente via Liens (ancienNom) et TriAppris (domaine non générique)
+  const n1 = c.orienterPontDriveGmail_('02 · Finances', 'Compte Principal', '02 · Finances/Compte Principal', 'Ancien Bellerives');
+  const n2 = c.orienterPontDriveGmail_('05 · Carrière', 'Alphatek', '05 · Carrière/Alphatek', '');
+  assert.strictEqual(n1, 1);
+  assert.strictEqual(n2, 1);
+
+  const ponts = plain(c.pontDriveParAdresse_());
+  assert.strictEqual(ponts['releves@bellerives.test'].chemin, '02 · Finances/Compte Principal');
+  assert.strictEqual(ponts['alertes@alphatek.test'].chemin, '05 · Carrière/Alphatek');
+  assert.strictEqual(ponts['ami@gmail.test'], undefined, 'domaine générique gmail ignoré');
+
+  // chercherDossiersVie_ booste le dossier lié même pour une PJ au nom générique
+  const doss = plain(c.dossiersVieCache_());
+  const trouves = plain(c.chercherDossiersVie_({ expediteur: 'releves@bellerives.test', sujet: 'Document', nom: 'piece.pdf' }, doss, 3, ponts));
+  assert.strictEqual(trouves.length, 1);
+  assert.strictEqual(trouves[0].chemin, '02 · Finances/Compte Principal');
+
+  // contexteDrivePourFil_ retourne le chemin connu sans PII
+  assert.strictEqual(c.contexteDrivePourFil_('Service <releves@bellerives.test>', 'Avis', [], doss, ponts, []), '02 · Finances/Compte Principal');
+});

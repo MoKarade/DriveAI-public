@@ -532,3 +532,27 @@ test('ADR-0081 — trierFil_ transmet Fiche, PJ et historique, et protège l\'hi
   assert.strictEqual(calls.analyses[0].opts.historiqueMessages, '');
   assert.ok(!calls.labels.some((l) => l.label === '⏰ À traiter'));
 });
+
+test('Pont Drive → Gmail (#8) : contexteFil_ inclut contexteDrive hors zone protégée et jamais en zone protégée', () => {
+  const { c, calls } = ctxTri({ analyse: { categorie: 'Finance', suspect: false, aTraiter: false } });
+  c.contexteDrivePourFil_ = (adr, _s, _p, _d, ponts) => (ponts && ponts[adr] ? ponts[adr].chemin : '');
+  c.pontDriveParAdresse_ = () => ({ 'banque@exemple.test': { adresse: 'banque@exemple.test', domaine: '02 · Finances', chemin: '02 · Finances/Banque' } });
+  c.dossiersVieCache_ = () => [];
+  c.liensPontCache_ = () => [];
+
+  const fNorm = fil(calls, { id: 'FP1', msg: 'MP1', exp: 'Banque <banque@exemple.test>', sujet: 'Relevé' });
+  c.GmailApp.search = (q, d) => (d === 0 ? [fNorm] : []);
+  c.trierFilsGmail_(() => false);
+  assert.strictEqual(calls.analyses[0].opts.contexteDrive, '02 · Finances/Banque');
+  assert.ok(c.contexteFil_('banque@exemple.test', 'Relevé', 'corps', { contexteDrive: '02 · Finances/Banque' }).includes('Contexte Drive connu : 02 · Finances/Banque'));
+
+  // En zone protégée : jamais transmis
+  calls.analyses.length = 0;
+  const sProt = ctxTri({ analyse: { categorie: 'Finance', suspect: false, aTraiter: false }, zoneProtegee: (t) => /IRCC/.test(t) });
+  sProt.c.contexteDrivePourFil_ = (adr, _s, _p, _d, ponts) => (ponts && ponts[adr] ? ponts[adr].chemin : '');
+  sProt.c.pontDriveParAdresse_ = () => ({ 'cab@exemple.test': { adresse: 'cab@exemple.test', domaine: '02 · Finances', chemin: '02 · Finances/Cabinet' } });
+  const fProt = fil(sProt.calls, { id: 'FP2', msg: 'MP2', exp: 'Cabinet <cab@exemple.test>', sujet: 'Dossier IRCC' });
+  sProt.c.GmailApp.search = (q, d) => (d === 0 ? [fProt] : []);
+  sProt.c.trierFilsGmail_(() => false);
+  assert.strictEqual(sProt.calls.analyses[0].opts.contexteDrive, undefined);
+});

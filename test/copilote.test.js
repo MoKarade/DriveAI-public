@@ -532,4 +532,80 @@ test('transitions d’état, auto-déplacement dossier-vide, 0-move guard, doubl
   const tropLong = c.serialiserActionCopilote_({ cibleId: 'FICTIF_CIBLE', ids: ['FICTIF_' + 'A'.repeat(510)] });
   assert.ok(tropLong.length <= 500);
   assert.deepStrictEqual(JSON.parse(tropLong), {});
+
+  // troncature echeances / tids / ids avant repli '{}'
+  const longDem = c.serialiserActionCopilote_({
+    chemin: '04 · Immigration/Permis',
+    ids: ['ID1', 'ID2', 'ID3'],
+    tids: Array.from({ length: 40 }, (_, i) => 'thread_' + i + '_abcdef'),
+    echeances: Array.from({ length: 20 }, (_, i) => '2026-08-' + String(i + 10)),
+  });
+  assert.ok(longDem.length <= 500);
+  const parsedDem = JSON.parse(longDem);
+  assert.strictEqual(parsedDem.chemin, '04 · Immigration/Permis');
+  assert.ok(Array.isArray(parsedDem.ids) && parsedDem.ids.length >= 1);
+});
+
+test('demarche-active (#7) : >= 3 mvts / 7 j, inclut 04 · Immigration & Anna (0 écriture Drive), exclut zones système, dédup & refus passer-auto', () => {
+  const maint = Date.now();
+  const jour = 24 * 3600 * 1000;
+  const echFuture = new Date(maint + 30 * jour).toISOString().slice(0, 10);
+  const echPassee = new Date(maint - 10 * jour).toISOString().slice(0, 10);
+  const { c, sh, dr } = ctxCopilote({
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId'],
+        // 3 docs récents dans 04 · Immigration/Permis/2026 (+ 1 épingle et 1 doublon de fid)
+        ['drive|FICTIF_IMMI_DOC_0001', new Date(maint - 1 * jour), '2026-07-09_Form_IRCC.pdf', '04 · Immigration', '04 · Immigration/Permis/2026', 'classé', '', '', 'FICTIF_IMMI_DOC_0001'],
+        ['drive|FICTIF_IMMI_DOC_0002', new Date(maint - 2 * jour), '2026-07-08_Recu_IRCC.pdf', '04 · Immigration', '04 · Immigration/Permis/2026', 'déplacé', '', '', 'FICTIF_IMMI_DOC_0002'],
+        ['epingle|FICTIF_IMMI_DOC_0002', new Date(maint - 2 * jour), '2026-07-08_Recu_IRCC.pdf', '04 · Immigration', '04 · Immigration/Permis/2026', 'épinglé', '', '', 'FICTIF_IMMI_DOC_0002'],
+        ['drive|FICTIF_IMMI_DOC_0003', new Date(maint - 3 * jour), '2026-07-07_Lettre_IRCC.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', '', '', 'FICTIF_IMMI_DOC_0003'],
+        // Anna : 3 docs (1 trop ancien > 7 j, 3 dans la fenêtre)
+        ['drive|FICTIF_ANNA_DOC_0000', new Date(maint - 10 * jour), '2026-06-30_Doc_Anna.pdf', 'Anna', 'Anna/Sante', 'classé', '', '', 'FICTIF_ANNA_DOC_0000'],
+        ['drive|FICTIF_ANNA_DOC_0001', new Date(maint - 1 * jour), '2026-07-09_Doc1_Anna.pdf', 'Anna', 'Anna/Sante', 'classé', '', '', 'FICTIF_ANNA_DOC_0001'],
+        ['drive|FICTIF_ANNA_DOC_0002', new Date(maint - 2 * jour), '2026-07-08_Doc2_Anna.pdf', 'Anna', 'Anna/Sante', 'classé', '', '', 'FICTIF_ANNA_DOC_0002'],
+        ['drive|FICTIF_ANNA_DOC_0003', new Date(maint - 3 * jour), '2026-07-07_Doc3_Anna.pdf', 'Anna', 'Anna/Sante', 'classé', '', '', 'FICTIF_ANNA_DOC_0003'],
+        // < 3 mvts : ignoré
+        ['drive|FICTIF_FIN_DOC_00001', new Date(maint - 1 * jour), '2026-07-09_Fac.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_FIN_DOC_00001'],
+        ['drive|FICTIF_FIN_DOC_00002', new Date(maint - 2 * jour), '2026-07-08_Fac.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_FIN_DOC_00002'],
+        // Zone système exclue même avec 3 mvts
+        ['drive|FICTIF_SYS_DOC_00001', new Date(maint - 1 * jour), 'a.pdf', '_Technique', '_Technique/Logs', 'classé', '', '', 'FICTIF_SYS_DOC_00001'],
+        ['drive|FICTIF_SYS_DOC_00002', new Date(maint - 1 * jour), 'b.pdf', '_Technique', '_Technique/Logs', 'classé', '', '', 'FICTIF_SYS_DOC_00002'],
+        ['drive|FICTIF_SYS_DOC_00003', new Date(maint - 1 * jour), 'c.pdf', '_Technique', '_Technique/Logs', 'classé', '', '', 'FICTIF_SYS_DOC_00003'],
+        // Échéance future + passée
+        ['agenda|THR_IMMI|' + echFuture, new Date(maint), 'DriveAI · Échéance', 'Immigration', echFuture, 'agenda', '', '', ''],
+        ['agenda|THR_IMMI|' + echPassee, new Date(maint), 'DriveAI · Passée', 'Immigration', echPassee, 'agenda', '', '', ''],
+      ],
+      Liens: [
+        ['Horodatage', 'ThreadId', 'MessageId', 'Expéditeur', 'Domaine', 'Chemin', 'FileId', 'Fichier'],
+        [new Date(maint), 'THR_IMMI', 'MSG_1', 'portail@exemple.test', '04 · Immigration', '04 · Immigration/Permis/2026', 'FICTIF_IMMI_DOC_0001', '2026-07-09_Form_IRCC.pdf'],
+      ],
+    },
+  });
+
+  const pure = JSON.parse(JSON.stringify(c.analyserDemarchesCopilote_(sh.sheets.Index.slice(1), sh.sheets.Liens.slice(1), maint, 7, 3)));
+  assert.strictEqual(pure.length, 2);
+  const immi = pure.find((d) => d.chemin === '04 · Immigration/Permis');
+  const anna = pure.find((d) => d.chemin === 'Anna/Sante');
+  assert.ok(immi && immi.nbMvts === 3 && immi.nbDocs === 3);
+  assert.deepStrictEqual(immi.tids, ['THR_IMMI']);
+  assert.deepStrictEqual(immi.echeances, [echFuture]);
+  assert.ok(anna && anna.nbMvts === 3 && anna.nbDocs === 4);
+
+  // Vérifie 0 écriture Drive, déduplication au 2e appel et respect 'ignoré'
+  c.domainesVeilleNonProteges_ = () => [];
+  const r1 = c.detecterDemarcheEnCours_(sh.sheets.Index.slice(1), () => false, 10);
+  assert.strictEqual(r1, 2);
+  assert.strictEqual(dr.moves.length, 0);
+  const r2 = c.detecterDemarcheEnCours_(sh.sheets.Index.slice(1), () => false, 10);
+  assert.strictEqual(r2, 0, 'carte demarche-active dédupliquée par chemin');
+  const cImmi = sh.sheets.Copilote.find((r) => r[3] === 'demarche-active' && r[5] === '04 · Immigration/Permis');
+  assert.ok(cImmi && cImmi[8] === 'actif');
+  assert.ok(!cImmi[7].includes('portail@exemple.test'), 'zéro adresse/corps dans ActionJson');
+
+  // Refus passer-auto et executer sur demarche-active ; ignorer respecté au passage suivant
+  assert.strictEqual(c.executerDecisionCopilote_({ id: cImmi[0], decision: 'passer-auto' }).ok, false);
+  assert.strictEqual(c.executerDecisionCopilote_({ id: cImmi[0], decision: 'executer' }).ok, false);
+  assert.strictEqual(c.executerDecisionCopilote_({ id: cImmi[0], decision: 'ignorer' }).statut, 'ignoré');
+  assert.strictEqual(c.detecterDemarcheEnCours_(sh.sheets.Index.slice(1), () => false, 10), 0);
 });

@@ -12,15 +12,15 @@
 | `Main.gs` | Orchestration du tick (`tickDriveAI`, 43 étapes) + déclencheurs + chien de garde |
 | `Suivi.gs` | Registre des 43 étapes et suivi LIVE (`Progression`, ventilation des coûts) |
 | `WebApp.gs` | Pont HTTP (`doGet`/`doPost`) entre l'app web / GitHub Actions et le moteur |
-| `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons, vides et corbeille sensible (#6) |
+| `Copilote.gs` | Moteur proactif (`Copilote`) : cascade (#5), anti-doublons/vides/corbeille (#6) et démarches en cours (#7) |
 | `Pipeline.gs` | Traitement unifié d'un document (doublon → technique → média → OCR → LLM → routage) |
 | `Gmail.gs` | Source 1 : PJ des mails récents (lecture seule) et suspension sur quota Gmail |
-| `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps) |
+| `TriGmail.gs` | Tri natif Gmail (libellés existants, archivage après lecture, audit sujet+corps, contexte Drive pont #8) |
 | `Libelles.gs` | Bascule et remplacement avec preuves des libellés Gmail (sous 10 principaux / 50 max, ADR-0081) |
 | `Agenda.gs` | Rappels d'échéance automatiques dans Google Agenda (`CalendarApp`, idempotence `Index`, journal `Actions`, ADR-0081) |
-| `DossiersVie.gs` | Carte des dossiers de vie existants (`Index` + cache direct `DriveAI_DOSSIERS_VIE_DIRECTS` borné à 80 LRU) et liens mails ↔ Drive (`Liens`, ADR-0081) |
+| `DossiersVie.gs` | Carte des dossiers de vie existants (`Index` + cache direct `DriveAI_DOSSIERS_VIE_DIRECTS` 80 LRU), pont Drive → Gmail (`DriveAI_PONT_DRIVE_GMAIL` 50 LRU) et liens mails ↔ Drive (`Liens`, ADR-0081) |
 | `Intake.gs` | Source 2 : dépôt manuel `00 · À trier` (déplacement) |
-| `VeilleDrive.gs` | Veille automatique racine `Mon Drive`, suivi direct Changes API v3, apprentissage auto sur déplacement manuel, adoption/renommage dossiers et catalogue lecture seule (`04`, `Anna`) |
+| `VeilleDrive.gs` | Veille automatique racine `Mon Drive`, suivi direct Changes API v3, apprentissage auto sur déplacement manuel, adoption/renommage dossiers, pont Drive → Gmail (#8) et catalogue lecture seule (`04`, `Anna`) |
 | `Partages.gs` | Source 3 : fichiers partagés récents (copie, ADR-0005) |
 | `Migration.gs` | Campagne de re-classement de l'existant (#8, gatée par tag) |
 | `Ocr.gs` | Extraction de texte (conversion Drive + OCR, REST) |

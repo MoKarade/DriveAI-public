@@ -2318,4 +2318,24 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
 
     verifierAucuneErreur(journal);
   });
+
+  test('Lot 2B @lot-2b — cartes proactives Copilote, démarche en cours, Regrouper + Annuler et cibles >= 44px', async ({ page }, testInfo) => {
+    const journal = await preparerApp(page, testInfo);
+    await allerSection(page, testInfo, 'Copilote');
+
+    await expect(page.getByRole('heading', { name: /Propositions et démarches/ })).toBeVisible();
+    await expect(page.getByText('Regrouper 2 doc(s) « Bellerives »')).toBeVisible();
+    await expect(page.getByText('Document en corbeille : 2026-07_Permis.pdf')).toBeVisible();
+    await expect(page.getByRole('link', { name: /2026-07_Permis\.pdf/ })).toBeVisible();
+
+    await auditerCiblesTactiles(page, `${testInfo.project.name}/Lot2B/Copilote`);
+    expect((await mesurerDebordement(page)).page).toBeLessThanOrEqual(0);
+
+    await page.getByRole('button', { name: 'Regrouper', exact: true }).click();
+    await expect(page.getByRole('status')).toBeVisible();
+    await page.getByRole('button', { name: 'Annuler', exact: true }).click();
+    await expect(page.getByRole('status')).toContainText('Action annulée');
+
+    verifierAucuneErreur(journal);
+  });
 });

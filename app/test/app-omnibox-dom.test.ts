@@ -106,6 +106,7 @@ vi.mock('../src/google', () => ({
   marquerPasSuspect: spiesGoogle.marquerPasSuspect,
   demanderPassageMoteur: spiesGoogle.demanderPassageMoteur,
   annulerActionMoteur: spiesGoogle.annulerActionMoteur,
+  executerDecisionCopilote: vi.fn(async (id: string) => ({ ok: true, id, statut: 'appliqué', actionIds: [], nbValidations: 1, proposerAuto: false, message: 'OK' })),
   viderCachePlages: spiesGoogle.viderCachePlages,
 }));
 

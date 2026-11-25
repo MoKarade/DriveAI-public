@@ -182,3 +182,50 @@ export function syntheseSemaineCopilote(mouvements: readonly MouvementDrive[], m
   }
   return { totalMouvements: fichiers + dossiers + apprentissages, fichiers, dossiers, apprentissages };
 }
+
+export type TypeCarteCopilote = 'cascade' | 'doublon-dossier' | 'dossier-vide' | 'alerte-corbeille' | 'demarche-active';
+type StatutCarteCopilote = 'proposé' | 'auto' | 'actif';
+export interface CarteCopilote {
+  id: string; horodatage: string; categorie: string; type: TypeCarteCopilote; domaine: string; chemin: string; titre: string;
+  action: { cibleId?: string; sourceId?: string; dossierId?: string; fileId?: string; ids?: string[]; tids?: string[]; echeances?: string[]; nbMvts?: number; nbDocs?: number };
+  statut: StatutCarteCopilote; validations: number;
+}
+export interface LienMailDrive { threadId: string; expediteur: string; domaine: string; chemin: string; fileId: string; fichier: string }
+const TYPES_CARTES = new Set<TypeCarteCopilote>(['cascade', 'doublon-dossier', 'dossier-vide', 'alerte-corbeille', 'demarche-active']);
+const STATUTS_CARTES = new Set<StatutCarteCopilote>(['proposé', 'auto', 'actif']);
+const ZONES_PROT_COPILOTE = new Set(['04 · immigration', 'anna', '00 · a trier', '00 · a verifier', '_technique', '_doublons', '_medias', 'donnees & exports']);
+
+/** Interprète les cartes ouvertes de `Copilote!A2:J` (PURE). */
+export function interpreterCartesCopilote(brut: readonly string[][] = []): CarteCopilote[] {
+  return brut.flatMap((r) => {
+    const id = String(r[0] ?? '').trim(), type = String(r[3] ?? '').trim() as TypeCarteCopilote, statut = String(r[8] ?? '').trim() as StatutCarteCopilote;
+    if (!id || id === 'Id' || !TYPES_CARTES.has(type) || !STATUTS_CARTES.has(statut)) return [];
+    let action: CarteCopilote['action'] = {};
+    try { const p = r[7] ? JSON.parse(String(r[7])) : null; if (p && typeof p === 'object' && !Array.isArray(p)) action = p as CarteCopilote['action']; } catch { /* ignore */ }
+    return [{ id, horodatage: String(r[1] ?? '').trim(), categorie: String(r[2] ?? '').trim(), type, domaine: String(r[4] ?? '').trim(), chemin: String(r[5] ?? '').trim(), titre: String(r[6] ?? '').trim(), action, statut, validations: Number(r[9]) || 0 }];
+  });
+}
+
+/** Interprète les liens courriel ↔ Drive de `Liens!A2:H` (PURE). */
+export function interpreterLiens(brut: readonly string[][] = []): LienMailDrive[] {
+  return brut.flatMap((r) => {
+    const threadId = String(r[1] ?? '').trim(), fileId = String(r[6] ?? '').trim();
+    return threadId && threadId !== 'ThreadId' && fileId ? [{ threadId, expediteur: String(r[3] ?? '').trim(), domaine: String(r[4] ?? '').trim(), chemin: String(r[5] ?? '').trim(), fileId, fichier: String(r[7] ?? '').trim() }] : [];
+  });
+}
+
+/** Retourne jusqu'à `limite` liens Drive/Gmail associés à une carte Copilote (PURE). */
+export function liensPourCarte(carte: CarteCopilote, liens: readonly LienMailDrive[], limite = 4): LienMailDrive[] {
+  const tids = new Set(carte.action.tids ?? []), fids = new Set([...(carte.action.ids ?? []), ...(carte.action.fileId ? [carte.action.fileId] : [])]), vus = new Set<string>(), out: LienMailDrive[] = [];
+  for (const l of liens) {
+    const cle = `${l.threadId}|${l.fileId}`;
+    if (!vus.has(cle) && (tids.has(l.threadId) || fids.has(l.fileId) || (!!carte.chemin && (l.chemin === carte.chemin || l.chemin.startsWith(`${carte.chemin}/`))))) { vus.add(cle); out.push(l); if (out.length >= limite) break; }
+  }
+  return out;
+}
+
+/** Vrai si la carte peut basculer en mode automatique (PURE). */
+export function peutPasserEnAuto(carte: CarteCopilote): boolean {
+  if (carte.statut !== 'proposé' || carte.validations < 3 || carte.type === 'alerte-corbeille' || carte.type === 'demarche-active') return false;
+  return ![carte.domaine, ...carte.chemin.split('/')].some((s) => { const n = s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim(); return !!n && (ZONES_PROT_COPILOTE.has(n) || n.startsWith('_') || /^00\s*·/.test(n)); });
+}
