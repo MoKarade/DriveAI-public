@@ -316,6 +316,10 @@ const CONTRAT = [
   // Sentinelle factures & Chasseur d'argent oublié (Lot 3B, #11/#12)
   'analyserSentinelleFacturesPure_', 'detecterSentinelleFacturesCopilote_',
   'analyserArgentOubliePure_', 'detecterArgentOublieCopilote_', 'marquerSignauxReclames_',
+  // Checklists, Plan Changement de vie & Packs 1-clic (Lot 4A, #13/#14/#15)
+  'indexerDocumentsVivantsPacks_', 'analyserChecklistsCopilotePure_', 'extraireOrganismesActifs18MoisPure_',
+  'detecterChecklistsCopilote_', 'detecterChangementVieCopilote_', 'executerChecklistCopilote_',
+  'creerPackCopilote_', 'actionCopilotePack_', 'actionCopiloteChecklist_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

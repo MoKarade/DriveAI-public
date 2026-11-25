@@ -64,6 +64,7 @@ const MODULES_MOTEUR = [
   'ResolutionFileId.gs',
   'RetourOrphelins.gs',
   'Signaux.gs',
+  'PacksChecklists.gs',
   'Copilote.gs',
   'WebApp.gs',
   'Actions.gs',
@@ -3148,4 +3149,55 @@ test('Lot 3B [E2E] : Sentinelle factures, Chasseur d argent oublié (0 $ LLM, 04
   const sigAnna = ws.c.lireSignaux_().find((s) => s.fileId === 'FICTIF_E2E_ANNA_REC');
   assert.strictEqual(sigAnna.statutReclamation, 'reclame');
   assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 mutation Drive après reclame sur Anna');
+});
+
+test('Lot 4A [E2E] : Checklists, Plan Changement de vie (0 $ LLM, 04/Anna RO), Packs raccourcis 1-clic et doPost', () => {
+  const ws = creerWorkspaceE2E();
+  const idDom02 = ws.c.CONFIG.DOMAINES['02 · Finances'];
+  const idDom04 = ws.c.CONFIG.DOMAINES['04 · Immigration'];
+  const dAnna = ws.ajouterDossier('FICTIF_E2E_ANNA_L4A', 'Anna', ['FICTIF_RACINE_DRIVE']);
+  const fPass = ws.ajouterFichier({ id: 'FICTIF_E2E_L4A_PASS_01', name: '2026-03-01_Passeport_Etat.pdf', parents: [idDom04], contenu: 'pass' });
+  const fPermis = ws.ajouterFichier({ id: 'FICTIF_E2E_L4A_PERM_01', name: '2026-04-01_Permis_IRCC.pdf', parents: [idDom04], contenu: 'perm' });
+  const fAnna = ws.ajouterFichier({ id: 'FICTIF_E2E_L4A_ANNA_01', name: '2026-08-01_Recu_Clinique Exemple.pdf', parents: [dAnna.id], contenu: 'recu' });
+  const fFac = ws.ajouterFichier({ id: 'FICTIF_E2E_L4A_FACT_01', name: '2026-09-01_Facture_Hydro-Exemple.pdf', parents: [idDom02], contenu: 'fac' });
+  const fOld = ws.ajouterFichier({ id: 'FICTIF_E2E_L4A_OLD_001', name: '2018_Diplome_AncienCollege.pdf', parents: [idDom02], contenu: 'old' });
+
+  ws.c.indexAjouter_('drive|' + fPass.id, { statut: 'manuel', domaine: '04 · Immigration', chemin: '04 · Immigration', nom: fPass.name, fileId: fPass.id });
+  ws.c.indexAjouter_('drive|' + fPermis.id, { statut: 'manuel', domaine: '04 · Immigration', chemin: '04 · Immigration/Permis', nom: fPermis.name, fileId: fPermis.id });
+  ws.c.indexAjouter_('drive|' + fAnna.id, { statut: 'manuel', domaine: 'Anna', chemin: 'Anna/Sante', nom: fAnna.name, fileId: fAnna.id });
+  ws.c.indexAjouter_('drive|' + fFac.id, { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances/Hydro-Exemple', nom: fFac.name, fileId: fFac.id });
+  ws.c.indexAjouter_('drive|' + fOld.id, { statut: 'classé', domaine: '02 · Finances', chemin: '02 · Finances/AncienCollege', nom: fOld.name, fileId: fOld.id });
+  ws.c.feuille_('Liens').appendRow([new Date(), 'thr-e2e-h', 'msg-1', 'factures@hydro-exemple.test', '02 · Finances', '02 · Finances/Hydro-Exemple', fFac.id, fFac.name]);
+
+  ws.props['DriveAI_COUT_' + new ws.c.Date().toISOString().slice(0, 7)] = JSON.stringify({ h55in: 0, h55out: 0, s55in: 10000000, s55out: 1000000, appels: 10 });
+  const llmAvant = ws.spies.llmCalls;
+  const patchesAvant = ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length;
+
+  ws.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(ws.spies.llmCalls, llmAvant, '0 appel LLM pour Lot 4A');
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 mutation Drive');
+
+  const cartes = ws.lireOnglet('Copilote').slice(1);
+  const chkImmi = cartes.find((r) => r[3] === 'checklist' && JSON.parse(r[7]).cle === 'chk|immigration');
+  const chgVie = cartes.find((r) => r[3] === 'changement-vie');
+  assert.ok(chkImmi && chgVie);
+  assert.ok(!chgVie[7].includes('AncienCollege'), 'vieux doc 2018 exclu du plan 18 mois');
+  assert.ok(!chgVie[7].includes('@'), 'aucune adresse courriel dans ActionJson');
+
+  ws.props.DriveAI_WEBAPP_SECRET = 'SECRET_E2E';
+  ws.c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  const repChk = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-checklist', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4AChk01', checklistId: chkImmi[0], item: 'emploi', coche: true }) },
+  }));
+  assert.strictEqual(repChk.ok, true);
+
+  const repPack = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-pack', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4APack01', pack: 'immigration', fileIds: [fPass.id, fPermis.id, fAnna.id] }) },
+  }));
+  assert.strictEqual(repPack.ok, true);
+  assert.strictEqual(repPack.nbRaccourcis, 3);
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 PATCH sur 04/Anna');
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'DELETE').length, 0, '0 DELETE');
 });
