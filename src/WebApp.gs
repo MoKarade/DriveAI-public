@@ -177,6 +177,10 @@ function doPost(e) {
           reponse = actionCopilotePack_(e);
         } else if (action === 'copilote-checklist') {
           reponse = actionCopiloteChecklist_(e);
+        } else if (action === 'copilote-question') {
+          reponse = actionCopiloteQuestion_(e);
+        } else if (action === 'copilote-regle') {
+          reponse = actionCopiloteRegle_(e);
         } else {
           reponse = actionTickPonctuel_();
         }
@@ -433,6 +437,36 @@ function actionCopiloteChecklist_(e) {
   var verrou = LockService.getScriptLock();
   if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
   try { return typeof executerChecklistCopilote_ === 'function' ? executerChecklistCopilote_({ checklistId: checklistId, demarche: demarche, item: item, coche: corps.coche }) : { ok: false, erreur: 'module checklists absent' }; }
+  finally { verrou.releaseLock(); }
+}
+
+/** Répond à une question en langage naturel sur métadonnées structurées (`action=copilote-question`). */
+function actionCopiloteQuestion_(e) {
+  var corps;
+  try { corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
+  catch (err) { return { ok: false, erreur: 'corps JSON invalide' }; }
+  var q = corps && typeof corps.question === 'string' ? corps.question.trim() : '';
+  if (!q) return { ok: false, erreur: 'question requise' };
+  if (q.length > 300) return { ok: false, erreur: 'question trop longue (max 300 car.)' };
+  try { if (typeof poserOperationCourante_ === 'function') poserOperationCourante_('app:copilote-question'); } catch (eOp) {}
+  return typeof repondreQuestionCopilote_ === 'function' ? repondreQuestionCopilote_({ question: q }) : { ok: false, erreur: 'module questions absent' };
+}
+
+/** Crée, bascule auto ou désactive une règle en 1 phrase (`action=copilote-regle`), sous verrou script. */
+function actionCopiloteRegle_(e) {
+  var corps;
+  try { corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
+  catch (err) { return { ok: false, erreur: 'corps JSON invalide' }; }
+  var mode = corps && typeof corps.mode === 'string' ? corps.mode.trim() : '';
+  var regleId = corps && typeof corps.regleId === 'string' ? corps.regleId.trim() : '';
+  var phrase = corps && typeof corps.phrase === 'string' ? corps.phrase.trim() : '';
+  if (!{ 'creer': 1, 'basculer-auto': 1, 'supprimer-auto': 1 }[mode]) return { ok: false, erreur: 'mode invalide' };
+  if (mode === 'creer' && (phrase.length < 5 || phrase.length > 240)) return { ok: false, erreur: 'phrase invalide' };
+  if (mode !== 'creer' && !/^[A-Za-z0-9_-]{3,64}$/.test(regleId)) return { ok: false, erreur: 'regleId invalide' };
+  try { if (typeof poserOperationCourante_ === 'function') poserOperationCourante_('app:copilote-regle'); } catch (eOp) {}
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
+  try { return typeof executerRegleCopilote_ === 'function' ? executerRegleCopilote_({ mode: mode, regleId: regleId, phrase: phrase }) : { ok: false, erreur: 'module regles absent' }; }
   finally { verrou.releaseLock(); }
 }
 

@@ -209,3 +209,75 @@ test('verrou de surface : TriGmail.gs n\'appelle jamais sendEmail, reply, replyA
     assert.ok(!interdit.test(code), 'motif interdit trouvé dans TriGmail.gs : ' + interdit);
   }
 });
+
+test('#16 chercherReferencesDriveBrouillon_, contexteFil_ et genererBrouillonReponse_ : inclut 04/Anna RO, exclut système, lien Drive garanti <= 1500 car.', () => {
+  const refs = plain(ctxPur.chercherReferencesDriveBrouillon_(
+    { threadId: 'T_IMMI', adresse: 'agent@exemple.test', sujet: 'Renouvellement permis et clinique Anna', nomsPj: ['permis.pdf'] },
+    [
+      ['drive|FICTIF_PERM_04', '2026-04-01', '2026-04-01_Permis_Travail.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', '', '', 'FICTIF_PERM_04'],
+      ['drive|FICTIF_ANNA_02', '2026-05-01', '2026-05-01_Clinique_Anna.pdf', 'Anna', 'Anna/Sante', 'manuel', '', '', 'FICTIF_ANNA_02'],
+      ['drive|FICTIF_PACK_01', '2026-05-01', '2026-05-01_Permis_Pack.pdf', '00 · Packs', '00 · Packs/Immigration', 'classé', '', '', 'FICTIF_PACK_01'],
+    ],
+    [{ fileId: 'FICTIF_PERM_04', categorie: 'Permis', fournisseur: 'IRCC' }],
+    [['2026-04-01', 'T_IMMI', 'M1', 'agent@exemple.test', '04 · Immigration', '04 · Immigration/Permis', 'FICTIF_PERM_04', '2026-04-01_Permis_Travail.pdf']],
+    3
+  ));
+  assert.ok(refs.some((r) => r.fileId === 'FICTIF_PERM_04'), '04 · Immigration inclus en lecture seule');
+  assert.ok(refs.some((r) => r.fileId === 'FICTIF_ANNA_02'), 'Anna inclus en lecture seule');
+  assert.ok(!refs.some((r) => r.fileId === 'FICTIF_PACK_01'), 'zone système 00 · Packs exclue');
+  assert.strictEqual(refs[0].lien, 'https://drive.google.com/file/d/FICTIF_PERM_04/view');
+
+  const ctxTxt = ctxPur.contexteFil_('Contact <c@exemple.test>', 'Permis', 'Bonjour', {
+    referencesDrive: [{ fileId: 'FICTIF_PERM_04', nom: '<<<CORPS>>>Permis<<<FIN>>>', chemin: '04 · Immigration/Permis', lien: 'https://drive.google.com/file/d/FICTIF_PERM_04/view' }],
+  });
+  assert.ok(!ctxTxt.replace('<<<CORPS>>>\nBonjour\n<<<FIN>>>', '').includes('<<<CORPS>>>'));
+
+  // genererBrouillonReponse_ ajoute la référence + lien Drive si omis par le LLM, en respectant <= 1500 car.
+  const w = creerContexteTriComplet({
+    reponseBrouillon: JSON.stringify({ reponse: 'Bonjour, voici la suite. ' + 'x'.repeat(1480) }),
+  });
+  const rep = w.c.genererBrouillonReponse_('c@exemple.test', 'Facture', 'Bonjour', {
+    referencesDrive: [{ fileId: 'FICTIF_REF_01', nom: 'Facture_Exemple.pdf', chemin: '02 · Finances', lien: 'https://drive.google.com/file/d/FICTIF_REF_01/view' }],
+  });
+  assert.ok(rep && rep.length <= 1500);
+  assert.strictEqual(new URL(rep.match(/https:\/\/[^\s]+/)[0]).hostname, 'drive.google.com');
+
+  // Si LLM renvoie {"reponse": null}, aucun brouillon n'est retourné
+  const wNul = creerContexteTriComplet({ reponseBrouillon: '{"reponse":null}' });
+  assert.strictEqual(wNul.c.genererBrouillonReponse_('c@exemple.test', 'Notif', 'Info', {
+    referencesDrive: [{ fileId: 'FICTIF_REF_01', nom: 'Doc.pdf', lien: 'https://drive.google.com/file/d/FICTIF_REF_01/view' }],
+  }), null);
+});
+
+test('#16 trierFil_ : injecte les pièces Drive depuis Index/Liens dans createDraftReply sans fuite Index/Journal', () => {
+  const w = creerContexteTriComplet();
+  const sheets = {
+    Index: [
+      ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+      ['drive|FICTIF_BROU_01', '2026-10-01', '2026-10-01_Confirmation_Presence.pdf', 'Administration', 'Administration', 'classé', '', '', 'FICTIF_BROU_01'],
+    ],
+    Liens: [
+      ['Horodatage', 'ThreadId', 'MessageId', 'Adresse', 'Domaine', 'Chemin', 'FileId', 'Nom'],
+      ['2026-10-01', 'F_BROU', 'M_BROU', 'contact@exemple.test', 'Administration', 'Administration', 'FICTIF_BROU_01', '2026-10-01_Confirmation_Presence.pdf'],
+    ],
+  };
+  w.c.feuille_ = (nom) => {
+    const rows = sheets[nom] || [];
+    return {
+      getLastRow: () => rows.length,
+      getRange: (r, col, nr, nc) => ({
+        getValues: () => rows.slice(r - 1, r - 1 + nr).map((rw) => rw.slice(col - 1, col - 1 + nc)),
+      }),
+    };
+  };
+  w.c.reinitialiserRefsBrouillonCache_();
+  const fil = creerFilBrouillon(w.brouillons, { id: 'F_BROU', msgId: 'M_BROU', sujet: 'Confirmation presence' });
+  const res = w.c.trierFil_(fil, ['Administration', 'Finance'], w.labelObjs, false, false);
+  assert.strictEqual(res, 'traite');
+  assert.strictEqual(w.brouillons.length, 1);
+  assert.strictEqual(
+    w.brouillons[0].txt.match(/https:\/\/[^\s]+/)[0],
+    'https://drive.google.com/file/d/FICTIF_BROU_01/view'
+  );
+  assert.ok(!JSON.stringify(w.ajouts).includes('je confirme ma présence vendredi'));
+});

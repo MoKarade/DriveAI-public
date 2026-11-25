@@ -65,6 +65,7 @@ const MODULES_MOTEUR = [
   'RetourOrphelins.gs',
   'Signaux.gs',
   'PacksChecklists.gs',
+  'QuestionsRegles.gs',
   'Copilote.gs',
   'WebApp.gs',
   'Actions.gs',
@@ -3200,4 +3201,109 @@ test('Lot 4A [E2E] : Checklists, Plan Changement de vie (0 $ LLM, 04/Anna RO), P
   assert.strictEqual(repPack.nbRaccourcis, 3);
   assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 PATCH sur 04/Anna');
   assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'DELETE').length, 0, '0 DELETE');
+});
+
+test('Lot 4B-1 [E2E] : Brouillons augmentés (#16), Questions IA + frein 25 $ + Cout.gs (#18), Règles 1 phrase + mode auto annulable (#19)', () => {
+  const ws = creerWorkspaceE2E();
+  const idDom02 = ws.c.CONFIG.DOMAINES['02 · Finances'];
+  const idDom04 = ws.c.CONFIG.DOMAINES['04 · Immigration'];
+  const idDom08 = ws.c.CONFIG.DOMAINES['08 · Perso & projets'];
+  const dAnna = ws.ajouterDossier('FICTIF_E2E_ANNA_L4B', 'Anna', ['FICTIF_RACINE_DRIVE']);
+  const dHydro = ws.ajouterDossier('FICTIF_E2E_HYD_DIR', 'Hydro-Exemple', [idDom02]);
+  const fPass = ws.ajouterFichier({ id: 'FICTIF_E2E_L4B_PASS_01', name: '2026-04-01_Passeport_IRCC.pdf', parents: [idDom04], contenu: 'pass' });
+  const fAnna = ws.ajouterFichier({ id: 'FICTIF_E2E_L4B_ANNA_01', name: '2026-08-15_Recu_Clinique.pdf', parents: [dAnna.id], contenu: 'recu' });
+  const fHydro = ws.ajouterFichier({ id: 'FICTIF_E2E_L4B_HYDR_01', name: '2026-10-01_Facture_Hydro-Exemple.pdf', parents: [idDom08], contenu: 'fac' });
+
+  ws.c.indexAjouter_('drive|' + fPass.id, { statut: 'manuel', domaine: '04 · Immigration', chemin: '04 · Immigration', nom: fPass.name, fileId: fPass.id });
+  ws.c.indexAjouter_('drive|' + fAnna.id, { statut: 'manuel', domaine: 'Anna', chemin: 'Anna/Sante', nom: fAnna.name, fileId: fAnna.id });
+  ws.c.indexAjouter_('drive|' + fHydro.id, { statut: 'classé', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets', nom: fHydro.name, fileId: fHydro.id });
+  ws.c.enregistrerSignal_({ fileId: fPass.id, categorie: 'Passeport', fournisseur: 'IRCC', domaine: '04 · Immigration', chemin: '04 · Immigration', dateDoc: '2026-04-01', dateExpiration: '2031-04-01' });
+  ws.c.enregistrerSignal_({ fileId: fAnna.id, categorie: 'Reçu clinique', fournisseur: 'Clinique Exemple', domaine: 'Anna', chemin: 'Anna/Sante', dateDoc: '2026-08-15', montant: 95, devise: 'CAD', statutReclamation: 'a-reclamer' });
+
+  ws.props.DriveAI_WEBAPP_SECRET = 'SECRET_E2E';
+  ws.c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+
+  // #18 Question IA sous budget (< 25 $) incluant 04 & Anna en lecture seule + ventilation Cout.gs
+  ws.c.appelAnthropicTexte_ = (mod) => {
+    ws.c.enregistrerUsage_(mod, { input_tokens: 120, output_tokens: 30 });
+    return 'Ton passeport expire le 2031-04-01 (https://drive.google.com/file/d/FICTIF_E2E_L4B_PASS_01/view).';
+  };
+  const qOk = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-question', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4BQ01', question: 'Quand expire mon passeport et quel reçu Anna ?' }) },
+  }));
+  assert.strictEqual(qOk.ok, true);
+  assert.strictEqual(qOk.llmUtilise, true);
+  assert.ok(qOk.sources.some((s) => s.fileId === fPass.id));
+  assert.ok(qOk.sources.some((s) => s.fileId === fAnna.id));
+  const moisCle = Object.keys(ws.props).find((k) => k.startsWith('DriveAI_COUT_'));
+  assert.ok(moisCle && JSON.parse(ws.props[moisCle]).ops['app:copilote-question'], 'coût app:copilote-question enregistré');
+
+  // #18 Coupure LLM stricte >= 25 $/mois -> repli déterministe gratuit
+  ws.props[moisCle] = JSON.stringify({ s55in: 10000000, s55out: 1000000, appels: 10 });
+  const qFrein = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-question', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4BQ02', question: 'Passeport IRCC ?' }) },
+  }));
+  assert.strictEqual(qFrein.ok, true);
+  assert.strictEqual(qFrein.llmUtilise, false);
+  assert.strictEqual(qFrein.sources[0].lien, 'https://drive.google.com/file/d/' + fPass.id + '/view');
+
+  // #19 Règle 1 phrase : refus 04/Anna, création, 3 validations -> auto, déplacement réversible hors 04/Anna, annulation 1-clic
+  const rRefus = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-regle', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4BR00', mode: 'creer', phrase: 'Si passeport alors déplacer dans 04 · Immigration' }) },
+  }));
+  assert.strictEqual(rRefus.ok, false);
+
+  const rCree = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-regle', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4BR01', mode: 'creer', phrase: 'Si facture Hydro-Exemple alors ranger dans 02 · Finances/Hydro-Exemple et marquer important' }) },
+  }));
+  assert.strictEqual(rCree.ok, true);
+  assert.strictEqual(rCree.auto, false);
+
+  // Bascule auto via doPost + exécution prioritaire dans executerEtapeCopilote_
+  const rAuto = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-regle', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot4BR02', mode: 'basculer-auto', regleId: rCree.regleId }) },
+  }));
+  assert.strictEqual(rAuto.ok, true);
+  assert.strictEqual(rAuto.auto, true);
+
+  const patchesAvant = ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length;
+  const etape = ws.c.executerEtapeCopilote_(() => false);
+  assert.ok(etape.traitees >= 1);
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant + 1);
+  assert.strictEqual(ws.files.get(fHydro.id).parents[0], dHydro.id);
+
+  // #16 Brouillon Gmail augmenté via trierFil_ (createDraftReply avec lien Drive)
+  ws.props[moisCle] = JSON.stringify({ appels: 1 });
+  ws.c.reinitialiserFreinBudget_();
+  const drafts = [];
+  ws.c.reinitialiserBrouillonsTri_();
+  ws.c.reinitialiserRefsBrouillonCache_();
+  ws.c.reinitialiserReglesGmailCache_();
+  ws.c.appelTriLlm_ = () => '{"reponse":"Bonjour, facture bien reçue."}';
+  ws.c.feuille_('Liens').appendRow([new Date(), 'thr-e2e-l4b', 'msg-l4b', 'factures@hydro-exemple.test', '02 · Finances', '02 · Finances/Hydro-Exemple', fHydro.id, fHydro.name]);
+  const labFin = { getName: () => 'Finances', addToThread: () => {} };
+  const libelles = { Finances: labFin, 'À vérifier': { getName: () => 'À vérifier', addToThread: () => {} }, '⚠️ Suspect': { getName: () => '⚠️ Suspect', addToThread: () => {} }, '⏰ À traiter': { getName: () => '⏰ À traiter', addToThread: () => {} } };
+  const fil = {
+    getId: () => 'thr-e2e-l4b',
+    isInInbox: () => true,
+    getLastMessageDate: () => new Date(),
+    isUnread: () => true,
+    getLabels: () => [],
+    getMessages: () => [{ getId: () => 'msg-l4b', getFrom: () => 'Hydro <factures@hydro-exemple.test>', getSubject: () => 'Facture Hydro-Exemple', getHeader: () => '', getPlainBody: () => 'Veuillez confirmer la réception.', isDraft: () => false }],
+    moveToArchive: () => {},
+    createDraftReply: (txt) => drafts.push(txt),
+  };
+  const rTri = ws.c.trierFil_(fil, ['Finances'], libelles, false, false);
+  assert.strictEqual(rTri, 'traite');
+  assert.strictEqual(drafts.length, 1);
+  assert.strictEqual(
+    drafts[0].match(/https:\/\/[^\s]+/)[0],
+    'https://drive.google.com/file/d/' + fHydro.id + '/view'
+  );
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'DELETE').length, 0);
 });

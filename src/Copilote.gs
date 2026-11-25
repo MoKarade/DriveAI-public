@@ -42,11 +42,17 @@ function estProtegeDriveCopilote_(item, proteges) {
 /** Sérialise ActionJson en restant <= 500 caractères et JSON valide (zéro PII). PURE. */
 function serialiserActionCopilote_(obj) {
   var copie = {};
-  if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) { copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : obj[k]; });
+  if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) {
+    copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : (obj[k] && typeof obj[k] === 'object' ? JSON.parse(JSON.stringify(obj[k])) : obj[k]);
+  });
   var s = JSON.stringify(copie);
-  ['echeances', 'tids', 'ids', 'orgs', 'items'].forEach(function (k) {
+  ['echeances', 'tids', 'ids', 'orgs', 'items', 'mots'].forEach(function (k) {
     var minL = k === 'ids' ? 1 : 0;
     while (s.length > 500 && Array.isArray(copie[k]) && copie[k].length > minL) { copie[k].pop(); s = JSON.stringify(copie); }
+  });
+  while (s.length > 500 && copie.si && Array.isArray(copie.si.mots) && copie.si.mots.length > 1) { copie.si.mots.pop(); s = JSON.stringify(copie); }
+  [120, 40, 0].forEach(function (lim) {
+    if (s.length > 500 && typeof copie.phrase === 'string') { copie.phrase = copie.phrase.slice(0, lim); s = JSON.stringify(copie); }
   });
   return s.length <= 500 ? s : '{}';
 }
@@ -190,6 +196,10 @@ function executerDecisionCopilote_(corps) {
       return { ok: false, erreur: 'mode auto interdit sur cette carte' };
     }
     var ns = decision === 'ignorer' ? 'ignoré' : (decision === 'passer-auto' ? 'auto' : 'proposé');
+    if (carte.type === 'regle-auto' && (decision === 'passer-auto' || decision === 'desactiver-auto')) {
+      action.auto = (ns === 'auto');
+      fSheet.getRange(carte.row, 8).setValue(serialiserActionCopilote_(action));
+    }
     fSheet.getRange(carte.row, 9).setValue(ns);
     return { ok: true, id: id, statut: ns, actionIds: [], nbValidations: nbVal, proposerAuto: false, message: 'Statut mis à jour.' };
   }
@@ -250,9 +260,21 @@ function executerDecisionCopilote_(corps) {
       var aidV = enregistrerAction_('drive-deplacer', dId, { parentId: pv.getId(), nom: nomDv }, { parentId: cibleVides.getId(), nom: nomDv }, 'Copilote dossier vide ' + id);
       if (aidV) actionIds.push(aidV);
     } catch (eDv) { return { ok: false, erreur: 'dossier vide inaccessible' }; }
+  } else if (carte.type === 'regle-auto') {
+    nbVal += 1;
+    var autoRegle = carte.statut === 'auto' || nbVal >= seuil;
+    action.validations = nbVal;
+    if (autoRegle) action.auto = true;
+    fSheet.getRange(carte.row, 8).setValue(serialiserActionCopilote_(action));
+    fSheet.getRange(carte.row, 9).setValue(autoRegle ? 'auto' : 'proposé');
+    fSheet.getRange(carte.row, 10).setValue(nbVal);
+    return { ok: true, id: id, statut: autoRegle ? 'auto' : 'proposé', actionIds: [], nbValidations: nbVal, proposerAuto: nbVal >= seuil, message: autoRegle ? 'Règle passée en mode auto (annulable).' : 'Validation règle enregistrée.' };
   } else { return { ok: false, erreur: 'type non pris en charge' }; }
 
   if ((carte.type === 'cascade' || carte.type === 'doublon-dossier') && !actionIds.length) return { ok: false, erreur: 'aucun fichier éligible à déplacer' };
+  if (carte.type === 'cascade' && action.regleId && typeof incrementerValidationRegle_ === 'function') {
+    try { incrementerValidationRegle_(String(action.regleId)); } catch (eReg) {}
+  }
   nbVal += 1; fSheet.getRange(carte.row, 9).setValue('appliqué'); fSheet.getRange(carte.row, 10).setValue(nbVal);
   return { ok: true, id: id, statut: 'appliqué', actionIds: actionIds, nbValidations: nbVal, proposerAuto: nbVal >= seuil, message: 'Action exécutée (' + actionIds.length + ' élément(s)).' };
 }
@@ -406,7 +428,13 @@ function executerEtapeCopilote_(estBudgetDepasse) {
     if (cartes[i].statut === 'auto' && cartes[i].type === 'cascade' && !estZoneProtegeeCopilote_(cartes[i].chemin, cartes[i].domaine) &&
       executerDecisionCopilote_({ id: cartes[i].id, decision: 'executer' }).ok) traitees++;
   }
-  var lignes = lireLignesIndexCopilote_(), creees = detecterCorbeilleSensibleCopilote_(lignes, depasse, maxRun);
+  var lignes = lireLignesIndexCopilote_(), creees = 0;
+  if (!depasse() && typeof appliquerReglesDriveCopilote_ === 'function') {
+    var rReg = appliquerReglesDriveCopilote_(lignes, depasse, maxRun);
+    traitees += (rReg && rReg.traitees) || 0;
+    creees += (rReg && rReg.creees) || 0;
+  }
+  if (creees < maxRun && !depasse()) creees += detecterCorbeilleSensibleCopilote_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterCascadeTickCopilote_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterDoublonsEtVidesCopilote_(depasse, maxRun - creees);
   if (creees < maxRun && !depasse()) creees += detecterDemarcheEnCours_(lignes, depasse, maxRun - creees);
