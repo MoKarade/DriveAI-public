@@ -494,3 +494,249 @@ test('non-régression M9 Anomalie 2 : zéro repli sur racine domaine ou sous-dos
   assert.strictEqual(w.moves.length, 1);
   assert.strictEqual(w.moves[0].dst, 'FICTIF_SUBVALIDE');
 });
+
+test('non-régression M9-2 : domaines et sous-dossiers avec &, ponctuation finale et exécution Drive auto', () => {
+  const doms = {
+    '01 · Administratif & identité': 'FICTIF_DOM01',
+    '02 · Finances': 'FICTIF_DOM02',
+    '03 · Logement & véhicule': 'FICTIF_DOM03',
+    '04 · Immigration': 'FICTIF_DOM04',
+    '06 · Études & diplômes': 'FICTIF_DOM06',
+    '08 · Perso & projets': 'FICTIF_DOM08',
+  };
+  const F_HYD = 'FICTIF_TEST_AMP_00001';
+  const F_BNQ = 'FICTIF_TEST_AMP_00002';
+  const w = ctxQR({
+    domaines: doms,
+    folders: {
+      FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM01', 'FICTIF_DOM02', 'FICTIF_DOM03', 'FICTIF_DOM06', 'FICTIF_DOM08'] },
+      FICTIF_DOM01: { id: 'FICTIF_DOM01', name: '01 · Administratif & identité', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_IDENT'] },
+      FICTIF_IDENT: { id: 'FICTIF_IDENT', name: 'Carte', parents: ['FICTIF_DOM01'], files: [], folders: [] },
+      FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_BQ_AMP'] },
+      FICTIF_BQ_AMP: { id: 'FICTIF_BQ_AMP', name: 'Banque & Crédit', parents: ['FICTIF_DOM02'], files: [], folders: ['FICTIF_RELEVES'] },
+      FICTIF_RELEVES: { id: 'FICTIF_RELEVES', name: 'Relevés', parents: ['FICTIF_BQ_AMP'], files: [], folders: [] },
+      FICTIF_DOM03: { id: 'FICTIF_DOM03', name: '03 · Logement & véhicule', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_ENERGIE'] },
+      FICTIF_ENERGIE: { id: 'FICTIF_ENERGIE', name: 'Énergie', parents: ['FICTIF_DOM03'], files: [], folders: ['FICTIF_HYDRO_EX'] },
+      FICTIF_HYDRO_EX: { id: 'FICTIF_HYDRO_EX', name: 'Hydro-Exemple', parents: ['FICTIF_ENERGIE'], files: [], folders: [] },
+      FICTIF_DOM06: { id: 'FICTIF_DOM06', name: '06 · Études & diplômes', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_UNIV'] },
+      FICTIF_UNIV: { id: 'FICTIF_UNIV', name: 'Attestations', parents: ['FICTIF_DOM06'], files: [], folders: [] },
+      FICTIF_DOM08: { id: 'FICTIF_DOM08', name: '08 · Perso & projets', parents: ['FICTIF_ROOT'], files: [F_HYD, F_BNQ], folders: ['FICTIF_PROJ'] },
+      FICTIF_PROJ: { id: 'FICTIF_PROJ', name: 'Notes', parents: ['FICTIF_DOM08'], files: [], folders: [] },
+    },
+    files: {
+      [F_HYD]: { id: F_HYD, name: '2026-11-01_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+      [F_BNQ]: { id: F_BNQ, name: '2026-11-02_Releve_BanqueExemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|' + F_HYD, '2026-11-01', '2026-11-01_Facture_Hydro-Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_HYD],
+        ['drive|' + F_BNQ, '2026-11-02', '2026-11-02_Releve_BanqueExemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_BNQ],
+      ],
+    },
+  });
+
+  // Tous les 4 domaines officiels avec & + sous-dossier avec & + ponctuation finale
+  const casParsing = [
+    ['Si document carte alors ranger dans 01 · Administratif & identité/Carte.', '01 · Administratif & identité', '01 · Administratif & identité/Carte'],
+    ['Si facture hydro alors classer dans 03 · Logement & véhicule/Énergie/Hydro-Exemple.', '03 · Logement & véhicule', '03 · Logement & véhicule/Énergie/Hydro-Exemple'],
+    ['Si diplôme université alors ranger dans 06 · Études & diplômes/Attestations', '06 · Études & diplômes', '06 · Études & diplômes/Attestations'],
+    ['Si carnet projet alors classer dans 08 · Perso & projets/Notes', '08 · Perso & projets', '08 · Perso & projets/Notes'],
+    ['Si relevé banque alors classer dans 02 · Finances/Banque & Crédit/Relevés', '02 · Finances', '02 · Finances/Banque & Crédit/Relevés'],
+  ];
+  for (const [phrase, expDom, expCible] of casParsing) {
+    const p = plain(w.c.parserPhraseRegle_(phrase, null, []));
+    assert.ok(p, 'parsing attendu pour: ' + phrase);
+    assert.strictEqual(p.domaine, expDom, phrase);
+    assert.strictEqual(p.cible, expCible, phrase);
+  }
+
+  // Exécution réelle auto sur domaine avec & et sous-dossier avec &
+  const rHyd = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture Hydro-Exemple alors classer dans 03 · Logement & véhicule/Énergie/Hydro-Exemple' }));
+  assert.strictEqual(rHyd.ok, true);
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rHyd.regleId }).auto, true);
+
+  const rBnq = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si releve banqueexemple alors classer dans 02 · Finances/Banque & Crédit/Relevés' }));
+  assert.strictEqual(rBnq.ok, true);
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rBnq.regleId }).auto, true);
+
+  const exec = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(exec.traitees, 2);
+  assert.strictEqual(w.moves.length, 2);
+  assert.strictEqual(w.moves.find((m) => m.fid === F_HYD).dst, 'FICTIF_HYDRO_EX');
+  assert.strictEqual(w.moves.find((m) => m.fid === F_BNQ).dst, 'FICTIF_RELEVES');
+});
+
+test('non-régression M9-2 : chemins > 50 car. et ~130 car., ActionJson <= 500 valide après 3 validations sans perdre cible ni si.mots', () => {
+  const w = ctxQR({
+    domaines: {
+      '02 · Finances': 'FICTIF_DOM02',
+      '03 · Logement & véhicule': 'FICTIF_DOM03',
+      '04 · Immigration': 'FICTIF_DOM04',
+    },
+  });
+
+  // Chemin > 50 caractères sans troncature
+  const cible50 = '02 · Finances/Banque Exemple Du Canada/Releves Mensuels Detailles';
+  const p50 = plain(w.c.parserPhraseRegle_('Si releve mensuel alors classer dans ' + cible50, null, []));
+  assert.ok(p50);
+  assert.strictEqual(p50.domaine, '02 · Finances');
+  assert.strictEqual(p50.cible, cible50);
+
+  // Chemin long (~130 caractères) via executerRegleCopilote_ + 3 validations
+  const cibleLongue = '03 · Logement & véhicule/Service Exemple Electricite Eau Gaz Chauffage/Contrats Et Factures Mensuelles Detailles Archivees 2026';
+  assert.ok(cibleLongue.length >= 125 && cibleLongue.length <= 140, 'longueur cible ~130 car.');
+  const phraseLongue = 'Si facture electricite chauffage gaz eau alors ranger dans ' + cibleLongue;
+  assert.ok(phraseLongue.length <= 240);
+
+  const cr = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: phraseLongue }));
+  assert.strictEqual(cr.ok, true);
+  let rowRegle = w.sheets.Copilote.find((r) => r[0] === cr.regleId);
+  assert.ok(rowRegle);
+  assert.strictEqual(rowRegle[4], '03 · Logement & véhicule');
+  assert.strictEqual(rowRegle[5], cibleLongue);
+  assert.ok(String(rowRegle[7]).length <= 500, 'ActionJson initial <= 500');
+  const parsedInit = JSON.parse(rowRegle[7]);
+  assert.strictEqual(parsedInit.domaine, '03 · Logement & véhicule');
+  assert.strictEqual(parsedInit.cible, cibleLongue);
+  assert.deepStrictEqual(parsedInit.si.mots, ['facture', 'electricite', 'chauffage', 'gaz', 'eau']);
+
+  // 3 validations via executerDecisionCopilote_ (Copilote.gs appelle serialiserActionCopilote_)
+  for (let i = 0; i < 3; i++) {
+    const resV = plain(w.c.executerDecisionCopilote_({ id: cr.regleId, decision: 'executer' }));
+    assert.strictEqual(resV.ok, true);
+  }
+  rowRegle = w.sheets.Copilote.find((r) => r[0] === cr.regleId);
+  assert.strictEqual(rowRegle[8], 'auto');
+  assert.strictEqual(rowRegle[9], 3);
+  assert.ok(String(rowRegle[7]).length <= 500, 'ActionJson après 3 validations <= 500');
+  const parsedApres = JSON.parse(rowRegle[7]);
+  assert.strictEqual(parsedApres.auto, true);
+  assert.strictEqual(parsedApres.validations, 3);
+  assert.strictEqual(parsedApres.domaine, '03 · Logement & véhicule');
+  assert.strictEqual(parsedApres.cible, cibleLongue);
+  assert.deepStrictEqual(parsedApres.si.mots, ['facture', 'electricite', 'chauffage', 'gaz', 'eau']);
+
+  // Compactage serialiserRegleAction_ sur cible très longue (~190 car.) : reste <= 492 car., garde cible/domaine/si.mots
+  const cibleTresLongue = '03 · Logement & véhicule/Service Exemple Electricite Eau Gaz Chauffage Climatisation Isolation/Contrats Et Factures Mensuelles Detailles Archivees 2026 Et Garages Annexes';
+  const phraseTresLongue = 'Si facture electricite chauffage gaz alors ranger dans ' + cibleTresLongue;
+  assert.ok(phraseTresLongue.length <= 240);
+  const pTL = plain(w.c.parserPhraseRegle_(phraseTresLongue, null, []));
+  assert.ok(pTL && pTL.cible === cibleTresLongue);
+  const sTL = w.c.serialiserRegleAction_(pTL);
+  assert.ok(sTL.length <= 492, 'ActionJson compacté <= 492 car. (observé: ' + sTL.length + ')');
+  const oTL = JSON.parse(sTL);
+  assert.strictEqual(oTL.domaine, '03 · Logement & véhicule');
+  assert.strictEqual(oTL.cible, cibleTresLongue);
+  assert.deepStrictEqual(oTL.si.mots, ['facture', 'electricite', 'chauffage', 'gaz']);
+});
+
+test('non-régression M9-2 : CONFIG.DOMAINES_AUTO (07 · Santé, 09 · Voyages), zéro création si absent/corbeillé et protections 04/Anna/Packs', () => {
+  const F_SANTE = 'FICTIF_TEST_SANTE_00001';
+  const F_VOY = 'FICTIF_TEST_VOY_00001';
+  const F_ABS = 'FICTIF_TEST_ABS_00001';
+  let creationAppelee = false;
+
+  const folders = {
+    FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM02', 'FICTIF_DOM07', 'FICTIF_DOM09'] },
+    FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [F_SANTE, F_VOY, F_ABS], folders: [] },
+    FICTIF_DOM07: { id: 'FICTIF_DOM07', name: '07 · Santé', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_PHARMA'] },
+    FICTIF_PHARMA: { id: 'FICTIF_PHARMA', name: 'Pharmacie', parents: ['FICTIF_DOM07'], files: [], folders: [] },
+    FICTIF_DOM09: { id: 'FICTIF_DOM09', name: '09 · Voyages', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_VOLS', 'FICTIF_ASSUR_S'] },
+    FICTIF_VOLS: { id: 'FICTIF_VOLS', name: 'Vols', parents: ['FICTIF_DOM09'], files: [], folders: [] },
+    FICTIF_ASSUR_S: { id: 'FICTIF_ASSUR_S', name: 'Assurance santé', parents: ['FICTIF_DOM09'], files: [], folders: [] },
+  };
+  const w = ctxQR({
+    props: {
+      'DriveAI_DOM_07 · Santé': 'FICTIF_DOM07',
+      'DriveAI_DOM_09 · Voyages': 'FICTIF_DOM09',
+    },
+    folders,
+    files: {
+      [F_SANTE]: { id: F_SANTE, name: '2026-11-01_Recu_Pharmacie_Exemple.pdf', parents: ['FICTIF_DOM02'], trashed: false },
+      [F_VOY]: { id: F_VOY, name: '2026-11-02_Billet_Vols_Exemple.pdf', parents: ['FICTIF_DOM02'], trashed: false },
+      [F_ABS]: { id: F_ABS, name: '2026-11-03_Assurance_Sante_Voyage.pdf', parents: ['FICTIF_DOM02'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|' + F_SANTE, '2026-11-01', '2026-11-01_Recu_Pharmacie_Exemple.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', F_SANTE],
+        ['drive|' + F_VOY, '2026-11-02', '2026-11-02_Billet_Vols_Exemple.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', F_VOY],
+        ['drive|' + F_ABS, '2026-11-03', '2026-11-03_Assurance_Sante_Voyage.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', F_ABS],
+      ],
+    },
+  });
+  w.c.DriveApp.createFolder = () => { creationAppelee = true; throw new Error('createFolder interdit'); };
+  w.c.dossierDomaineAuto_ = () => { creationAppelee = true; throw new Error('dossierDomaineAuto_ interdit'); };
+
+  // Parsing : 07 · Santé/Pharmacie, 09 · Voyages/Vols, et 09 · Voyages/Assurance santé (pas capturé par 07 · Santé !)
+  const pSante = plain(w.c.parserPhraseRegle_('Si recu pharmacie alors classer dans 07 · Santé/Pharmacie', null, []));
+  assert.ok(pSante);
+  assert.strictEqual(pSante.domaine, '07 · Santé');
+  assert.strictEqual(pSante.cible, '07 · Santé/Pharmacie');
+
+  const pVols = plain(w.c.parserPhraseRegle_('Si billet vol alors classer dans 09 · Voyages/Vols', null, []));
+  assert.ok(pVols);
+  assert.strictEqual(pVols.domaine, '09 · Voyages');
+  assert.strictEqual(pVols.cible, '09 · Voyages/Vols');
+
+  const pAssurFull = plain(w.c.parserPhraseRegle_('Si assurance voyage alors classer dans 09 · Voyages/Assurance santé', null, []));
+  assert.ok(pAssurFull);
+  assert.strictEqual(pAssurFull.domaine, '09 · Voyages');
+  assert.strictEqual(pAssurFull.cible, '09 · Voyages/Assurance santé');
+
+  const pAssurCourt = plain(w.c.parserPhraseRegle_('Si assurance voyage alors classer dans Voyages/Assurance santé', null, []));
+  assert.ok(pAssurCourt);
+  assert.strictEqual(pAssurCourt.domaine, '09 · Voyages');
+  assert.strictEqual(pAssurCourt.cible, '09 · Voyages/Assurance santé');
+
+  // Exécution Drive réelle avec PropertiesService (DriveAI_DOM_*)
+  const rS = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si recu pharmacie alors classer dans 07 · Santé/Pharmacie' }));
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rS.regleId }).auto, true);
+  const rV = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si billet vols alors classer dans 09 · Voyages/Vols' }));
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rV.regleId }).auto, true);
+
+  const resOk = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(resOk.traitees, 2);
+  assert.strictEqual(w.moves.find((m) => m.fid === F_SANTE).dst, 'FICTIF_PHARMA');
+  assert.strictEqual(w.moves.find((m) => m.fid === F_VOY).dst, 'FICTIF_VOLS');
+  assert.strictEqual(creationAppelee, false);
+
+  // Cas Property absente ou dossier racine corbeillé : zéro déplacement, zéro création de dossier
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: rS.regleId });
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: rV.regleId });
+  delete w.props['DriveAI_DOM_07 · Santé'];
+  const rAbs = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si assurance voyage alors classer dans 07 · Santé/Pharmacie' }));
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rAbs.regleId }).auto, true);
+  const resAbs = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(resAbs.traitees, 0);
+  assert.strictEqual(creationAppelee, false);
+  w.c.executerRegleCopilote_({ mode: 'supprimer-auto', regleId: rAbs.regleId });
+
+  // Cas dossier racine DOMAINES_AUTO corbeillé (chemCib === dom et sous-dossier)
+  folders.FICTIF_DOM09.trashed = true;
+  const rCorb = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si assurance voyage alors classer dans 09 · Voyages' }));
+  assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: rCorb.regleId }).auto, true);
+  const resCorb = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(resCorb.traitees, 0);
+  assert.strictEqual(creationAppelee, false);
+
+  // Cas positif chemCib === dom (racine DOMAINES_AUTO vivante)
+  folders.FICTIF_DOM09.trashed = false;
+  const resRac = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(resRac.traitees, 1);
+  assert.strictEqual(w.moves.find((m) => m.fid === F_ABS).dst, 'FICTIF_DOM09');
+
+  // Vérifications négatives continues sur 04 · Immigration, Anna, 00 · Packs, _Technique (y compris sous-chemins DOMAINES_AUTO)
+  for (const interdit of [
+    'Si passeport alors déplacer dans 04 · Immigration',
+    'Si recu alors ranger dans Anna',
+    'Si recu alors ranger dans 07 · Santé/Anna',
+    'Si visa alors classer dans 09 · Voyages/04 · Immigration',
+    'Si document alors classer dans 00 · Packs',
+    'Si log alors déplacer dans _Technique',
+  ]) {
+    assert.strictEqual(w.c.parserPhraseRegle_(interdit, null, []), null, 'rejet parsing: ' + interdit);
+    assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'creer', phrase: interdit }).ok, false, 'rejet création: ' + interdit);
+  }
+});

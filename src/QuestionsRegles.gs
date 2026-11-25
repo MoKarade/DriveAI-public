@@ -87,13 +87,25 @@ function parserPhraseRegle_(phrase, domainesConnus, libellesConnus) {
   var mSep = /\b(?:alors)\b|=>|->|,/i.exec(p), partSi = mSep ? p.slice(0, mSep.index) : p, partAlors = mSep ? p.slice(mSep.index + mSep[0].length) : p;
   var mExp = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.exec(partSi), siMots = tokeniserQR_(normaliserQR_(partSi).replace(/^si\s+|^quand\s+/, ''), 3).slice(0, 6);
   if (!siMots.length && !mExp) return null;
-  var doms = Array.isArray(domainesConnus) ? domainesConnus : (typeof CONFIG !== 'undefined' && CONFIG.DOMAINES ? Object.keys(CONFIG.DOMAINES) : []);
-  var libs = Array.isArray(libellesConnus) ? libellesConnus : [], nAl = normaliserQR_(partAlors), domaine = '', libelle = '', cible = '';
-  for (var i = 0; i < doms.length; i++) { var dn = normaliserQR_(doms[i]), ct = dn.replace(/^\d+\s*·\s*/, ''); if ((dn && nAl.indexOf(dn) !== -1) || (ct.length >= 4 && nAl.indexOf(ct) !== -1)) { domaine = doms[i]; break; } }
+  var doms = Array.isArray(domainesConnus) ? domainesConnus
+    : (typeof domainesAutorises_ === 'function' ? domainesAutorises_()
+      : ((typeof CONFIG !== 'undefined' && CONFIG.DOMAINES ? Object.keys(CONFIG.DOMAINES) : [])
+        .concat((typeof CONFIG !== 'undefined' && Array.isArray(CONFIG.DOMAINES_AUTO)) ? CONFIG.DOMAINES_AUTO : [])));
+  var libs = Array.isArray(libellesConnus) ? libellesConnus : [], nAl = normaliserQR_(partAlors), domaine = '', libelle = '', cible = '', bestIdx = -1;
+  for (var i = 0; i < doms.length; i++) {
+    var dn = normaliserQR_(doms[i]), idx = dn ? nAl.indexOf(dn) : -1;
+    if (idx !== -1 && (bestIdx === -1 || idx < bestIdx)) { bestIdx = idx; domaine = doms[i]; }
+  }
+  if (!domaine) {
+    for (var i2 = 0; i2 < doms.length; i2++) {
+      var ct = normaliserQR_(doms[i2]).replace(/^\d+\s*·\s*/, ''), idx2 = ct.length >= 4 ? nAl.indexOf(ct) : -1;
+      if (idx2 !== -1 && (bestIdx === -1 || idx2 < bestIdx)) { bestIdx = idx2; domaine = doms[i2]; }
+    }
+  }
   for (var j = 0; j < libs.length; j++) if (nAl.indexOf(normaliserQR_(libs[j])) !== -1) { libelle = libs[j]; break; }
-  var mCib = /(?:dans|vers|dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)\s+([A-Za-z0-9À-ÿ _/·.-]{2,50})/i.exec(partAlors);
+  var mCib = /(?:dans|vers|dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)\s+([A-Za-z0-9À-ÿ &_/·.-]{2,220})/i.exec(partAlors);
   if (mCib) {
-    var seg = mCib[1].trim().replace(/\s+(?:et|en|puis)\b.*$/i, '').trim();
+    var seg = mCib[1].trim().replace(/\s+(?:(?:et|puis)\s+(?:l['’]|la\s+|le\s+)?(?:marquer|archiver|libeller|etiqueter|étiqueter|classer|ranger|deplacer|déplacer|mettre|passer|ajouter|en\s+)|en\s+(?:important|prioritaire|archive))\b.*$/i, '').replace(/[.,;:!?]+$/, '').trim();
     if (!libelle && /libell|etiqu|categori/i.test(mCib[0])) libelle = seg;
     if (seg && !domaine && !libelle) cible = seg;
     else if (seg && domaine && seg.indexOf('/') !== -1) {
@@ -132,7 +144,29 @@ function lireReglesCopilote_(seulementAuto) {
     return seulementAuto ? (c.statut === 'auto' && a.auto !== false) : (c.statut === 'proposé' || c.statut === 'auto' || c.statut === 'actif');
   });
 }
-function serialiserRegleAction_(obj) { return typeof serialiserActionCopilote_ === 'function' ? serialiserActionCopilote_(obj) : (JSON.stringify(obj || {}).length <= 500 ? JSON.stringify(obj || {}) : '{}'); }
+function serialiserRegleAction_(obj) {
+  var copie = {};
+  if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) {
+    copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : (obj[k] && typeof obj[k] === 'object' ? JSON.parse(JSON.stringify(obj[k])) : obj[k]);
+  });
+  var len = function () { return JSON.stringify(copie).length; };
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.domaine === copie.domaine || !copie.alors.domaine) delete copie.alors.domaine;
+    if (copie.alors.cible === copie.cible || !copie.alors.cible) delete copie.alors.cible;
+  }
+  if (len() > 492 && typeof copie.phrase === 'string') {
+    [120, 40].forEach(function (lim) { if (len() > 492 && typeof copie.phrase === 'string') copie.phrase = copie.phrase.slice(0, lim); });
+    if (len() > 492) delete copie.phrase;
+  }
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.libelle === '') delete copie.alors.libelle;
+    if (copie.alors.important === false) delete copie.alors.important;
+    if (copie.alors.archiver === false) delete copie.alors.archiver;
+  }
+  var out = typeof serialiserActionCopilote_ === 'function' ? serialiserActionCopilote_(copie) : JSON.stringify(copie);
+  if (out === '{}' && len() <= 500) out = JSON.stringify(copie);
+  return out.length <= 500 ? out : '{}';
+}
 /** #19 — Crée, bascule auto/proposé ou désactive une règle en 1 phrase dans `Copilote`. */
 function executerRegleCopilote_(payload) {
   var p = payload || {}, mode = String(p.mode || '').trim();
@@ -191,6 +225,17 @@ function appliquerReglesGmail_(reglesAuto, ctxFil) {
   }
   return null;
 }
+function idDomaineRegleQR_(dom) {
+  if (!dom || typeof CONFIG === 'undefined') return '';
+  if (CONFIG.DOMAINES && CONFIG.DOMAINES[dom]) return CONFIG.DOMAINES[dom];
+  if (Array.isArray(CONFIG.DOMAINES_AUTO) && CONFIG.DOMAINES_AUTO.indexOf(dom) !== -1) {
+    try {
+      var props = typeof PropertiesService !== 'undefined' && PropertiesService.getScriptProperties ? PropertiesService.getScriptProperties() : null;
+      return (props && props.getProperty('DriveAI_DOM_' + dom)) || '';
+    } catch (e) { return ''; }
+  }
+  return '';
+}
 /** #19 — Applique en priorité les règles Drive (`auto` → déplacement réversible, `proposé` → carte `cascade`). */
 function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
   var regles = lireReglesCopilote_(false), traitees = 0, creees = 0, proteges = typeof ensembleDomainesProteges_ === 'function' ? ensembleDomainesProteges_() : {}, parId = {}, ordre = [];
@@ -199,8 +244,14 @@ function appliquerReglesDriveCopilote_(lignesIndex, depasse, maxRestant) {
     var r = regles[i], a = typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(r.actionJson) : {};
     if (!a.si || !a.alors || a.alors.canal === 'gmail' || regleEstInterditeQR_(r, a)) continue;
     var mots = Array.isArray(a.si.mots) ? a.si.mots : [], dom = String(a.domaine || r.domaine || '').trim(), chemCib = String(a.cible || r.chemin || dom).trim();
-    if (!mots.length || !dom || typeof CONFIG === 'undefined' || !CONFIG.DOMAINES || !CONFIG.DOMAINES[dom]) continue;
-    var cibId = CONFIG.DOMAINES[dom];
+    if (!mots.length || !dom) continue;
+    var cibId = idDomaineRegleQR_(dom);
+    if (!cibId || proteges[cibId]) continue;
+    try {
+      var domDir = DriveApp.getFolderById(cibId);
+      if (!domDir || domDir.isTrashed() || (typeof estProtegeDriveCopilote_ === 'function' && estProtegeDriveCopilote_(domDir, proteges))) cibId = '';
+    } catch (eD) { cibId = ''; }
+    if (!cibId || proteges[cibId]) continue;
     if (chemCib.indexOf('/') !== -1 || normaliserQR_(chemCib) !== normaliserQR_(dom)) {
       var segs = chemCib.split('/').map(function (s) { return s.trim(); }).filter(Boolean);
       var domN = normaliserQR_(dom), domCourtN = normaliserQR_(dom.replace(/^\d+\s*·\s*/, ''));
