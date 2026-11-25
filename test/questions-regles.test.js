@@ -740,3 +740,156 @@ test('non-régression M9-2 : CONFIG.DOMAINES_AUTO (07 · Santé, 09 · Voyages),
     assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'creer', phrase: interdit }).ok, false, 'rejet création: ' + interdit);
   }
 });
+
+test("non-régression M9-2 (r2) : élisions l'archiver/l'étiqueter, apostrophes/ligatures, préfixes dossier et amorce mCib[1]", () => {
+  const doms = {
+    '01 · Administratif & identité': 'FICTIF_DOM01',
+    '02 · Finances': 'FICTIF_DOM02',
+    '08 · Perso & projets': 'FICTIF_DOM08',
+  };
+  const F_HYD = 'FICTIF_TEST_R2_00001';
+  const F_CARTE = 'FICTIF_TEST_R2_00002';
+  const F_COEUR = 'FICTIF_TEST_R2_00003';
+  const F_CAT = 'FICTIF_TEST_R2_00004';
+  const w = ctxQR({
+    domaines: doms,
+    folders: {
+      FICTIF_ROOT: { id: 'FICTIF_ROOT', name: 'DriveAI', parents: [], files: [], folders: ['FICTIF_DOM01', 'FICTIF_DOM02', 'FICTIF_DOM08'] },
+      FICTIF_DOM01: { id: 'FICTIF_DOM01', name: '01 · Administratif & identité', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_CARTE'] },
+      FICTIF_CARTE: { id: 'FICTIF_CARTE', name: "Carte d'identité", parents: ['FICTIF_DOM01'], files: [], folders: [] },
+      FICTIF_DOM02: { id: 'FICTIF_DOM02', name: '02 · Finances', parents: ['FICTIF_ROOT'], files: [], folders: ['FICTIF_HYD', 'FICTIF_CAT_EN'] },
+      FICTIF_HYD: { id: 'FICTIF_HYD', name: 'Hydro-Exemple', parents: ['FICTIF_DOM02'], files: [], folders: [] },
+      FICTIF_CAT_EN: { id: 'FICTIF_CAT_EN', name: 'Categorie Energie', parents: ['FICTIF_DOM02'], files: [], folders: [] },
+      FICTIF_DOM08: { id: 'FICTIF_DOM08', name: '08 · Perso & projets', parents: ['FICTIF_ROOT'], files: [F_HYD, F_CARTE, F_COEUR, F_CAT], folders: ['FICTIF_COEUR'] },
+      FICTIF_COEUR: { id: 'FICTIF_COEUR', name: 'Cœur & Santé', parents: ['FICTIF_DOM08'], files: [], folders: [] },
+    },
+    files: {
+      [F_HYD]: { id: F_HYD, name: '2026-11-01_Facture_Hydro-Exemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+      [F_CARTE]: { id: F_CARTE, name: '2026-11-02_Carte_Identite_Exemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+      [F_COEUR]: { id: F_COEUR, name: '2026-11-03_Bilan_Coeur_Exemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+      [F_CAT]: { id: F_CAT, name: '2026-11-04_Compteur_Energie_Exemple.pdf', parents: ['FICTIF_DOM08'], trashed: false },
+    },
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId', 'Taille', 'Exemplaire'],
+        ['drive|' + F_HYD, '2026-11-01', '2026-11-01_Facture_Hydro-Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_HYD],
+        ['drive|' + F_CARTE, '2026-11-02', '2026-11-02_Carte_Identite_Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_CARTE],
+        ['drive|' + F_COEUR, '2026-11-03', '2026-11-03_Bilan_Coeur_Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_COEUR],
+        ['drive|' + F_CAT, '2026-11-04', '2026-11-04_Compteur_Energie_Exemple.pdf', '08 · Perso & projets', '08 · Perso & projets', 'classé', '', '', F_CAT],
+      ],
+    },
+  });
+
+  // 1. Clauses élidées l'archiver / l'étiqueter
+  const pArch = plain(w.c.parserPhraseRegle_("Si facture hydro alors classer dans 02 · Finances/Hydro-Exemple et l'archiver", null, ['Finances']));
+  assert.ok(pArch);
+  assert.strictEqual(pArch.cible, '02 · Finances/Hydro-Exemple');
+  assert.strictEqual(pArch.alors.archiver, true);
+
+  const pEtiq = plain(w.c.parserPhraseRegle_("Si facture hydro alors classer dans 02 · Finances/Hydro-Exemple et l'étiqueter Finances", null, ['Finances']));
+  assert.ok(pEtiq);
+  assert.strictEqual(pEtiq.cible, '02 · Finances/Hydro-Exemple');
+  assert.strictEqual(pEtiq.alors.libelle, 'Finances');
+
+  // 2. Apostrophes & ligatures françaises + préfixes "dans le dossier ..." / "dans dossier ..."
+  const pCarte = plain(w.c.parserPhraseRegle_("Si carte identite alors classer dans 01 · Administratif & identité/Carte d'identité", null, []));
+  assert.strictEqual(pCarte.cible, "01 · Administratif & identité/Carte d'identité");
+
+  const pCoeur = plain(w.c.parserPhraseRegle_('Si bilan coeur alors classer dans 08 · Perso & projets/Cœur & Santé', null, []));
+  assert.strictEqual(pCoeur.cible, '08 · Perso & projets/Cœur & Santé');
+
+  const pPrefLe = plain(w.c.parserPhraseRegle_('Si facture hydro alors mettre dans le dossier 02 · Finances/Hydro-Exemple', null, []));
+  assert.strictEqual(pPrefLe.cible, '02 · Finances/Hydro-Exemple');
+
+  const pPrefNu = plain(w.c.parserPhraseRegle_('Si facture hydro alors ranger dans dossier 02 · Finances/Hydro-Exemple', null, []));
+  assert.strictEqual(pPrefNu.cible, '02 · Finances/Hydro-Exemple');
+
+  // 3. Cas combinés sans polluer alors.libelle (mCib[1] uniquement)
+  const pCat = plain(w.c.parserPhraseRegle_('Si compteur energie alors classer dans 02 · Finances/Categorie Energie', null, []));
+  assert.strictEqual(pCat.cible, '02 · Finances/Categorie Energie');
+  assert.strictEqual(pCat.alors.libelle, 'Finances');
+
+  const pLibInconnu = plain(w.c.parserPhraseRegle_('Si facture hydro alors ranger dans 02 · Finances/Banque & Crédit/Relevés et libeller NouveauLibelle', null, []));
+  assert.strictEqual(pLibInconnu.cible, '02 · Finances/Banque & Crédit/Relevés');
+  assert.strictEqual(pLibInconnu.alors.libelle, 'Finances');
+
+  // 4. Exécution réelle auto sur l'archiver, Carte d'identité, Cœur & Santé et Categorie Energie
+  for (const ph of [
+    "Si facture hydro alors classer dans 02 · Finances/Hydro-Exemple et l'archiver",
+    "Si carte identite alors classer dans 01 · Administratif & identité/Carte d'identité",
+    'Si bilan coeur alors classer dans 08 · Perso & projets/Cœur & Santé',
+    'Si compteur energie alors classer dans 02 · Finances/Categorie Energie',
+  ]) {
+    const cr = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: ph }));
+    assert.strictEqual(cr.ok, true, ph);
+    assert.strictEqual(w.c.executerRegleCopilote_({ mode: 'basculer-auto', regleId: cr.regleId }).auto, true, ph);
+  }
+  const res = plain(w.c.appliquerReglesDriveCopilote_(w.sheets.Index.slice(1), () => false, 10));
+  assert.strictEqual(res.traitees, 4);
+  assert.strictEqual(w.moves.find((m) => m.fid === F_HYD).dst, 'FICTIF_HYD');
+  assert.strictEqual(w.moves.find((m) => m.fid === F_CARTE).dst, 'FICTIF_CARTE');
+  assert.strictEqual(w.moves.find((m) => m.fid === F_COEUR).dst, 'FICTIF_COEUR');
+  assert.strictEqual(w.moves.find((m) => m.fid === F_CAT).dst, 'FICTIF_CAT_EN');
+});
+
+test("non-régression M9-2 (r2) : cas extrême 236 car. compacté <= 492 sans repli '{}' et garde négative sur executerRegleCopilote_", () => {
+  const w = ctxQR({
+    domaines: {
+      '03 · Logement & véhicule': 'FICTIF_DOM03',
+      '04 · Immigration': 'FICTIF_DOM04',
+    },
+  });
+  const cible175 = '03 · Logement & véhicule/' + 'Abcdefghij'.repeat(15);
+  const phrase236 = 'Si hydro factures@exemple-long.test, dans ' + cible175 + ' important archiver';
+  assert.strictEqual(cible175.length, 175);
+  assert.strictEqual(phrase236.length, 236);
+
+  const parsed = plain(w.c.parserPhraseRegle_(phrase236, null, ['Logement']));
+  assert.ok(parsed);
+  assert.strictEqual(parsed.domaine, '03 · Logement & véhicule');
+  assert.strictEqual(parsed.cible, cible175);
+  assert.strictEqual(parsed.si.exp, 'factures@exemple-long.test');
+  assert.strictEqual(parsed.alors.important, true);
+  assert.strictEqual(parsed.alors.archiver, true);
+
+  const ser = w.c.serialiserRegleAction_(parsed);
+  assert.notStrictEqual(ser, '{}');
+  assert.ok(ser.length <= 492, 'ActionJson <= 492 car. (observé: ' + ser.length + ')');
+  const oSer = JSON.parse(ser);
+  assert.ok(String(oSer.cle || '').startsWith('regle|'));
+  assert.strictEqual(oSer.domaine, '03 · Logement & véhicule');
+  assert.strictEqual(oSer.cible, cible175);
+  assert.strictEqual(oSer.si.exp, 'factures@exemple-long.test');
+  assert.deepStrictEqual(oSer.si.mots, ['hydro', 'factures', 'exemple', 'long', 'test']);
+  assert.strictEqual(oSer.alors.important, true);
+  assert.strictEqual(oSer.alors.archiver, true);
+
+  // Persistance via executerRegleCopilote_ + déduplication au 2e appel + 3 validations
+  const cr = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: phrase236 }));
+  assert.strictEqual(cr.ok, true);
+  const row = w.sheets.Copilote.find((r) => r[0] === cr.regleId);
+  assert.ok(row && row[7] !== '{}' && row[7].length <= 492);
+  const crDup = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: phrase236 }));
+  assert.strictEqual(crDup.ok, true);
+  assert.strictEqual(crDup.regleId, cr.regleId);
+  assert.strictEqual(w.sheets.Copilote.length, 2);
+
+  for (let i = 0; i < 3; i++) assert.ok(w.c.incrementerValidationRegle_(cr.regleId));
+  const rowAuto = w.sheets.Copilote.find((r) => r[0] === cr.regleId);
+  assert.strictEqual(rowAuto[8], 'auto');
+  assert.ok(rowAuto[7] !== '{}' && rowAuto[7].length <= 500);
+  const oAuto = JSON.parse(rowAuto[7]);
+  assert.strictEqual(oAuto.cible, cible175);
+  assert.strictEqual(oAuto.si.exp, 'factures@exemple-long.test');
+  assert.deepStrictEqual(oAuto.si.mots, ['hydro', 'factures', 'exemple', 'long', 'test']);
+
+  // Garde négative : si serialiserRegleAction_ retournait '{}', executerRegleCopilote_ refuse proprement
+  const nbAvant = w.sheets.Copilote.length;
+  w.c.serialiserRegleAction_ = () => '{}';
+  const ref = plain(w.c.executerRegleCopilote_({ mode: 'creer', phrase: 'Si facture exemple alors classer dans 03 · Logement & véhicule/Autre' }));
+  assert.strictEqual(ref.ok, false);
+  assert.strictEqual(ref.regleId, '');
+  assert.strictEqual(ref.auto, false);
+  assert.ok(ref.erreur);
+  assert.strictEqual(w.sheets.Copilote.length, nbAvant);
+});

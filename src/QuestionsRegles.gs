@@ -103,10 +103,10 @@ function parserPhraseRegle_(phrase, domainesConnus, libellesConnus) {
     }
   }
   for (var j = 0; j < libs.length; j++) if (nAl.indexOf(normaliserQR_(libs[j])) !== -1) { libelle = libs[j]; break; }
-  var mCib = /(?:dans|vers|dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)\s+([A-Za-z0-9À-ÿ &_/·.-]{2,220})/i.exec(partAlors);
+  var mCib = /(?:^|[^A-Za-z0-9À-ÿœŒŸ])(dans|vers|dossier|libell[eé]r?|étiqueter|etiqueter|étiquette|etiquette|catégorie|categorie)(?:\s+((?:l['’]|(?:la|le|un|une)\s+)?(?:dossier|libell[eé]|étiquette|etiquette|catégorie|categorie)))?\s+([A-Za-z0-9À-ÿœŒŸ'’ &_/·.-]{2,220})/i.exec(partAlors);
   if (mCib) {
-    var seg = mCib[1].trim().replace(/\s+(?:(?:et|puis)\s+(?:l['’]|la\s+|le\s+)?(?:marquer|archiver|libeller|etiqueter|étiqueter|classer|ranger|deplacer|déplacer|mettre|passer|ajouter|en\s+)|en\s+(?:important|prioritaire|archive))\b.*$/i, '').replace(/[.,;:!?]+$/, '').trim();
-    if (!libelle && /libell|etiqu|categori/i.test(mCib[0])) libelle = seg;
+    var seg = mCib[3].trim().replace(/\s+(?:(?:et|puis)\s+(?:l['’]|la\s+|le\s+|les\s+)?(?:marquer|archiver|libeller|etiqueter|étiqueter|classer|ranger|deplacer|déplacer|mettre|passer|ajouter|en\s+)|en\s+(?:important|prioritaire|archive)|(?:important|prioritaire)\s+(?:et\s+)?archiver|archiver(?:\s+(?:et\s+)?(?:important|prioritaire|marquer.*))?)\b.*$/i, '').replace(/[.,;:!?]+$/, '').trim();
+    if (!libelle && /libell|etiqu|categori/i.test(mCib[1] + ' ' + (mCib[2] || ''))) libelle = seg;
     if (seg && !domaine && !libelle) cible = seg;
     else if (seg && domaine && seg.indexOf('/') !== -1) {
       var segsCib = seg.split('/').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -144,6 +144,15 @@ function lireReglesCopilote_(seulementAuto) {
     return seulementAuto ? (c.statut === 'auto' && a.auto !== false) : (c.statut === 'proposé' || c.statut === 'auto' || c.statut === 'actif');
   });
 }
+function hashRegleCleQR_(s) {
+  var h1 = 2166136261, h2 = 5381, txt = String(s || '');
+  for (var i = 0; i < txt.length; i++) {
+    var c = txt.charCodeAt(i);
+    h1 = ((h1 ^ c) * 16777619) >>> 0;
+    h2 = (((h2 << 5) + h2) ^ c) >>> 0;
+  }
+  return h1.toString(36) + h2.toString(36);
+}
 function serialiserRegleAction_(obj) {
   var copie = {};
   if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) {
@@ -163,6 +172,18 @@ function serialiserRegleAction_(obj) {
     if (copie.alors.important === false) delete copie.alors.important;
     if (copie.alors.archiver === false) delete copie.alors.archiver;
   }
+  if (len() > 492 && typeof copie.cle === 'string' && copie.cle.length > 24) {
+    copie.cle = 'regle|' + hashRegleCleQR_(copie.cle + '|' + (copie.cible || ''));
+  }
+  var cibleMarge = (copie.auto === false && !copie.validations) ? 478 : 492;
+  if (len() > cibleMarge) {
+    if (copie.auto === false) delete copie.auto;
+    if (len() > cibleMarge && copie.validations === 0) delete copie.validations;
+  }
+  if (len() > 492 && copie.alors && typeof copie.alors === 'object') {
+    if (copie.alors.canal === 'les-deux') delete copie.alors.canal;
+    if (len() > 492 && copie.alors.action === 'deplacer' && copie.cible) delete copie.alors.action;
+  }
   var out = typeof serialiserActionCopilote_ === 'function' ? serialiserActionCopilote_(copie) : JSON.stringify(copie);
   if (out === '{}' && len() <= 500) out = JSON.stringify(copie);
   return out.length <= 500 ? out : '{}';
@@ -179,10 +200,16 @@ function executerRegleCopilote_(payload) {
     var libs = []; try { if (typeof libellesUtilisateur_ === 'function') libs = Object.keys(libellesUtilisateur_()); } catch (eL) {}
     var regle = parserPhraseRegle_(phrase, null, libs) || parserRegleViaLlm_(phrase);
     if (!regle) return { ok: false, erreur: 'règle incompréhensible (utilise « Si ... alors ... »)' };
+    var actionJson = serialiserRegleAction_(regle);
+    if (!actionJson || actionJson === '{}') return { ok: false, regleId: '', auto: false, message: '', erreur: 'règle trop longue pour être enregistrée' };
+    var cleStockee = (typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(actionJson) : {}).cle || regle.cle;
     var exist = lireReglesCopilote_(false);
-    for (var i = 0; i < exist.length; i++) if ((typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(exist[i].actionJson) : {}).cle === regle.cle) return { ok: true, regleId: exist[i].id, auto: exist[i].statut === 'auto', message: 'Règle déjà enregistrée.' };
+    for (var i = 0; i < exist.length; i++) {
+      var cleEx = (typeof parserActionCopilote_ === 'function' ? parserActionCopilote_(exist[i].actionJson) : {}).cle;
+      if (cleEx && (cleEx === regle.cle || cleEx === cleStockee)) return { ok: true, regleId: exist[i].id, auto: exist[i].statut === 'auto', message: 'Règle déjà enregistrée.' };
+    }
     var id = 'cop-' + Date.now().toString(36) + '-' + (Math.random().toString(36) + '0000').slice(2, 6);
-    fSheet.appendRow([id, new Date(), 'regle', 'regle-auto', regle.domaine || '', regle.cible || '', phrase.slice(0, 140), serialiserRegleAction_(regle), 'proposé', 0]);
+    fSheet.appendRow([id, new Date(), 'regle', 'regle-auto', regle.domaine || '', regle.cible || '', phrase.slice(0, 140), actionJson, 'proposé', 0]);
     return { ok: true, regleId: id, auto: false, message: 'Règle créée en mode proposé (annulable).' };
   }
   var regleId = String(p.regleId || '').trim(), cartes = typeof lireCartesCopilote_ === 'function' ? lireCartesCopilote_() : [], carte = null;
@@ -193,10 +220,12 @@ function executerRegleCopilote_(payload) {
     if (carte.statut === 'ignoré') return { ok: false, erreur: 'règle désactivée' };
     if (regleEstInterditeQR_(carte, act)) return { ok: false, erreur: 'zone protégée — mode auto interdit' };
     var nAuto = carte.statut !== 'auto'; act.auto = nAuto;
-    fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(nAuto ? 'auto' : 'proposé');
+    var actMaj = serialiserRegleAction_(act);
+    if (!actMaj || actMaj === '{}') return { ok: false, regleId: regleId, auto: carte.statut === 'auto', message: '', erreur: 'règle trop longue pour être mise à jour' };
+    fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(actMaj); fSheet.getRange(carte.row, 9).setValue(nAuto ? 'auto' : 'proposé');
     return { ok: true, regleId: regleId, auto: nAuto, message: nAuto ? 'Mode automatique activé.' : 'Mode automatique désactivé.' };
   }
-  if (mode === 'supprimer-auto') { act.auto = false; fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue('ignoré'); return { ok: true, regleId: regleId, auto: false, message: 'Règle désactivée.' }; }
+  if (mode === 'supprimer-auto') { act.auto = false; var actSup = serialiserRegleAction_(act); fSheet.getRange(carte.row, 2).setValue(new Date()); fSheet.getRange(carte.row, 8).setValue((actSup && actSup !== '{}') ? actSup : carte.actionJson); fSheet.getRange(carte.row, 9).setValue('ignoré'); return { ok: true, regleId: regleId, auto: false, message: 'Règle désactivée.' }; }
   return { ok: false, erreur: 'mode invalide' };
 }
 /** Incrémente les validations d'une règle et passe automatiquement en `auto` à >= 3 validations. */
@@ -208,7 +237,9 @@ function incrementerValidationRegle_(regleId) {
   if (regleEstInterditeQR_(carte, act)) return null;
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, nbVal = (Number(carte.validations) || 0) + 1, auto = carte.statut === 'auto' || nbVal >= seuil, fSheet = feuille_('Copilote');
   act.validations = nbVal; if (auto) act.auto = true;
-  fSheet.getRange(carte.row, 8).setValue(serialiserRegleAction_(act)); fSheet.getRange(carte.row, 9).setValue(auto ? 'auto' : 'proposé'); fSheet.getRange(carte.row, 10).setValue(nbVal);
+  var actVal = serialiserRegleAction_(act);
+  if (!actVal || actVal === '{}') return null;
+  fSheet.getRange(carte.row, 8).setValue(actVal); fSheet.getRange(carte.row, 9).setValue(auto ? 'auto' : 'proposé'); fSheet.getRange(carte.row, 10).setValue(nbVal);
   return { validations: nbVal, auto: auto, statut: auto ? 'auto' : 'proposé' };
 }
 /** PURE (#19) — Évalue les règles Gmail actives (`auto === true`) avant `analyserFil_`. */
