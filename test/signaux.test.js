@@ -70,6 +70,7 @@ function ctxSignaux(opts) {
           getId: () => id,
           getName: () => f.name || id,
           isTrashed: () => !!f.trashed,
+          getSize: () => (typeof f.size === 'number' ? f.size : 1024),
           getMimeType: () => f.mimeType || 'text/plain',
           getBlob: () => ({
             getName: () => f.name || id,
@@ -303,4 +304,75 @@ test('Détecteur gratuit de pièces manquantes (#10) : 0 $ LLM, impôts, paies v
   assert.strictEqual(c.executerDecisionCopilote_({ id: cartePm[0], decision: 'passer-auto' }).ok, false);
   assert.strictEqual(c.executerDecisionCopilote_({ id: cartePm[0], decision: 'ignorer' }).statut, 'ignoré');
   assert.strictEqual(c.detecterPiecesManquantesCopilote_(index, () => false, 10), 0);
+});
+
+test('Non-régression Lot 3A : booléen garantie, JSON coût corrompu fail-closed, boucle null, doublon Index, taille OCR, paie & relevé invalide', () => {
+  // 1. Booléen rejeté dans calculerFinGarantie_
+  const { c: c0 } = ctxSignaux();
+  assert.strictEqual(c0.calculerFinGarantie_('2026-01-15', true), '');
+  assert.strictEqual(c0.calculerFinGarantie_('2026-01-15', false), '');
+
+  // 2. JSON DriveAI_COUT_AAAA-MM corrompu → fail-closed (true), ainsi que LLM_BUDGET_CIBLE = 0
+  const { c: cBudget, props: propsB } = ctxSignaux();
+  const cleCout = cBudget.cleCoutMois_();
+  propsB[cleCout] = '{JSON_CORROMPU!!!';
+  assert.strictEqual(cBudget.budgetSignauxDepasse_(0), true, 'JSON coût corrompu doit bloquer en fail-closed');
+  propsB[cleCout] = 'null';
+  assert.strictEqual(cBudget.budgetSignauxDepasse_(0), true, 'JSON null doit bloquer en fail-closed');
+  delete propsB[cleCout];
+  const cibleOrig = cBudget.CONFIG.LLM_BUDGET_CIBLE;
+  try {
+    cBudget.CONFIG.LLM_BUDGET_CIBLE = 0;
+    assert.strictEqual(cBudget.budgetSignauxDepasse_(0), true, 'budget cible 0 $ coupe dès 0 $');
+  } finally {
+    cBudget.CONFIG.LLM_BUDGET_CIBLE = cibleOrig;
+  }
+
+  // 3. Rattrapage : réponse 'null' → 'aucun' sans boucle, doublon récent bloque ancienne ligne classée, fichier > OCR_TAILLE_MAX ignoré
+  const fidNull = 'FICTIF_RAT_NULL_0001';
+  const fidDoub = 'FICTIF_RAT_DOUB_0001';
+  const fidGros = 'FICTIF_RAT_GROS_0001';
+  const { c: cRat, props: propsR } = ctxSignaux({
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId'],
+        ['drive|' + fidDoub, new Date(), '2026-05-01_Doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fidDoub],
+        ['drive|' + fidDoub, new Date(), '2026-05-01_Doc.pdf', '02 · Finances', '02 · Finances', 'doublon', '', '', fidDoub],
+        ['drive|' + fidGros, new Date(), '2026-05-02_Archive.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fidGros],
+        ['drive|' + fidNull, new Date(), '2026-05-03_Note.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fidNull],
+      ],
+    },
+    files: {
+      [fidDoub]: { name: '2026-05-01_Doc.pdf', mimeType: 'text/plain', texte: 'Doublon' },
+      [fidGros]: { name: '2026-05-02_Archive.pdf', mimeType: 'text/plain', texte: 'Gros', size: 25 * 1024 * 1024 },
+      [fidNull]: { name: '2026-05-03_Note.pdf', mimeType: 'text/plain', texte: 'Note sans signal' },
+    },
+  });
+  cRat.syntheseCoutMois_ = () => ({ appels: 1, dollars: 1.0 });
+  const appeles = [];
+  cRat.appelAnthropicTexte_ = (m, sys, contenu) => { appeles.push(contenu); return 'null'; };
+  const auj = new Date().toISOString().slice(0, 10).replace(/-/g, '/');
+  assert.strictEqual(cRat.rattraperSignauxCopilote_(cRat.feuille_('Index').getRange(2, 1, 4, 9).getValues(), () => false), 1);
+  assert.strictEqual(appeles.length, 1, 'seul fidNull appelle le LLM (fidDoub et fidGros exclus)');
+  assert.ok(appeles[0].includes('2026-05-03_Note.pdf'));
+  assert.strictEqual(propsR.DriveAI_SIGNAUX_JOUR, auj + '|1');
+  const sigsRat = cRat.lireSignaux_();
+  assert.ok(sigsRat.some((s) => s.fileId === fidNull && s.categorie === 'aucun'));
+  assert.ok(sigsRat.some((s) => s.fileId === fidGros && s.categorie === 'aucun'));
+  assert.strictEqual(cRat.rattraperSignauxCopilote_(cRat.feuille_('Index').getRange(2, 1, 4, 9).getValues(), () => false), 0, 'aucune boucle au 2e run');
+  assert.strictEqual(appeles.length, 1);
+
+  // 4. Attestation de salaire ne crée pas de faux positif paie ; date relevé invalide / mois 13 ne masque pas un retard
+  const idxPieces = [
+    ['drive|FICTIF_ATT_SAL_00001', new Date(), '2026-07-15_Attestation de salaire_Alphatek.pdf', '05 · Carrière', '05 · Carrière', 'classé', '', '', 'FICTIF_ATT_SAL_00001'],
+    ['drive|FICTIF_BUL_PAI_00001', new Date(), '2026-09-15_Bulletin de paie_Alphatek.pdf', '02 · Finances', '02 · Finances/Paie', 'classé', '', '', 'FICTIF_BUL_PAI_00001'],
+    ['drive|FICTIF_REL_OK_000001', new Date(), '2025-11_Relevé_Bellerives.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_REL_OK_000001'],
+    ['drive|FICTIF_REL_OK_000002', new Date(), '2025-12_Relevé_Bellerives.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_REL_OK_000002'],
+    ['drive|FICTIF_REL_INV_00001', new Date(), '2026-02-30_Relevé_Bellerives.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_REL_INV_00001'],
+    ['drive|FICTIF_REL_M13_00001', new Date(), '2025-13_Relevé_Bellerives.pdf', '02 · Finances', '02 · Finances/Banque', 'classé', '', '', 'FICTIF_REL_M13_00001'],
+  ];
+  const pmFev = plain(c0.detecterPiecesManquantesPure_(idxPieces, [], new Date('2026-02-15T12:00:00Z'), 40));
+  assert.deepStrictEqual(pmFev.map((x) => x.cle), ['releve-bellerives'], 'mois 13 et 2026-02-30 ignorés, Attestation de salaire exclue des paies');
+  const pmMars = plain(c0.detecterPiecesManquantesPure_(idxPieces, [], new Date('2026-03-15T12:00:00Z'), 40));
+  assert.deepStrictEqual(pmMars.map((x) => x.cle), ['releve-bellerives'], '2026-02-30 ne retombe pas en 2026-02-28');
 });

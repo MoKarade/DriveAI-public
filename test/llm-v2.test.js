@@ -302,4 +302,16 @@ test('Lot 3A : 4 champs signaux optionnels dans PROMPT_PASSE1/2, normaliserChamp
   assert.strictEqual(modeleAppele, c.CONFIG.LLM_MODELE);
   assert.strictEqual(ext.fournisseur, 'NordTech');
   assert.strictEqual(ext.montant, 89.99);
+
+  // Rattrapage : PROMPT_SIGNAL_RATTRAPAGE demande {}, et 'null' / '{}' → {} (pas de boucle LLM), erreur JSON → null
+  assert.ok(ctx.PROMPT_SIGNAL_RATTRAPAGE.includes('Sinon {}.'));
+  assert.ok(!ctx.PROMPT_SIGNAL_RATTRAPAGE.includes('Sinon null.'));
+  for (const brutVide of ['null', '  null  ', '{}']) {
+    c.appelAnthropicTexte_ = () => brutVide;
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(c.extraireSignalLlm_({ nomFichier: 'a.pdf', chemin: '02 · Finances' }))), {}, 'réponse ' + brutVide);
+  }
+  for (const brutInvalide of ['', null, '{invalide', 'Erreur API', '[]']) {
+    c.appelAnthropicTexte_ = () => brutInvalide;
+    assert.strictEqual(c.extraireSignalLlm_({ nomFichier: 'a.pdf', chemin: '02 · Finances' }), null, 'invalide ' + brutInvalide);
+  }
 });

@@ -21,7 +21,7 @@ function validerDateIsoSignal_(val) {
 
 /** Calcule la fin de garantie `AAAA-MM-JJ` à partir de `dateDoc` + `garantieMois`. PURE. */
 function calculerFinGarantie_(dateDoc, garantieMois) {
-  var base = validerDateIsoSignal_(dateDoc), mois = Number(garantieMois);
+  var base = validerDateIsoSignal_(dateDoc), mois = typeof garantieMois === 'boolean' ? NaN : Number(garantieMois);
   if (!base || !isFinite(mois) || Math.floor(mois) !== mois || mois <= 0 || mois > 240) return '';
   var a = Number(base.slice(0, 4)), m0 = Number(base.slice(5, 7)) - 1 + mois, j = Number(base.slice(8, 10));
   var anC = a + Math.floor(m0 / 12), mC = ((m0 % 12) + 12) % 12, maxJ = new Date(Date.UTC(anC, mC + 1, 0)).getUTCDate();
@@ -95,11 +95,16 @@ function enregistrerSignalDepuisPipeline_(src, classif, decision) {
 function budgetSignauxDepasse_(coutRun) {
   try {
     if (typeof syntheseCoutMois_ !== 'function') return true;
+    if (typeof cleCoutMois_ === 'function' && typeof PropertiesService !== 'undefined') {
+      var brut = PropertiesService.getScriptProperties().getProperty(cleCoutMois_()), pCout = brut ? JSON.parse(brut) : null;
+      if (brut && (!pCout || typeof pCout !== 'object' || Array.isArray(pCout))) return true;
+    }
     var s = syntheseCoutMois_(), base = s && typeof s.dollars === 'number' && isFinite(s.dollars) ? s.dollars : NaN;
     if (!isFinite(base)) return true;
     var run = typeof coutRun === 'number' && isFinite(coutRun) ? coutRun
       : ((typeof coutDollars_ === 'function' && typeof usageRunSnapshot_ === 'function') ? (coutDollars_(usageRunSnapshot_()) || 0) : 0);
-    return (base + run) >= ((typeof CONFIG !== 'undefined' && CONFIG.LLM_BUDGET_CIBLE) || 25);
+    var cible = (typeof CONFIG !== 'undefined' && CONFIG.LLM_BUDGET_CIBLE != null) ? CONFIG.LLM_BUDGET_CIBLE : 25;
+    return (typeof cible !== 'number' || !isFinite(cible)) || (base + run) >= cible;
   } catch (e) { return true; }
 }
 
@@ -143,11 +148,14 @@ function rattraperSignauxCopilote_(indexLignes, depasse) {
     if ((depasse && depasse()) || budgetSignauxDepasse_() || (typeof estPannePlateforme_ === 'function' && estPannePlateforme_())) break;
     var l = lignes[i], fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(l) : String(l[8] || '').trim();
     var nom = String(l[2] || ''), dom = String(l[3] || ''), chem = String(l[4] || ''), stat = String(l[5] || '');
-    if (!fid || vus[fid] || !statOk[stat] || estZoneSystemeSignaux_(chem, dom)) continue;
+    if (!fid || vus[fid]) continue;
     vus[fid] = true;
+    if (!statOk[stat] || estZoneSystemeSignaux_(chem, dom)) continue;
     try {
       var f = DriveApp.getFileById(fid);
       if (!f || f.isTrashed()) continue;
+      var maxT = (typeof CONFIG !== 'undefined' && CONFIG.OCR_TAILLE_MAX) || 20 * 1024 * 1024;
+      if (typeof f.getSize === 'function' && f.getSize() > maxT) { enregistrerSignal_({ fileId: fid, categorie: 'aucun', domaine: dom, chemin: chem }); continue; }
       var mime = typeof f.getMimeType === 'function' ? String(f.getMimeType() || '') : '', extrait = '';
       if (mime.indexOf('application/vnd.google-apps.') === 0 && typeof exporterTexteNatif_ === 'function') extrait = exporterTexteNatif_(fid, mime) || '';
       else if (typeof f.getBlob === 'function' && typeof extraireTexte_ === 'function') extrait = extraireTexte_(f.getBlob()) || '';
@@ -218,7 +226,8 @@ function detecterPiecesManquantesPure_(indexLignes, signauxLignes, dateRef, reta
         if (p[1]) { if (anDoc === anFisc) fiscPres[p[0]] = true; else if (anDoc < anFisc) fiscAnt[p[0]] = true; }
       });
     }
-    var estPaie = (typeof estTypePaieReset_ === 'function' && estTypePaieReset_(seg)) || /bulletin de paie/.test(seg);
+    var disqPaie = typeof estDisqualifieCommeRevenuReset_ === 'function' && estDisqualifieCommeRevenuReset_(seg);
+    var estPaie = !disqPaie && ((typeof estTypePaieReset_ === 'function' && estTypePaieReset_(seg)) || /bulletin de paie/.test(seg));
     if (estPaie) {
       var ptsP = nom.replace(/\.[^.]+$/, '').split('_'), emp = (typeof employeurDuNom_ === 'function' && employeurDuNom_(nom)) || (sig && sig.fournisseur) || (ptsP.length >= 3 && !/^(inconnu|document)$/i.test(ptsP[2].trim()) ? ptsP[2].trim() : '');
       var ym = (/^(\d{4}-\d{2})/.exec(nom) || [])[1] || (sig && sig.dateDoc ? sig.dateDoc.slice(0, 7) : '');
@@ -228,7 +237,10 @@ function detecterPiecesManquantesPure_(indexLignes, signauxLignes, dateRef, reta
     if (!estPaie && !estRib && /(^| )releve( |$)/.test(seg) && !/(^| )releve (1|31|de notes)( |$)/.test(seg) && !/(^| )rl ?(1|31)( |$)/.test(seg)) {
       var ptsR = nom.replace(/\.[^.]+$/, '').split('_'), fourn = (sig && sig.fournisseur) || (ptsR.length >= 3 ? ptsR[2].trim() : ''), cf = normaliserSignaux_(fourn);
       if (cf && cf !== 'inconnu' && cf !== 'document' && cf !== 'banque') {
-        var mym = /^(\d{4})-(\d{2})/.exec(nom), dStr = (sig && validerDateIsoSignal_(sig.dateDoc)) || (/^(\d{4}-\d{2}-\d{2})/.exec(nom) || [])[1] || (mym ? new Date(Date.UTC(Number(mym[1]), Number(mym[2]), 0)).toISOString().slice(0, 10) : '');
+        var mDate = /^(\d{4}-\d{2}-\d{2})(?:[^0-9]|$)/.exec(nom), mym = !mDate ? /^(\d{4})-(\d{2})(?:[^0-9]|$)/.exec(nom) : null;
+        var mm = mym ? Number(mym[2]) : 0;
+        var dStr = (sig && validerDateIsoSignal_(sig.dateDoc)) || (mDate ? validerDateIsoSignal_(mDate[1]) : '') ||
+          ((mym && mm >= 1 && mm <= 12) ? new Date(Date.UTC(Number(mym[1]), mm, 0)).toISOString().slice(0, 10) : '');
         if (dStr) { if (!releves[cf]) releves[cf] = { nom: fourn, dates: [] }; releves[cf].dates.push(dStr); }
       }
     }

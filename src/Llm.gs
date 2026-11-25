@@ -789,7 +789,7 @@ function normaliserChampsV2_(obj) {
   return obj;
 }
 
-var PROMPT_SIGNAL_RATTRAPAGE = 'Extrais UNIQUEMENT en JSON valide : {"categorie":<string|null>,"fournisseur":<string|null>,"date_doc":<"AAAA-MM-JJ"|null>,"date_expiration":<"AAAA-MM-JJ"|null>,"montant":<number|null>,"devise":<"CAD"|"USD"|"EUR"|null>,"garantie_mois":<int|null>}. Sinon null.';
+var PROMPT_SIGNAL_RATTRAPAGE = 'Extrais UNIQUEMENT en JSON valide : {"categorie":<string|null>,"fournisseur":<string|null>,"date_doc":<"AAAA-MM-JJ"|null>,"date_expiration":<"AAAA-MM-JJ"|null>,"montant":<number|null>,"devise":<"CAD"|"USD"|"EUR"|null>,"garantie_mois":<int|null>}. Sinon {}.';
 
 /** Extraction JSON légère pour le rattrapage quotidien borné (`Signaux.gs`). */
 function extraireSignalLlm_(meta) {
@@ -797,10 +797,11 @@ function extraireSignalLlm_(meta) {
   var contenu = 'Nom : ' + String(meta.nomFichier || '') + '\nChemin : ' + String(meta.chemin || '') + (meta.extrait ? '\nExtrait :\n' + String(meta.extrait).slice(0, 4000) : '');
   var brut = appelAnthropicTexte_(CONFIG.LLM_MODELE, PROMPT_SIGNAL_RATTRAPAGE, contenu, 250);
   if (!brut) return null;
-  var obj = null;
-  try { obj = JSON.parse(brut); } catch (e) {
-    var d = brut.indexOf('{'), f = brut.lastIndexOf('}');
-    if (d !== -1 && f > d) try { obj = JSON.parse(brut.substring(d, f + 1)); } catch (e2) { obj = null; }
+  var net = String(brut).trim(), obj;
+  if (net === 'null') return {};
+  try { obj = JSON.parse(net); } catch (e) {
+    var d = net.indexOf('{'), f = net.lastIndexOf('}');
+    if (d !== -1 && f > d) try { obj = JSON.parse(net.substring(d, f + 1)); } catch (e2) { obj = undefined; }
   }
-  return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? normaliserChampsV2_(obj) : null;
+  return obj === null ? {} : ((obj && typeof obj === 'object' && !Array.isArray(obj)) ? normaliserChampsV2_(obj) : null);
 }
