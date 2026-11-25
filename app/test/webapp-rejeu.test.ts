@@ -267,6 +267,9 @@ describe('les contrats publics que le refactor devait préserver', () => {
     expect(rep.statut).toBe('appliqué');
     expect(String(faux.mock.calls[0]?.[0])).toContain('action=copilote-executer');
 
+    const repRec = await executerDecisionCopilote('cop-1', 'reclame');
+    expect(repRec.ok).toBe(true);
+
     vi.stubGlobal('fetch', vi.fn(async () => reponse(200, { ok: false, erreur: 'carte introuvable' })));
     await expect(executerDecisionCopilote('cop-x', 'ignorer')).rejects.toThrow('carte introuvable');
   });

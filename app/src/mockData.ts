@@ -138,6 +138,14 @@ const COPILOTE: string[][] = [
   ['cop-demo-1', '2026-07-06T14:05:00', 'carte', 'cascade', '02 · Finances', '02 · Finances/Bellerives', 'Regrouper 2 doc(s) « Bellerives »', '{"cibleId":"dossier-finances-bellerives","ids":["f-002","f-003"]}', 'proposé', '3'],
   ['cop-demo-2', '2026-07-06T13:45:00', 'carte', 'alerte-corbeille', '04 · Immigration', '04 · Immigration/Permis', 'Document en corbeille : 2026-07_Permis.pdf', '{"fileId":"f-014"}', 'proposé', '0'],
   ['cop-demo-3', '2026-07-06T13:30:00', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration/Permis', 'Démarche en cours : 04 · Immigration/Permis (3 mvts / 7 j)', '{"chemin":"04 · Immigration/Permis","nbMvts":3,"nbDocs":4,"ids":["f-014"],"tids":["fil-imm-1"],"echeances":["2026-08-15"]}', 'actif', '0'],
+  ['cop-demo-4', '2026-07-06T12:00:00', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Échéance à vérifier (2026-08-15, J-40)', '{"cle":"exp|f-014","fileId":"f-014","dateExpiration":"2026-08-15","joursRestants":40}', 'proposé', '0'],
+  ['cop-demo-5', '2026-07-06T11:30:00', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances/2026', 'Hausse facture Cablonet : 89 CAD (médiane 65 CAD, +37 %)', '{"cle":"hausse|f-001","fileId":"f-001","fournisseur":"Cablonet","montant":89,"mediane":65,"devise":"CAD","ecartPct":37}', 'proposé', '0'],
+  ['cop-demo-6', '2026-07-06T11:00:00', 'carte', 'remboursement', '05 · Santé', '05 · Santé/Reçus', 'Remboursement à réclamer : 1 reçu(s) (125 CAD)', '{"cle":"remboursement|CAD","ids":["f-009"],"montantTotal":125,"devise":"CAD","nbRecus":1}', 'proposé', '0'],
+  ['cop-demo-7', '2026-07-06T10:30:00', 'carte', 'retour-garantie', '03 · Logement & véhicule', '03 · Logement & véhicule', 'Fin de garantie : Magasin Exemple le 2026-07-25 (J-19)', '{"cle":"garantie|f-008","fileId":"f-008","sousType":"garantie","fournisseur":"Magasin Exemple","echeance":"2026-07-25","joursRestants":19}', 'proposé', '0'],
+];
+const SIGNAUX: string[][] = [
+  ['f-009', 'Reçu clinique', 'Clinique Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-07-01', '', '125', 'CAD', '', '', 'a-reclamer'],
+  ['f-015', 'Reçu pharmacie', 'Pharmacie Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-07-03', '', '45', 'CAD', '', '', 'a-reclamer'],
 ];
 const LIENS: string[][] = [
   ['2026-07-06T13:20:00', 'fil-imm-1', 'msg-imm-1', 'portail@exemple.ca', '04 · Immigration', '04 · Immigration/Permis', 'f-014', '2026-07_Permis.pdf'],
@@ -162,6 +170,7 @@ export function plageMock(onglet: string, plage: string): string[][] {
     case 'Télémétrie': return TELEMETRIE;
     case 'Coûts': return COUTS;
     case 'Copilote': return COPILOTE;
+    case 'Signaux': return SIGNAUX;
     case 'Liens': return LIENS;
     default: return [];
   }

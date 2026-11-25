@@ -2338,4 +2338,24 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
 
     verifierAucuneErreur(journal);
   });
+
+  test('Lot 3B @lot-3b — sections Expirations, Factures, Argent à récupérer, Marquer réclamé et cibles >= 44px', async ({ page }, testInfo) => {
+    const journal = await preparerApp(page, testInfo);
+    await allerSection(page, testInfo, 'Copilote');
+
+    await expect(page.getByRole('heading', { name: /Expirations & pièces manquantes/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Factures & abonnements/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Argent à récupérer/ })).toBeVisible();
+    await expect(page.getByText(/Hausse facture Cablonet/)).toBeVisible();
+    await expect(page.getByText(/À réclamer : .*170/)).toBeVisible();
+
+    await auditerCiblesTactiles(page, `${testInfo.project.name}/Lot3B/Copilote`);
+    expect((await mesurerDebordement(page)).page).toBeLessThanOrEqual(0);
+
+    await page.getByRole('button', { name: 'Marquer réclamé', exact: true }).click();
+    await expect(page.getByRole('status')).toBeVisible();
+    await expect(page.getByText(/À réclamer : .*45/)).toBeVisible();
+
+    verifierAucuneErreur(journal);
+  });
 });

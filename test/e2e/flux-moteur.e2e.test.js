@@ -3098,3 +3098,54 @@ test('Lot 3A [E2E] : Signaux opportuniste Pipeline (0 $ extra), Agenda J-90/J-30
   assert.strictEqual(ws.spies.calendarEvents.length, 3);
   assert.strictEqual(ws.lireOnglet('Copilote').slice(1).length, nbCartesAvant);
 });
+
+test('Lot 3B [E2E] : Sentinelle factures, Chasseur d argent oublié (0 $ LLM, 04/Anna RO) et action WebApp decision=reclame', () => {
+  const ws = creerWorkspaceE2E();
+  const aujMs = ws.c.Date.now();
+  const iso = (deltaJ) => new ws.c.Date(aujMs + deltaJ * 86400000).toISOString().slice(0, 10);
+  const anPassePlus15 = (() => {
+    const d = new ws.c.Date(aujMs + 15 * 86400000);
+    return (d.getUTCFullYear() - 1) + '-' + d.toISOString().slice(5, 10);
+  })();
+
+  // Coupe le rattrapage LLM via budget 25 $ pour prouver 0 $ LLM sur Sentinelle & Argent oublié
+  ws.props['DriveAI_COUT_' + new ws.c.Date(aujMs).toISOString().slice(0, 7)] = JSON.stringify({ h55in: 0, h55out: 0, s55in: 10000000, s55out: 1000000, appels: 10 });
+  ws.c.reinitialiserAgendaRun_();
+
+  [
+    { fileId: 'FICTIF_E2E_CAB_1', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: iso(-90), montant: 60, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_CAB_2', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: iso(-60), montant: 60, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_CAB_3', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: iso(-30), montant: 85, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_DB_1', categorie: 'Facture', fournisseur: 'Hydro-Exemple', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: iso(-5), montant: 110, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_DB_2', categorie: 'Facture', fournisseur: 'Hydro-Exemple', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: iso(-3), montant: 110, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_REN_1', categorie: 'Abonnement annuel', fournisseur: 'DomaineExemple', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets', dateDoc: anPassePlus15, montant: 35, devise: 'CAD' },
+    { fileId: 'FICTIF_E2E_ANNA_REC', categorie: 'Reçu clinique', fournisseur: 'Clinique Exemple', domaine: 'Anna', chemin: 'Anna/Sante', dateDoc: iso(-4), montant: 125, devise: 'CAD', statutReclamation: 'a-reclamer' },
+    { fileId: 'FICTIF_E2E_GAR_1', categorie: 'Facture achat', fournisseur: 'Magasin Exemple', domaine: '03 · Logement & véhicule', chemin: '03 · Logement & véhicule', dateDoc: iso(-10), montant: 300, devise: 'CAD', finGarantie: iso(10), delaiRetour: iso(4) },
+  ].forEach((s) => ws.c.enregistrerSignal_(s));
+
+  const llmAvant = ws.spies.llmCalls;
+  const patchesAvant = ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length;
+  ws.c.executerEtapeCopilote_(() => false);
+  assert.strictEqual(ws.spies.llmCalls, llmAvant, '0 appel LLM pour Sentinelle factures & Argent oublié');
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 mutation Drive');
+
+  const cartes = ws.lireOnglet('Copilote').slice(1);
+  assert.ok(cartes.some((r) => r[3] === 'facture-hausse'));
+  assert.ok(cartes.some((r) => r[3] === 'facture-doublon'));
+  assert.ok(cartes.some((r) => r[3] === 'renouvellement'));
+  assert.strictEqual(cartes.filter((r) => r[3] === 'retour-garantie').length, 2);
+  const cRemb = cartes.find((r) => r[3] === 'remboursement');
+  assert.ok(cRemb);
+
+  ws.props.DriveAI_WEBAPP_SECRET = 'SECRET_E2E';
+  ws.c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  const rep = JSON.parse(ws.c.doPost({
+    parameter: { action: 'copilote-executer', secret: 'SECRET_E2E' },
+    postData: { contents: JSON.stringify({ requestId: 'e2eLot3BRecl01', id: cRemb[0], decision: 'reclame' }) },
+  }));
+  assert.strictEqual(rep.ok, true);
+  assert.strictEqual(rep.statut, 'reclamé');
+  const sigAnna = ws.c.lireSignaux_().find((s) => s.fileId === 'FICTIF_E2E_ANNA_REC');
+  assert.strictEqual(sigAnna.statutReclamation, 'reclame');
+  assert.strictEqual(ws.spies.httpRequests.filter((r) => r.method === 'PATCH').length, patchesAvant, '0 mutation Drive après reclame sur Anna');
+});

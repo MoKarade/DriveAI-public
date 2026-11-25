@@ -9,10 +9,13 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { interpreterIndex } from '../src/etat';
 import type { DonneesEtat } from '../src/etatGlobal';
 import {
+  construireVueSignauxCopilote,
   extraireMouvementsDrive,
   filtrerMouvementsDrive,
+  formaterMontantSignal,
   interpreterCartesCopilote,
   interpreterLiens,
+  interpreterSignaux,
   liensPourCarte,
   peutPasserEnAuto,
   syntheseSemaineCopilote,
@@ -23,7 +26,7 @@ const mockEtat = vi.hoisted(() => ({
   executer: vi.fn(async (id: string, decision: string) => ({
     ok: true,
     id,
-    statut: decision === 'ignorer' ? 'ignoré' : decision === 'passer-auto' ? 'auto' : decision === 'desactiver-auto' ? 'proposé' : 'appliqué',
+    statut: decision === 'ignorer' ? 'ignoré' : decision === 'reclame' ? 'reclamé' : decision === 'passer-auto' ? 'auto' : decision === 'desactiver-auto' ? 'proposé' : 'appliqué',
     actionIds: decision === 'executer' ? [`act-${id}`] : [],
     nbValidations: 1,
     proposerAuto: false,
@@ -489,5 +492,110 @@ describe('copilote.ts & Copilote.tsx — cartes proactives & démarches (Lot 2B)
     mockEtat.executer.mockRejectedValueOnce(new Error('Refus serveur'));
     fireEvent.click(screen.getByRole('button', { name: 'Passer en auto' }));
     await vi.waitFor(() => expect(screen.getByRole('alert')).toBeDefined());
+  });
+});
+
+describe('copilote.ts & Copilote.tsx — Signaux, factures & argent oublié (Lot 3B)', () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it('interpreterSignaux, formaterMontantSignal, durcissement echeances et blocage auto sur tous les types Signaux', () => {
+    expect(interpreterSignaux()).toEqual([]);
+    const sigs = interpreterSignaux([
+      ['FileId', 'Categorie', 'Fournisseur', 'Domaine', 'Chemin', 'DateDoc', 'DateExpiration', 'Montant', 'Devise', 'FinGarantie', 'DelaiRetour', 'StatutReclamation'],
+      ['f-1', 'Reçu clinique', 'Clinique Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-11-01', '', '125,50', 'cad', '', '', 'a-reclamer'],
+      ['f-2', 'Facture', 'Magasin Exemple', '08 · Perso & projets', '08 · Perso & projets', '2026-11-10', '', '-10', '', '2026-12-10', '2026-11-28', ''],
+      ['', 'Ignoré', 'X', '', '', '', '', '', '', '', '', ''],
+    ]);
+    expect(sigs).toHaveLength(2);
+    expect(sigs[0]!.montant).toBe(125.5);
+    expect(sigs[0]!.devise).toBe('CAD');
+    expect(sigs[1]!.montant).toBeNull();
+    expect(formaterMontantSignal(125.5, 'CAD', 'fr-CA')).toContain('125');
+    expect(formaterMontantSignal(12, 'INVALID', 'fr-CA')).toContain('12');
+
+    const cartes = interpreterCartesCopilote([
+      ['c-dem', '2026-11-01', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration/Permis', 'Démarche', '{"echeances":"2026-12-01"}', 'actif', '0'],
+      ['c-exp', '2026-11-01', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Exp', '{"fileId":"f-1"}', 'proposé', '4'],
+      ['c-pm', '2026-11-01', 'carte', 'piece-manquante', '02 · Finances', '02 · Finances', 'PM', '{"cle":"impots"}', 'proposé', '4'],
+      ['c-fh', '2026-11-01', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances', 'Hausse', '{"fileId":"f-h"}', 'proposé', '4'],
+      ['c-fd', '2026-11-01', 'carte', 'facture-doublon', '02 · Finances', '02 · Finances', 'Doublon', '{"ids":["a","b"]}', 'proposé', '4'],
+      ['c-ren', '2026-11-01', 'carte', 'renouvellement', '08 · Perso & projets', '08 · Perso & projets', 'Renouv', '{"fileId":"f-r"}', 'proposé', '4'],
+      ['c-remb', '2026-11-01', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb', '{"ids":["f-1"],"montantTotal":125.5,"devise":"CAD","nbRecus":1}', 'proposé', '4'],
+      ['c-rg', '2026-11-01', 'carte', 'retour-garantie', '08 · Perso & projets', '08 · Perso & projets', 'Garantie', '{"fileId":"f-2"}', 'proposé', '4'],
+    ]);
+    expect(cartes).toHaveLength(8);
+    expect(cartes[0]!.action.echeances).toBeUndefined();
+    for (const c of cartes) expect(peutPasserEnAuto(c), c.type).toBe(false);
+  });
+
+  it('construireVueSignauxCopilote déduplique, gère les replis Signaux avec Date injectée et agrège par devise', () => {
+    const maint = new Date('2026-11-24T12:00:00Z');
+    const cartes = interpreterCartesCopilote([
+      ['c-remb', '2026-11-24', 'carte', 'remboursement', '05 · Santé', '05 · Santé', 'Remb CAD', '{"ids":["f-1"],"montantTotal":125,"devise":"CAD","nbRecus":1}', 'proposé', '0'],
+      ['c-fac', '2026-11-24', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances', 'Hausse', '{"fileId":"f-fac"}', 'proposé', '0'],
+    ]);
+    const signaux = interpreterSignaux([
+      ['f-1', 'Reçu clinique', 'Clinique Exemple', '05 · Santé', '05 · Santé', '2026-11-01', '', '125', 'CAD', '', '', 'a-reclamer'], // déjà couvert par c-remb
+      ['f-2', 'Reçu pharmacie', 'Pharma Exemple', '05 · Santé', '05 · Santé', '2026-11-05', '', '45', 'CAD', '', '', 'a-reclamer'],
+      ['f-3', 'Note pro', 'Train Exemple', '05 · Carrière', '05 · Carrière', '2026-11-06', '', '30', 'USD', '', '', 'a-reclamer'],
+      ['f-exp', 'Permis', 'IRCC', '04 · Immigration', '04 · Immigration', '2025-01-01', '2026-12-20', '', 'CAD', '', '', ''],
+      ['f-ret', 'Achat', 'Magasin Exemple', '08 · Perso', '08 · Perso', '2026-11-20', '', '90', 'CAD', '2026-12-10', '2026-11-28', ''],
+      ['f-gar', 'Achat 2', 'Magasin Exemple', '08 · Perso', '08 · Perso', '2026-10-01', '', '200', 'CAD', '2026-12-15', '2026-11-01', ''],
+      ['f-aucun', 'aucun', '', '02 · Finances', '02 · Finances', '', '2026-12-01', '', 'CAD', '', '', ''],
+    ]);
+
+    const vue = construireVueSignauxCopilote(cartes, signaux, {}, maint);
+    expect(vue.factures).toHaveLength(1);
+    expect(vue.argent).toHaveLength(1);
+    expect(vue.signauxRepli.map((s) => s.fileId)).toEqual(['f-2', 'f-3', 'f-exp', 'f-ret', 'f-gar']);
+    expect(vue.totauxAReclamer).toEqual([
+      { devise: 'CAD', montant: 170, nbRecus: 2 },
+      { devise: 'USD', montant: 30, nbRecus: 1 },
+    ]);
+
+    // Après clic « Marquer réclamé » sur c-remb : f-1 reste masqué (non réapparu via Signaux) et CAD retombe à 45
+    const vueApres = construireVueSignauxCopilote(cartes, signaux, { 'c-remb': 'reclamé' }, maint);
+    expect(vueApres.argent).toHaveLength(0);
+    expect(vueApres.totauxAReclamer).toEqual([
+      { devise: 'CAD', montant: 45, nbRecus: 1 },
+      { devise: 'USD', montant: 30, nbRecus: 1 },
+    ]);
+  });
+
+  it('rend les 3 sections Signaux en FR/EN, exécute Marquer réclamé en 1 clic et tolère signauxBrut absent', async () => {
+    mockEtat.donnees = {
+      index: [], santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      copiloteBrut: [
+        ['c-dem-bad', '2026-11-20', 'demarche', 'demarche-active', '04 · Immigration', '04 · Immigration', 'Démarche', '{"echeances":"malformé"}', 'actif', '0'],
+        ['c-exp-1', '2026-11-20', 'carte', 'expiration', '04 · Immigration', '04 · Immigration/Permis', 'Échéance permis (J-40)', '{"fileId":"f-exp"}', 'proposé', '0'],
+        ['c-fac-1', '2026-11-20', 'carte', 'facture-hausse', '02 · Finances', '02 · Finances', 'Hausse Cablonet +30 %', '{"fileId":"f-fac"}', 'proposé', '0'],
+        ['c-remb-1', '2026-11-20', 'carte', 'remboursement', '05 · Santé', '05 · Santé/Reçus', 'Remboursement Clinique Exemple', '{"ids":["f-1"],"montantTotal":125,"devise":"CAD","nbRecus":1}', 'proposé', '0'],
+      ],
+      signauxBrut: [
+        ['f-1', 'Reçu clinique', 'Clinique Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-11-01', '', '125', 'CAD', '', '', 'a-reclamer'],
+        ['f-2', 'Reçu pharmacie', 'Pharmacie Exemple', '05 · Santé', '05 · Santé/Reçus', '2026-11-02', '', '45', 'CAD', '', '', 'a-reclamer'],
+      ],
+    };
+
+    render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    expect(screen.getByText('Expirations & pièces manquantes')).toBeDefined();
+    expect(screen.getByText('Factures & abonnements')).toBeDefined();
+    expect(screen.getByText('Argent à récupérer')).toBeDefined();
+    expect(screen.getByText(/À réclamer : .*170/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Marquer réclamé' }));
+    await vi.waitFor(() => expect(mockEtat.executer).toHaveBeenCalledWith('c-remb-1', 'reclame'));
+    await vi.waitFor(() => expect(screen.queryByText('Remboursement Clinique Exemple')).toBeNull());
+    expect(screen.getByText(/À réclamer : .*45/)).toBeDefined();
+
+    cleanup();
+    mockEtat.donnees = { index: [], santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [] };
+    render(createElement(Copilote, { langue: 'en', onAller: () => {} }));
+    expect(screen.getByText('Expirations & missing documents')).toBeDefined();
+    expect(screen.getByText('Bills & subscriptions')).toBeDefined();
+    expect(screen.getByText('Money to recover')).toBeDefined();
   });
 });

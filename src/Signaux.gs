@@ -275,3 +275,110 @@ function detecterPiecesManquantesCopilote_(indexLignes, depasse, maxRestant) {
   }
   return creees;
 }
+
+function montantSignal_(v) {
+  if (typeof v === 'boolean' || v == null || (typeof v === 'string' && !v.trim())) return NaN;
+  var n = typeof v === 'number' ? v : Number(String(v).trim().replace(',', '.'));
+  return isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : NaN;
+}
+function deviseSignal_(d) { var s = String(d || '').trim().toUpperCase(); return /^[A-Z]{3}$/.test(s) ? s : 'CAD'; }
+function estFournisseurValideSignal_(f) { var n = normaliserSignaux_(f); return !!(n && n !== 'inconnu' && n !== 'document'); }
+function estZoneProtegeeSignal_(s) { return (typeof estZoneProtegeeCopilote_ === 'function' && estZoneProtegeeCopilote_(s.chemin, s.domaine)) || (typeof toucheZoneProtegee_ === 'function' && toucheZoneProtegee_([s.domaine, s.chemin, s.categorie, s.fournisseur].join(' '))); }
+function estFactureSignal_(s, inclureRecus) {
+  var txt = normaliserSignaux_(((s && s.categorie) || '') + ' ' + ((s && s.chemin) || '')).replace(/[_-]+/g, ' ');
+  return !!txt && !/(paie|bulletin|salaire|releve|impot|t4|rl ?1|rl ?31|avis de cotisation|aucun)/.test(txt) && (/(facture|abonnement|forfait|assurance|telecom|telephone|internet|electricite|energie|loyer|police)/.test(txt) || (!!inclureRecus && /(recu|achat|paiement|pharmacie|clinique|dentiste|frais)/.test(txt)));
+}
+function estRenouvellementSignal_(s, datesParFourn) {
+  if (!s || !s.fileId || estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun' || validerDateIsoSignal_(s.dateExpiration) || !validerDateIsoSignal_(s.dateDoc) || !estFournisseurValideSignal_(s.fournisseur)) return false;
+  var txt = normaliserSignaux_((s.categorie || '') + ' ' + (s.chemin || '')).replace(/[_-]+/g, ' '), dates = (datesParFourn && datesParFourn[normaliserSignaux_(s.fournisseur)]) || [], base = new Date(Date.UTC(Number(s.dateDoc.slice(0, 4)), Number(s.dateDoc.slice(5, 7)) - 1, Number(s.dateDoc.slice(8, 10))));
+  if (/\bmensuel/.test(txt) || /(paie|bulletin|salaire|releve|impot|t4|rl ?1|rl ?31|avis de cotisation|aucun)/.test(txt) || dates.some(function (d) { return d > s.dateDoc && diffJoursIso_(d, base) > 30; })) return false;
+  return /(abonnement|annuel|renouvellement|assurance|cotisation|adhesion|licence|forfait|bail|immatriculation|hebergement|domaine)/.test(txt) || (estFactureSignal_(s, false) && dates.some(function (d) { var ec = Math.abs(diffJoursIso_(d, base)); return ec >= 330 && ec <= 395; }));
+}
+function estReclamableSignal_(s) {
+  if (!s || !s.fileId || estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun' || s.statutReclamation === 'reclame' || s.statutReclamation === 'non-applicable') return false;
+  if (s.statutReclamation === 'a-reclamer') return true;
+  if (s.statutReclamation !== '' || isNaN(montantSignal_(s.montant))) return false;
+  var txt = normaliserSignaux_((s.categorie || '') + ' ' + (s.chemin || '')).replace(/[_-]+/g, ' '), domN = normaliserSignaux_(s.domaine);
+  return !/(police|contrat|assurance habitation|assurance auto|assurance vie)/.test(txt) && (domN.indexOf('sante') !== -1 || (domN === 'anna' && /\bsante\b/.test(txt)) ||
+    /(pharmacie|dentiste|optometrie|lunettes|clinique|medical|sante|physio|osteo|medecin|chiro|psycho|note de frais|frais professionnel|depense pro|remboursement)/.test(txt) || (domN.indexOf('carriere') !== -1 && /(facture|recu)/.test(txt)));
+}
+/** Sentinelle factures (#11, 100 % pure sur `Signaux`) : hausse, doublon <= 5 j, renouvellement annuel J-30. PURE. */
+function analyserSentinelleFacturesPure_(signaux, dateRef) {
+  var ref = dateRef instanceof Date && !isNaN(dateRef.getTime()) ? dateRef : new Date(), parId = {}, cartes = [], grH = {}, grD = {}, datesF = {}, vusD = {};
+  (signaux || []).forEach(function (s) { if (s && s.fileId) parId[s.fileId] = s; });
+  Object.keys(parId).sort().forEach(function (fid) {
+    var s = parId[fid], fn = normaliserSignaux_(s.fournisseur), dev = deviseSignal_(s.devise), mt = montantSignal_(s.montant), dDoc = validerDateIsoSignal_(s.dateDoc);
+    if (estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun' || !dDoc || !estFournisseurValideSignal_(s.fournisseur)) return;
+    (datesF[fn] = datesF[fn] || []).push(dDoc);
+    if (!isNaN(mt) && estFactureSignal_(s, false)) (grH[fn + '|' + dev] = grH[fn + '|' + dev] || []).push({ s: s, dDoc: dDoc, mt: mt, dev: dev });
+    if (!isNaN(mt) && estFactureSignal_(s, true)) (grD[fn + '|' + dev + '|' + Math.round(mt * 100)] = grD[fn + '|' + dev + '|' + Math.round(mt * 100)] || []).push({ s: s, dDoc: dDoc, mt: mt, dev: dev });
+  });
+  Object.keys(grH).sort().forEach(function (k) {
+    var ser = grH[k].sort(function (a, b) { return a.dDoc < b.dDoc ? -1 : a.dDoc > b.dDoc ? 1 : (a.s.fileId < b.s.fileId ? -1 : 1); });
+    if (ser.length < 3) return;
+    var vals = ser.slice(0, -1).map(function (x) { return x.mt; }).sort(function (a, b) { return a - b; }), m = Math.floor(vals.length / 2);
+    var med = vals.length % 2 ? vals[m] : Math.round(((vals[m - 1] + vals[m]) / 2) * 100) / 100, dern = ser[ser.length - 1], ec = dern.mt - med;
+    if (!(med > 0) || ec < 5 || ec < med * 0.1 - 1e-9) return;
+    var pct = Math.round((ec / med) * 100), zp = estZoneProtegeeSignal_(dern.s);
+    cartes.push({ categorie: 'carte', type: 'facture-hausse', domaine: dern.s.domaine || '', chemin: dern.s.chemin || '', titre: zp ? 'Hausse de facture à vérifier (+' + pct + ' %)' : 'Hausse facture ' + dern.s.fournisseur + ' : ' + dern.mt + ' ' + dern.dev + ' (médiane ' + med + ' ' + dern.dev + ', +' + pct + ' %)', action: { cle: 'hausse|' + dern.s.fileId, fileId: dern.s.fileId, fournisseur: dern.s.fournisseur, montant: dern.mt, mediane: med, devise: dern.dev, ecartPct: pct } });
+  });
+  Object.keys(grD).sort().forEach(function (k) {
+    var lst = grD[k];
+    for (var i = 0; i < lst.length; i++) for (var j = i + 1; j < lst.length; j++) {
+      var a = lst[i], b = lst[j], ec = Math.abs(diffJoursIso_(a.dDoc, new Date(Date.UTC(Number(b.dDoc.slice(0, 4)), Number(b.dDoc.slice(5, 7)) - 1, Number(b.dDoc.slice(8, 10)))))), ids = [a.s.fileId, b.s.fileId].sort(), cle = 'doublon-fac|' + ids[0] + '|' + ids[1];
+      if (isNaN(ec) || ec > 5 || vusD[cle]) continue;
+      vusD[cle] = true;
+      var dts = [a.dDoc, b.dDoc].sort(), zp = estZoneProtegeeSignal_(a.s) || estZoneProtegeeSignal_(b.s);
+      cartes.push({ categorie: 'carte', type: 'facture-doublon', domaine: a.s.domaine || '', chemin: a.s.chemin || '', titre: zp ? 'Facture en double possible (' + a.mt + ' ' + a.dev + ')' : 'Doublon facture ' + a.s.fournisseur + ' : ' + a.mt + ' ' + a.dev + ' (' + dts[0] + ' / ' + dts[1] + ')', action: { cle: cle, ids: ids, fournisseur: a.s.fournisseur, montant: a.mt, devise: a.dev, dates: dts } });
+    }
+  });
+  Object.keys(parId).sort().forEach(function (fid) {
+    var s = parId[fid], ech = estRenouvellementSignal_(s, datesF) ? calculerFinGarantie_(s.dateDoc, 12) : '', jr = ech ? diffJoursIso_(ech, ref) : NaN;
+    if (isNaN(jr) || jr < 0 || jr > 30) return;
+    var mt = montantSignal_(s.montant), dev = deviseSignal_(s.devise), zp = estZoneProtegeeSignal_(s);
+    cartes.push({ categorie: 'carte', type: 'renouvellement', domaine: s.domaine || '', chemin: s.chemin || '', titre: zp ? 'Renouvellement annuel à vérifier (' + ech + ', J-' + jr + ')' : 'Renouvellement annuel : ' + s.fournisseur + ' le ' + ech + ' (J-' + jr + ')', action: { cle: 'renouv|' + s.fileId + '|' + ech, fileId: s.fileId, fournisseur: s.fournisseur, montant: isNaN(mt) ? '' : mt, devise: dev, echeance: ech, dateRenouvellement: ech, joursRestants: jr } });
+  });
+  return cartes;
+}
+/** Chasseur d'argent oublié (#12, 100 % pur sur `Signaux`) : remboursements, retours <= 7 j, garanties <= 30 j. PURE. */
+function analyserArgentOubliePure_(signaux, dateRef) {
+  var ref = dateRef instanceof Date && !isNaN(dateRef.getTime()) ? dateRef : new Date(), parId = {}, parDev = {}, cartes = [];
+  (signaux || []).forEach(function (s) { if (s && s.fileId) parId[s.fileId] = s; });
+  Object.keys(parId).sort().forEach(function (fid) {
+    var s = parId[fid], dev = deviseSignal_(s.devise), mt = montantSignal_(s.montant), zp = estZoneProtegeeSignal_(s);
+    if (estReclamableSignal_(s)) (parDev[dev] = parDev[dev] || []).push({ s: s, mt: isNaN(mt) ? 0 : mt });
+    if (estZoneSystemeSignaux_(s.chemin, s.domaine) || normaliserSignaux_(s.categorie) === 'aucun') return;
+    [['retour', s.delaiRetour, 7, 'Délai de retour', 'delaiRetour'], ['garantie', s.finGarantie, 30, 'Fin de garantie', 'finGarantie']].forEach(function (rg) {
+      var jr = rg[1] ? diffJoursIso_(rg[1], ref) : NaN;
+      if (isNaN(jr) || jr < 0 || jr > rg[2]) return;
+      var act = { cle: rg[0] + '|' + fid, fileId: fid, sousType: rg[0], fournisseur: s.fournisseur || '', montant: isNaN(mt) ? '' : mt, devise: dev, echeance: rg[1], joursRestants: jr }; act[rg[4]] = rg[1];
+      cartes.push({ categorie: 'carte', type: 'retour-garantie', domaine: s.domaine || '', chemin: s.chemin || '', titre: zp ? rg[3] + ' à vérifier (' + rg[1] + ', J-' + jr + ')' : rg[3] + ' : ' + (s.fournisseur || s.categorie || 'Achat') + ' (' + rg[1] + ', J-' + jr + ')', action: act });
+    });
+  });
+  Object.keys(parDev).sort().forEach(function (dev) {
+    var lst = parDev[dev], ids = [], tot = 0, cle = 'remboursement|' + dev;
+    for (var i = 0; i < lst.length; i++) {
+      var cIds = ids.concat([lst[i].s.fileId]), cTot = Math.round((tot + lst[i].mt) * 100) / 100;
+      if (JSON.stringify({ cle: cle, ids: cIds, montantTotal: cTot, devise: dev, nbRecus: cIds.length }).length > 480) break;
+      ids = cIds; tot = cTot;
+    }
+    if (ids.length) cartes.push({ categorie: 'carte', type: 'remboursement', domaine: lst[0].s.domaine || '02 · Finances', chemin: lst[0].s.chemin || '', titre: 'Remboursement à réclamer : ' + ids.length + ' reçu(s) (' + tot + ' ' + dev + ')', action: { cle: cle, ids: ids, montantTotal: tot, devise: dev, nbRecus: ids.length } });
+  });
+  return cartes;
+}
+function detecterSentinelleFacturesCopilote_(depasse, maxRestant) { return emettreCartesSignaux_(analyserSentinelleFacturesPure_(lireSignaux_(), new Date()), depasse, maxRestant); }
+function detecterArgentOublieCopilote_(depasse, maxRestant) { return emettreCartesSignaux_(analyserArgentOubliePure_(lireSignaux_(), new Date()), depasse, maxRestant); }
+function emettreCartesSignaux_(lst, depasse, maxRestant) {
+  if ((typeof CONFIG !== 'undefined' && CONFIG.SIGNAUX_ACTIF === false) || maxRestant <= 0 || typeof enregistrerCarteCopilote_ !== 'function') return 0;
+  var creees = 0;
+  for (var i = 0; i < lst.length && creees < maxRestant && !(depasse && depasse()); i++) if (enregistrerCarteCopilote_(lst[i]).cree) creees++;
+  return creees;
+}
+/** Met à jour `StatutReclamation = 'reclame'` dans `Signaux` pour les `FileId` donnés. */
+function marquerSignauxReclames_(fileIds) {
+  var cibles = {}; (Array.isArray(fileIds) ? fileIds : (fileIds ? [fileIds] : [])).forEach(function (x) { var fid = String(x || '').trim(); if (fid) cibles[fid] = true; });
+  var f = Object.keys(cibles).length ? feuille_('Signaux') : null, dern = f ? f.getLastRow() : 0, maj = 0;
+  if (dern < 2) return 0;
+  f.getRange(2, 1, dern - 1, COLONNES_SIGNAUX.length).getValues().forEach(function (r, i) { if (cibles[String(r[0] || '').trim()]) { f.getRange(i + 2, 12).setValue('reclame'); maj++; } });
+  return maj;
+}

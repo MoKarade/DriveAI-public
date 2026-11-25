@@ -515,3 +515,78 @@ test('Non-régression R3 : bornes 3/run + 15/j sur {bad/null hors panne, et brea
   assert.strictEqual(pPanne.DriveAI_SIGNAUX_JOUR, auj + '|3');
   assert.strictEqual(cPanne.lireSignaux_().length, 3);
 });
+
+test('Sentinelle factures (#11) : hausse >= 10% ET >= 5$, doublon <= 5 j, renouvellement annuel J-30 (sans doublon expiration)', () => {
+  const { c } = ctxSignaux();
+  const ref = new Date('2026-11-24T12:00:00Z');
+  const signaux = [
+    // Hausse Cablonet CAD : prior [60, 64] -> médiane 62, dernier 75 (+13 >= 5 et >= 10 %) => déclenche
+    { fileId: 'FICTIF_CAB_1', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: '2026-08-01', montant: 60, devise: 'CAD' },
+    { fileId: 'FICTIF_CAB_2', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: '2026-09-01', montant: 64, devise: '' },
+    { fileId: 'FICTIF_CAB_3', categorie: 'Facture', fournisseur: 'Cablonet', domaine: '02 · Finances', chemin: '02 · Finances/Cablonet', dateDoc: '2026-10-01', montant: 75, devise: 'CAD' },
+    // Seuil < 5 $ (20 -> 24, +20 % mais +4 $ < 5 $) => ignoré
+    { fileId: 'FICTIF_PET_1', categorie: 'Facture', fournisseur: 'MiniTel', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-08-01', montant: 20, devise: 'CAD' },
+    { fileId: 'FICTIF_PET_2', categorie: 'Facture', fournisseur: 'MiniTel', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-09-01', montant: 20, devise: 'CAD' },
+    { fileId: 'FICTIF_PET_3', categorie: 'Facture', fournisseur: 'MiniTel', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-10-01', montant: 24, devise: 'CAD' },
+    // Seuil < 10 % (100 -> 108, +8 $ >= 5 $ mais +8 % < 10 %) => ignoré
+    { fileId: 'FICTIF_PCT_1', categorie: 'Facture', fournisseur: 'EnergieNord', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-08-01', montant: 100, devise: 'CAD' },
+    { fileId: 'FICTIF_PCT_2', categorie: 'Facture', fournisseur: 'EnergieNord', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-09-01', montant: 100, devise: 'CAD' },
+    { fileId: 'FICTIF_PCT_3', categorie: 'Facture', fournisseur: 'EnergieNord', domaine: '02 · Finances', chemin: '02 · Finances', dateDoc: '2026-10-01', montant: 108, devise: 'CAD' },
+    // Doublon <= 5 j (Anna lecture seule inclus, montant 88.50) vs > 5 j ignoré
+    { fileId: 'FICTIF_DOUB_B', categorie: 'Reçu clinique', fournisseur: 'Clinique Exemple', domaine: 'Anna', chemin: 'Anna/Sante', dateDoc: '2026-11-05', montant: 88.5, devise: 'CAD' },
+    { fileId: 'FICTIF_DOUB_A', categorie: 'Reçu clinique', fournisseur: 'Clinique Exemple', domaine: 'Anna', chemin: 'Anna/Sante', dateDoc: '2026-11-02', montant: 88.5, devise: 'CAD' },
+    { fileId: 'FICTIF_DOUB_FAR', categorie: 'Reçu clinique', fournisseur: 'Clinique Exemple', domaine: 'Anna', chemin: 'Anna/Sante', dateDoc: '2026-11-15', montant: 88.5, devise: 'CAD' },
+    // Renouvellement annuel sans dateExpiration (échéance 2026-12-10, J-16) + un autre avec dateExpiration (exclu)
+    { fileId: 'FICTIF_REN_OK', categorie: 'Abonnement annuel', fournisseur: 'CloudExemple', domaine: '08 · Perso & projets', chemin: '08 · Perso & projets', dateDoc: '2025-12-10', dateExpiration: '', montant: 99, devise: 'USD' },
+    { fileId: 'FICTIF_REN_EXP', categorie: 'Assurance auto', fournisseur: 'AssurPlus', domaine: '03 · Logement & véhicule', chemin: '03 · Logement & véhicule', dateDoc: '2025-12-12', dateExpiration: '2026-12-12', montant: 800, devise: 'CAD' },
+    // Mensuel avec facture récente > 30 j après 2025-12-05 => pas de faux positif renouvellement
+    { fileId: 'FICTIF_MENS_OLD', categorie: 'Facture', fournisseur: 'TelecomMensuel', domaine: '02 · Finances', chemin: '02 · Finances/TelecomMensuel', dateDoc: '2025-12-05', montant: 60, devise: 'CAD' },
+    { fileId: 'FICTIF_MENS_NEW', categorie: 'Facture', fournisseur: 'TelecomMensuel', domaine: '02 · Finances', chemin: '02 · Finances/TelecomMensuel', dateDoc: '2026-02-05', montant: 60, devise: 'CAD' },
+  ];
+  const res = plain(c.analyserSentinelleFacturesPure_(signaux, ref));
+  const hausses = res.filter((x) => x.type === 'facture-hausse');
+  const doublons = res.filter((x) => x.type === 'facture-doublon');
+  const renouv = res.filter((x) => x.type === 'renouvellement');
+  assert.strictEqual(hausses.length, 1);
+  assert.strictEqual(hausses[0].action.cle, 'hausse|FICTIF_CAB_3');
+  assert.strictEqual(hausses[0].action.mediane, 62);
+  assert.strictEqual(hausses[0].action.ecartPct, 21);
+  assert.strictEqual(doublons.length, 1);
+  assert.deepStrictEqual(doublons[0].action.ids, ['FICTIF_DOUB_A', 'FICTIF_DOUB_B']);
+  assert.ok(!doublons[0].titre.includes('Clinique Exemple'), 'titre neutre en zone protégée Anna');
+  assert.strictEqual(renouv.length, 1);
+  assert.strictEqual(renouv[0].action.cle, 'renouv|FICTIF_REN_OK|2026-12-10');
+  assert.strictEqual(renouv[0].action.joursRestants, 16);
+});
+
+test('Chasseur d argent oublié (#12) : remboursements santé/pro (plafond 480 car.), retours <= 7 j, garanties <= 30 j et marquerSignauxReclames_', () => {
+  const { c, sh } = ctxSignaux({
+    sheets: {
+      Signaux: [
+        ['FileId', 'Categorie', 'Fournisseur', 'Domaine', 'Chemin', 'DateDoc', 'DateExpiration', 'Montant', 'Devise', 'FinGarantie', 'DelaiRetour', 'StatutReclamation'],
+        ['FICTIF_SANTE_01', 'Reçu clinique', 'Clinique Exemple', 'Anna', 'Anna/Sante', '2026-11-10', '', 120, 'CAD', '', '', ''],
+        ['FICTIF_PRO_02', 'Note de frais', 'Train Exemple', '05 · Carrière', '05 · Carrière/Frais', '2026-11-12', '', 80.5, '', '', '', 'a-reclamer'],
+        ['FICTIF_DEJA_REC', 'Pharmacie', 'PharmaExemple', '05 · Santé', '05 · Santé', '2026-11-01', '', 30, 'CAD', '', '', 'reclame'],
+        ['FICTIF_POL_EXCL', 'Police habitation', 'AssureurFictif', '03 · Logement & véhicule', '03 · Logement & véhicule', '2026-11-01', '', 600, 'CAD', '', '', ''],
+        ['FICTIF_ACHAT_01', 'Facture achat', 'Magasin Exemple', '08 · Perso & projets', '08 · Perso & projets', '2026-11-20', '', 250, 'CAD', '2026-12-10', '2026-11-29', ''],
+        ['FICTIF_EXP_PASS', 'Facture achat', 'Magasin Exemple', '08 · Perso & projets', '08 · Perso & projets', '2026-10-01', '', 90, 'CAD', '2026-11-20', '2026-11-22', ''],
+      ],
+    },
+  });
+  const ref = new Date('2026-11-24T12:00:00Z');
+  const res = plain(c.analyserArgentOubliePure_(c.lireSignaux_(), ref));
+  const remb = res.filter((x) => x.type === 'remboursement');
+  const rg = res.filter((x) => x.type === 'retour-garantie');
+  assert.strictEqual(remb.length, 1);
+  assert.deepStrictEqual(remb[0].action.ids, ['FICTIF_PRO_02', 'FICTIF_SANTE_01']);
+  assert.strictEqual(remb[0].action.montantTotal, 200.5);
+  assert.strictEqual(remb[0].action.nbRecus, 2);
+  assert.strictEqual(rg.length, 2, 'retour J-5 et garantie J-16 émis séparément, expirés ignorés');
+  assert.deepStrictEqual(rg.map((x) => x.action.cle).sort(), ['garantie|FICTIF_ACHAT_01', 'retour|FICTIF_ACHAT_01']);
+
+  // marquerSignauxReclames_ passe StatutReclamation à 'reclame' dans Signaux
+  assert.strictEqual(c.marquerSignauxReclames_(['FICTIF_SANTE_01', 'FICTIF_PRO_02']), 2);
+  assert.strictEqual(sh.sheets.Signaux[1][11], 'reclame');
+  assert.strictEqual(sh.sheets.Signaux[2][11], 'reclame');
+  assert.strictEqual(c.analyserArgentOubliePure_(c.lireSignaux_(), ref).filter((x) => x.type === 'remboursement').length, 0);
+});

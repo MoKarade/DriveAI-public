@@ -1142,12 +1142,12 @@ export async function annulerActionMoteur(actionId: string): Promise<string> {
   return demandeWebApp('annuler-action', { actionId }, true);
 }
 
-export type DecisionCopilote = 'executer' | 'restaurer' | 'ignorer' | 'passer-auto' | 'desactiver-auto';
+export type DecisionCopilote = 'executer' | 'restaurer' | 'ignorer' | 'reclame' | 'passer-auto' | 'desactiver-auto';
 export interface ReponseCopiloteExecuter { ok: boolean; id?: string; statut?: string; actionIds?: string[]; nbValidations?: number; proposerAuto?: boolean; message?: string; erreur?: string }
 
 /** Exécute une décision Copilote (`copilote-executer`, rejouable via `requestId`). En MODE_MOCK : aucun appel réseau. */
 export async function executerDecisionCopilote(id: string, decision: DecisionCopilote): Promise<ReponseCopiloteExecuter> {
-  if (MODE_MOCK) return { ok: true, id, statut: decision === 'ignorer' ? 'ignoré' : decision === 'passer-auto' ? 'auto' : decision === 'desactiver-auto' ? 'proposé' : 'appliqué', actionIds: decision === 'executer' ? [`act-mock-${id}`] : [], nbValidations: 1, proposerAuto: false, message: 'Décision appliquée.' };
+  if (MODE_MOCK) return { ok: true, id, statut: decision === 'ignorer' ? 'ignoré' : decision === 'reclame' ? 'reclamé' : decision === 'passer-auto' ? 'auto' : decision === 'desactiver-auto' ? 'proposé' : 'appliqué', actionIds: decision === 'executer' ? [`act-mock-${id}`] : [], nbValidations: 1, proposerAuto: false, message: 'Décision appliquée.' };
   const rep = await postWebApp<ReponseCopiloteExecuter>('copilote-executer', { id, decision }, { rejouable: true });
   if (!rep.ok) throw new Error(rep.erreur || 'copilote-executer refusé');
   return rep;

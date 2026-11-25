@@ -313,6 +313,9 @@ const CONTRAT = [
   'enregistrerSignalDepuisPipeline_', 'budgetSignauxDepasse_', 'analyserExpirationsSignaux_',
   'detecterExpirationsCopilote_', 'detecterPiecesManquantesPure_', 'detecterPiecesManquantesCopilote_',
   'rattraperSignauxCopilote_', 'creerRappelExpirationAgenda_', 'extraireSignalLlm_',
+  // Sentinelle factures & Chasseur d'argent oublié (Lot 3B, #11/#12)
+  'analyserSentinelleFacturesPure_', 'detecterSentinelleFacturesCopilote_',
+  'analyserArgentOubliePure_', 'detecterArgentOublieCopilote_', 'marquerSignauxReclames_',
 ];
 
 test('surface du moteur : toutes les fonctions du contrat interne sont définies', () => {

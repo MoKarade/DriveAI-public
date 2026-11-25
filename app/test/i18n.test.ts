@@ -252,6 +252,22 @@ describe('i18n (FR / EN)', () => {
     expect(t('copiloteDemarcheResume', 'fr')).toContain('{docs}');
     expect(t('copiloteDemarcheResume', 'en')).toContain('{mails}');
   });
+
+  it('les 17 clés Copilote Lot 3B sont non vides en FR et EN avec {total}', () => {
+    const clesLot3B: CleTexte[] = [
+      'copiloteExpirationsTitre', 'copiloteExpirationsVide', 'copiloteFacturesTitre', 'copiloteFacturesVide',
+      'copiloteArgentTitre', 'copiloteArgentVide', 'copiloteTotalAReclamer', 'copiloteTypeExpiration',
+      'copiloteTypePieceManquante', 'copiloteTypeFactureHausse', 'copiloteTypeFactureDoublon',
+      'copiloteTypeRenouvellement', 'copiloteTypeRemboursement', 'copiloteTypeRetourGarantie',
+      'copiloteActionReclame', 'copiloteOuvrirFichier', 'copiloteAReclamerBadge',
+    ];
+    for (const cle of clesLot3B) {
+      expect(t(cle, 'fr').trim().length, `fr.${cle}`).toBeGreaterThan(0);
+      expect(t(cle, 'en').trim().length, `en.${cle}`).toBeGreaterThan(0);
+    }
+    expect(t('copiloteTotalAReclamer', 'fr')).toContain('{total}');
+    expect(t('copiloteTotalAReclamer', 'en')).toContain('{total}');
+  });
 });
 
 describe('i18n — gardes localStorage (GAP-3)', () => {
