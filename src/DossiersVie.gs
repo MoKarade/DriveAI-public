@@ -70,7 +70,7 @@ function normaliserCleDossierVie_(chemin) {
     var s = brutSegs[i].trim();
     if (s) segs.push(s);
   }
-  if (segs.length < 2 || segs[0].charAt(0) === '_' || /^00\s*·/.test(cleNormDossierVie_(segs[0]))) return null;
+  if (segs.length < 2 || segs[0].charAt(0) === '_' || segs.some(function (x) { return /^00\s*·/.test(cleNormDossierVie_(x)); })) return null;
   while (segs.length > 1 && /^\d{4}$/.test(segs[segs.length - 1])) {
     segs.pop();
   }

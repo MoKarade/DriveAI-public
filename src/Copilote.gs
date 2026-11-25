@@ -44,7 +44,7 @@ function serialiserActionCopilote_(obj) {
   var copie = {};
   if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) { copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : obj[k]; });
   var s = JSON.stringify(copie);
-  ['echeances', 'tids', 'ids'].forEach(function (k) {
+  ['echeances', 'tids', 'ids', 'orgs', 'items'].forEach(function (k) {
     var minL = k === 'ids' ? 1 : 0;
     while (s.length > 500 && Array.isArray(copie[k]) && copie[k].length > minL) { copie[k].pop(); s = JSON.stringify(copie); }
   });

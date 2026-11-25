@@ -7,27 +7,27 @@ var ZONES_SYS_PACKS_ = { '00 · a trier': 1, '00 · a verifier': 1, '00 · packs
 var WEBMAIL_PACKS_ = { 'gmail.com': 1, 'hotmail.com': 1, 'outlook.com': 1, 'yahoo.com': 1, 'icloud.com': 1, 'proton.me': 1, 'protonmail.com': 1, 'live.com': 1, 'msn.com': 1 };
 var DEMARCHES_PACKS_ = [
   { key: 'logement', nom: 'Logement', domaine: '03 · Logement & véhicule', items: [
-    { k: 'bail', l: 'Bail / contrat', re: /\b(bail|logement|loyer|location)\b/ }, { k: 'assur', l: 'Assurance habit.', re: /\b(assurance habitation|habitation|locataire)\b/ },
-    { k: 'ident', l: 'Pièce identité', re: /\b(passeport|carte d identite|permis de conduire|identite|ramq)\b/ }, { k: 'paie', l: 'Preuve revenu', re: /\b(bulletin de paie|paie|salaire|attestation emploi|revenu|t4|rl ?1)\b/ },
-    { k: 'rib', l: 'Spécimen banc.', re: /\b(rib|identite bancaire|specimen|cheque|iban)\b/ }
+    { k: 'bail', l: 'Bail', re: /\b(bail|logement|loyer|location)\b/ }, { k: 'assur', l: 'Assur.', re: /\b(assurance habitation|habitation|locataire)\b/ },
+    { k: 'ident', l: 'Identité', re: /\b(passeport|carte d identite|permis de conduire|identite|ramq)\b/ }, { k: 'paie', l: 'Revenu', re: /\b(bulletin de paie|paie|salaire|attestation emploi|revenu|t4|rl ?1)\b/ },
+    { k: 'rib', l: 'Spéc.', re: /\b(rib|identite bancaire|specimen|cheque|iban)\b/ }
   ] },
   { key: 'emploi', nom: 'Emploi', domaine: '05 · Carrière', items: [
-    { k: 'cv', l: 'CV à jour', re: /\b(cv|curriculum)\b/ }, { k: 'contrat', l: 'Contrat / offre', re: /\b(contrat|offre d emploi|embauche|lettre d offre)\b/ },
-    { k: 'diplome', l: 'Diplôme / attest.', re: /\b(diplome|attestation|certificat|releve de notes)\b/ }, { k: 'paie', l: 'Talons de paie', re: /\b(bulletin de paie|paie|salaire)\b/ },
-    { k: 'rib', l: 'Spécimen banc.', re: /\b(rib|identite bancaire|specimen|cheque)\b/ }
+    { k: 'cv', l: 'CV', re: /\b(cv|curriculum)\b/ }, { k: 'contrat', l: 'Contrat', re: /\b(contrat|offre d emploi|embauche|lettre d offre)\b/ },
+    { k: 'diplome', l: 'Diplôme', re: /\b(diplome|attestation|certificat|releve de notes)\b/ }, { k: 'paie', l: 'Paies', re: /\b(bulletin de paie|paie|salaire)\b/ },
+    { k: 'rib', l: 'Spécimen', re: /\b(rib|identite bancaire|specimen|cheque)\b/ }
   ] },
   { key: 'voyage', nom: 'Voyage', domaine: '08 · Perso & projets', items: [
-    { k: 'pass', l: 'Passeport valide', re: /\b(passeport)\b/ }, { k: 'assur', l: 'Assurance voyage', re: /\b(assurance voyage|voyage|assistance)\b/ },
-    { k: 'billet', l: 'Billet / réserv.', re: /\b(billet|vol|itineraire|reservation|hotel)\b/ }, { k: 'visa', l: 'Visa / AVE', re: /\b(visa|ave|esta|autorisation voyage)\b/ }
+    { k: 'pass', l: 'Passeport', re: /\b(passeport)\b/ }, { k: 'assur', l: 'Assurance', re: /\b(assurance voyage|voyage|assistance)\b/ },
+    { k: 'billet', l: 'Billet', re: /\b(billet|vol|itineraire|reservation|hotel)\b/ }, { k: 'visa', l: 'Visa / AVE', re: /\b(visa|ave|esta|autorisation voyage)\b/ }
   ] },
   { key: 'impots', nom: 'Impôts', domaine: '02 · Finances', items: [
-    { k: 't4', l: 'Feuillet T4', re: /\b(t4)\b/ }, { k: 'rl1', l: 'Relevé 1 (RL-1)', re: /\b(rl ?1|releve 1)\b/ },
-    { k: 'rl31', l: 'Relevé 31 (RL-31)', re: /\b(rl ?31|releve 31)\b/ }, { k: 'avis', l: 'Avis cotisation', re: /\b(avis de cotisation)\b/ },
-    { k: 'recu', l: 'Reçus / frais', re: /\b(recu|don|frais medicaux|frais de garde|sante)\b/ }
+    { k: 't4', l: 'T4', re: /\b(t4)\b/ }, { k: 'rl1', l: 'RL-1', re: /\b(rl ?1|releve 1)\b/ },
+    { k: 'rl31', l: 'RL-31', re: /\b(rl ?31|releve 31)\b/ }, { k: 'avis', l: 'Cotisation', re: /\b(avis de cotisation)\b/ },
+    { k: 'recu', l: 'Reçus', re: /\b(recu|don|frais medicaux|frais de garde|sante)\b/ }
   ] },
   { key: 'immigration', nom: 'Immigration', domaine: '04 · Immigration', items: [
-    { k: 'pass', l: 'Passeport valide', re: /\b(passeport)\b/ }, { k: 'permis', l: 'Permis / CSQ', re: /\b(permis|csq|caq|residence|statut|ircc|mifi)\b/ },
-    { k: 'emploi', l: 'Emploi / fonds', re: /\b(emploi|contrat|releve bancaire|solde|t4|paie)\b/ }, { k: 'ident', l: 'Acte / état civil', re: /\b(naissance|etat civil|photo|identite)\b/ }
+    { k: 'pass', l: 'Passeport', re: /\b(passeport)\b/ }, { k: 'permis', l: 'Permis / CSQ', re: /\b(permis|csq|caq|residence|statut|ircc|mifi)\b/ },
+    { k: 'emploi', l: 'Emploi / fonds', re: /\b(emploi|contrat|releve bancaire|solde|t4|paie)\b/ }, { k: 'ident', l: 'État civil', re: /\b(naissance|etat civil|photo|identite)\b/ }
   ] }
 ];
 
@@ -78,7 +78,9 @@ function indexerDocumentsVivantsPacks_(indexLignes, signauxLignes) {
 }
 
 function serialiserPackAction_(obj) {
-  var c = JSON.parse(JSON.stringify(obj || {})), s = JSON.stringify(c);
+  var c = JSON.parse(JSON.stringify(obj || {}));
+  if (Array.isArray(c.items)) c.items.forEach(function (x) { if (x) { delete x.a; if (!x.f) delete x.f; if (!x.m) delete x.m; } });
+  var s = JSON.stringify(c);
   if (s.length <= 500) return s;
   if (Array.isArray(c.items)) {
     for (var i = c.items.length - 1; i >= 0 && s.length > 500; i--) { delete c.items[i].f; s = JSON.stringify(c); }
@@ -119,20 +121,26 @@ function segEntiteCheminPacks_(chemin) {
   while (segs.length > 1 && /^\d{4}$/.test(segs[segs.length - 1])) segs.pop();
   return segs.length >= 2 ? segs[segs.length - 1] : '';
 }
-function nettoyerNomOrganismePacks_(brut) {
+function nettoyerNomOrganismePacks_(brut, domaine) {
   var s = String(brut || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
   if (typeof retirerSuffixeJuridique_ === 'function') s = retirerSuffixeJuridique_(s);
   if (!s || s.length < 2 || /^\d+\s/.test(s)) return '';
   var n = normaliserPacks_(s);
   if (/^(inconnue?|n\/?a|n a|aucune?|autres?|divers|document|sans|non identifie|non lisible)$/.test(n)) return '';
   if ((typeof estProprietaireMarc_ === 'function' && estProprietaireMarc_(s)) || (typeof estEntiteGenerique_ === 'function' && estEntiteGenerique_(s))) return '';
+  if (domaine && typeof CONFIG !== 'undefined' && CONFIG.CATEGORIES) {
+    var cats = CONFIG.CATEGORIES[domaine];
+    if (!cats) { var dn = normaliserPacks_(domaine); for (var dk in CONFIG.CATEGORIES) if (Object.prototype.hasOwnProperty.call(CONFIG.CATEGORIES, dk) && normaliserPacks_(dk) === dn) { cats = CONFIG.CATEGORIES[dk]; break; } }
+    if (cats) for (var ck in cats) if (Object.prototype.hasOwnProperty.call(cats, ck) && normaliserPacks_(ck) === n) return '';
+  }
   return s;
 }
 
 /** PURE (#14) — Extrait les vrais organismes actifs des 18 derniers mois (zéro nom codé en dur, zéro PII). */
 function extraireOrganismesActifs18MoisPure_(docsVivants, liensLignes, entitesLignes, dateRef) {
   var ref = dateRef instanceof Date && !isNaN(dateRef.getTime()) ? dateRef : new Date(), refIso = ref.toISOString().slice(0, 10);
-  var seuilIso = new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - 18, ref.getUTCDate())).toISOString().slice(0, 10);
+  var derJ = new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - 17, 0)).getUTCDate();
+  var seuilIso = new Date(Date.UTC(ref.getUTCFullYear(), ref.getUTCMonth() - 18, Math.min(ref.getUTCDate(), derJ))).toISOString().slice(0, 10);
   var canonEnt = {}, idxE = 0, idxS = 4, liensFid = {}, parOrg = {};
   (entitesLignes || []).forEach(function (r, idx) {
     if (!Array.isArray(r)) return;
@@ -149,7 +157,7 @@ function extraireOrganismesActifs18MoisPure_(docsVivants, liensLignes, entitesLi
   });
   (docsVivants || []).forEach(function (d) {
     if (!d.dateDoc || d.dateDoc < seuilIso || d.dateDoc > refIso) return;
-    var cand = nettoyerNomOrganismePacks_(d.fournisseur) || nettoyerNomOrganismePacks_(segEntiteCheminPacks_(d.chemin));
+    var cand = nettoyerNomOrganismePacks_(d.fournisseur, d.domaine) || nettoyerNomOrganismePacks_(segEntiteCheminPacks_(d.chemin), d.domaine);
     if (!cand) return;
     var k = normaliserPacks_(cand), g = parOrg[k] || (parOrg[k] = { cle: k, nom: canonEnt[k] || cand, nbDocs: 0, derniereDate: '', tids: {}, domainesMail: {} });
     g.nbDocs++; if (d.dateDoc > g.derniereDate) g.derniereDate = d.dateDoc;
@@ -182,14 +190,15 @@ function synchroniserCarteListeCopilote_(carte, cartesExistantes) {
     liste = liste.map(function (it) {
       var prev = prevMap[it.k || normaliserPacks_(it.n || it.l)];
       if (carte.type === 'changement-vie') return Object.assign({}, it, { ok: prev && prev.ok ? 1 : 0 });
-      var man = prev && (prev.m === 1 || (prev.ok && !prev.a));
-      return { k: it.k, l: it.l, ok: (prev && prev.m === 1) ? (prev.ok ? 1 : 0) : ((prev && prev.ok) || it.a ? 1 : 0), m: man ? 1 : 0, a: it.a ? 1 : 0, f: it.f || (prev && prev.f) || undefined };
+      var man = !!(prev && prev.m === 1);
+      return { k: it.k, l: it.l, ok: man ? (prev.ok ? 1 : 0) : (it.a ? 1 : 0), m: man ? 1 : 0, f: it.f || (man && prev && prev.f) || undefined };
     });
   }
-  liste.forEach(function (x) { delete x.a; if (!x.f) delete x.f; if (x.m === 0) delete x.m; });
+  liste.forEach(function (x) { delete x.a; if (!x.f) delete x.f; if (!x.m) delete x.m; });
   var obj = JSON.parse(JSON.stringify(carte.action)); obj[champ] = liste;
-  var json = serialiserPackAction_(obj), faits = liste.filter(function (x) { return !!x.ok; }).length, statut = liste.length && faits === liste.length ? 'terminé' : 'actif';
-  var titre = (carte.type === 'changement-vie' ? 'Plan Changement de vie (' : 'Checklist ' + (obj.dem || '') + ' (') + faits + '/' + liste.length + ')';
+  var json = serialiserPackAction_(obj), sauves = parserActionPacks_(json)[champ] || [];
+  var faits = sauves.filter(function (x) { return !!x.ok; }).length, statut = sauves.length && faits === sauves.length ? 'terminé' : 'actif';
+  var titre = (carte.type === 'changement-vie' ? 'Plan Changement de vie (' : 'Checklist ' + (obj.dem || '') + ' (') + faits + '/' + sauves.length + ')';
   if (trouvee) {
     if (trouvee.actionJson !== json || trouvee.statut !== statut || trouvee.titre !== titre) {
       f.getRange(trouvee.row, 2).setValue(new Date()); f.getRange(trouvee.row, 7).setValue(titre.slice(0, 140));
@@ -213,12 +222,21 @@ function detecterChecklistsCopilote_(indexLignes, depasse, maxRestant) {
   return creees;
 }
 
+function cleOrgCompactePacks_(cle, vus) {
+  var s = String(cle || ''), h = 2166136261;
+  for (var i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  var k = s.length <= 14 ? s : (s.slice(0, 9) + '_' + ('0000' + (h >>> 0).toString(36)).slice(-4));
+  if (!vus[k]) { vus[k] = true; return k; }
+  for (var n = 2; vus[k.slice(0, 12) + n]; n++);
+  var u = k.slice(0, 12) + n; vus[u] = true; return u;
+}
+
 function detecterChangementVieCopilote_(indexLignes, depasse, maxRestant) {
   if ((typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_ACTIF === false) || maxRestant <= 0 || (depasse && depasse())) return 0;
-  var docs = indexerDocumentsVivantsPacks_(indexLignes, lireSignauxPacks_()), orgs = extraireOrganismesActifs18MoisPure_(docs, lireLiensPacks_(), lireEntitesPacks_(), new Date());
+  var docs = indexerDocumentsVivantsPacks_(indexLignes, lireSignauxPacks_()), orgs = extraireOrganismesActifs18MoisPure_(docs, lireLiensPacks_(), lireEntitesPacks_(), new Date()), vusK = {};
   if (!orgs.length) return 0;
   return synchroniserCarteListeCopilote_({ categorie: 'checklist', type: 'changement-vie', domaine: '', chemin: '',
-    action: { cle: 'chg|18m', orgs: orgs.map(function (o) { return { k: o.cle.slice(0, 14), n: o.nom.slice(0, 22), ok: 0, nb: o.nbDocs }; }) } }).cree ? 1 : 0;
+    action: { cle: 'chg|18m', orgs: orgs.map(function (o) { return { k: cleOrgCompactePacks_(o.cle, vusK), n: o.nom.slice(0, 22), ok: 0, nb: o.nbDocs }; }) } }).cree ? 1 : 0;
 }
 
 /** Exécute une coche/décoche manuelle (`action=copilote-checklist`). */
@@ -230,6 +248,7 @@ function executerChecklistCopilote_(corps) {
     if ((c.type === 'checklist' || c.type === 'changement-vie') && ((cid && c.id === cid) || (dem && (normaliserPacks_(a.dem) === dem || a.cle === 'chk|' + dem)))) { carte = c; break; }
   }
   if (!carte) return { ok: false, erreur: 'checklist introuvable' };
+  if (carte.statut === 'ignoré') return { ok: false, erreur: 'checklist ignorée' };
   var act = parserActionPacks_(carte.actionJson), champ = carte.type === 'changement-vie' ? 'orgs' : 'items', liste = Array.isArray(act[champ]) ? act[champ] : [];
   if (itemReq) {
     var cible = null;
@@ -238,12 +257,13 @@ function executerChecklistCopilote_(corps) {
     cible.ok = (corps.coche === undefined ? !cible.ok : !!corps.coche) ? 1 : 0;
     if (carte.type === 'checklist') cible.m = 1;
   }
-  var faits = liste.filter(function (x) { return !!x.ok; }).length, statut = liste.length && faits === liste.length ? 'terminé' : 'actif';
-  var titre = (carte.type === 'changement-vie' ? 'Plan Changement de vie (' : 'Checklist ' + (act.dem || '') + ' (') + faits + '/' + liste.length + ')';
+  var json = serialiserPackAction_(act), sauves = parserActionPacks_(json)[champ] || [];
+  var faits = sauves.filter(function (x) { return !!x.ok; }).length, statut = sauves.length && faits === sauves.length ? 'terminé' : 'actif';
+  var titre = (carte.type === 'changement-vie' ? 'Plan Changement de vie (' : 'Checklist ' + (act.dem || '') + ' (') + faits + '/' + sauves.length + ')';
   var f = feuille_('Copilote');
   f.getRange(carte.row, 2).setValue(new Date()); f.getRange(carte.row, 7).setValue(titre.slice(0, 140));
-  f.getRange(carte.row, 8).setValue(serialiserPackAction_(act)); f.getRange(carte.row, 9).setValue(statut);
-  return { ok: true, checklistId: carte.id, statut: statut, message: 'Checklist mise à jour (' + faits + '/' + liste.length + ').' };
+  f.getRange(carte.row, 8).setValue(json); f.getRange(carte.row, 9).setValue(statut);
+  return { ok: true, checklistId: carte.id, statut: statut, message: 'Checklist mise à jour (' + faits + '/' + sauves.length + ').' };
 }
 
 function estFichierZoneSystemeDrive_(fObj) {
@@ -293,6 +313,7 @@ function creerPackCopilote_(corps) {
     catch (eR) { if (typeof journalErreur_ === 'function') journalErreur_('Packs', 'Raccourci impossible (' + src.fileId + ') : ' + eR); }
   });
   var url = (typeof dossierPack.getUrl === 'function' && dossierPack.getUrl()) || ('https://drive.google.com/drive/folders/' + encodeURIComponent(dossierId));
+  if (nb === 0) return { ok: false, dossierId: dossierId, dossierUrl: url, nbRaccourcis: 0, erreur: 'création des raccourcis impossible' };
   if (typeof journalInfo_ === 'function') journalInfo_('Packs', 'Pack « ' + nomDossier + ' » créé (' + nb + ' raccourci(s)).');
   return { ok: true, dossierId: dossierId, dossierUrl: url, nbRaccourcis: nb, message: 'Pack prêt (' + nb + ' raccourci(s)).' };
 }
