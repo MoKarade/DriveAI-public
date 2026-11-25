@@ -13,6 +13,7 @@ import {
   construireFiches360,
   construireVueSignauxCopilote,
   extraireMouvementsDrive,
+  fileIdsPourChecklist,
   filtrerMouvementsDrive,
   formaterMontantSignal,
   interpreterCartesCopilote,
@@ -886,5 +887,92 @@ describe('copilote.ts & Copilote.tsx — Lot 4B-2 (Fiches 360°, Checklists, Pac
     rerender(createElement(Copilote, { langue: 'en', onAller: () => {} }));
     expect(screen.getByText('360° subject sheets')).toBeDefined();
     expect(screen.getByText('1-sentence rules')).toBeDefined();
+  });
+
+  it('corrige les 5 régressions R2 (isolation 04/Anna, zoneProtegee règles, Logement vs Véhicule, fileIds changement-vie, slice actions)', async () => {
+    // 1 & 4. Isolation 04 · Immigration / Anna vs entités homonymes non protégées + Logement vs Véhicule
+    const indexIso = interpreterIndex([
+      ['drive|f-imm-visa', '2026-07-06', '2026-06-10_Visa_Travail.pdf', '04 · Immigration', '04 · Immigration/Visa', 'manuel', '', ''],
+      ['drive|f-anna-auto', '2026-07-06', '2026-06-12_Assurance_Voiture_Anna.pdf', '08 · Perso & projets', '08 · Perso & projets/Anna', 'manuel', '', ''],
+      ['drive|f-log-1', '2026-07-06', '2026-06-15_Bail.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule/Logement/12 rue Exemple', 'classé', '', ''],
+      ['drive|f-veh-1', '2026-07-06', '2026-06-16_Entretien.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule/Véhicule/Voiture Exemple', 'classé', '', ''],
+    ]);
+    const entitesIso = interpreterEntites([
+      ['Visa', '02 · Finances', '', 'Compte', 'validée', 'd-visa', '', '', '2'],
+      ['Assurance', '02 · Finances', '', 'Organisme', 'validée', 'd-assur', '', '', '2'],
+      ['12 rue Exemple', '03 · Logement & véhicule', 'Logement', 'Logement', 'validée', 'd-log', '', '', '5'],
+    ]);
+    const fichesIso = construireFiches360({ index: indexIso, signaux: [], liens: [], entites: entitesIso });
+    expect(fichesIso.find((f) => f.titre === 'Visa')).toBeUndefined();
+    expect(fichesIso.find((f) => f.titre === 'Assurance')).toBeUndefined();
+    expect(fichesIso.find((f) => f.categorie === 'immigration')).toMatchObject({ lectureSeule: true, nbDocs: 1 });
+    expect(fichesIso.find((f) => f.categorie === 'anna')).toMatchObject({ lectureSeule: true, nbDocs: 1 });
+    expect(fichesIso.find((f) => f.titre === '12 rue Exemple')?.categorie).toBe('logement');
+    expect(fichesIso.find((f) => f.titre === 'Voiture Exemple')?.categorie).toBe('vehicule');
+
+    // Sans entité pré-déclarée : Logement/12 rue Exemple reste 'logement'
+    const fichesSansEntite = construireFiches360({ index: indexIso.slice(2, 3), signaux: [], liens: [], entites: [] });
+    expect(fichesSansEntite[0]?.categorie).toBe('logement');
+
+    // 2. zoneProtegee avec "" dans ActionJson ou cible dans alors.* / phrase
+    const regs = interpreterReglesCopilote([
+      ['reg-empty', '2026-07-06', 'regle', 'regle-auto', '04 · Immigration', '04 · Immigration/Permis', 'Imm', '{"domaine":"","cible":"","auto":true}', 'auto', '4'],
+      ['reg-alors', '2026-07-06', 'regle', 'regle-auto', '', '', 'Règle', '{"alors":{"domaine":"04 · Immigration","cible":"04 · Immigration/Permis"},"auto":true}', 'auto', '4'],
+      ['reg-lib', '2026-07-06', 'regle', 'regle-auto', '', '', 'Règle', '{"alors":{"libelle":"Anna"},"auto":true}', 'proposé', '4'],
+      ['reg-tech', '2026-07-06', 'regle', 'regle-auto', '', '', 'Ranger dans _Technique', '{"phrase":"Ranger dans _Technique","auto":true}', 'proposé', '4'],
+    ]);
+    expect(regs).toHaveLength(4);
+    for (const r of regs) expect(r).toMatchObject({ zoneProtegee: true, auto: false });
+
+    // 5. construireActionsSemaine filtre fileIdsPack.length > 0 avant .slice(0, 2)
+    const actionsPacks = construireActionsSemaine({
+      vueSignaux: construireVueSignauxCopilote([], []),
+      checklists: [],
+      regles: [],
+      fiches: [
+        { id: 'f0', titre: '04 · Immigration', categorie: 'immigration', domaine: '04 · Immigration', chemin: '04 · Immigration', lectureSeule: true, docs: [], nbDocs: 0, liensMail: [], echeances: [], totalMontant: 0, devise: 'CAD', fileIdsPack: [] },
+        { id: 'f1', titre: 'Anna', categorie: 'anna', domaine: 'Anna', chemin: 'Anna', lectureSeule: true, docs: [], nbDocs: 0, liensMail: [], echeances: [], totalMontant: 0, devise: 'CAD', fileIdsPack: [] },
+        { id: 'f2', titre: 'Bellerives', categorie: 'organisme', domaine: '02 · Finances', chemin: '02 · Finances/Bellerives', lectureSeule: false, docs: [], nbDocs: 1, liensMail: [], echeances: [], totalMontant: 0, devise: 'CAD', fileIdsPack: ['doc-1'] },
+        { id: 'f3', titre: '12 rue Exemple', categorie: 'logement', domaine: '03 · Logement & véhicule', chemin: '03 · Logement & véhicule/Logement/12 rue Exemple', lectureSeule: false, docs: [], nbDocs: 1, liensMail: [], echeances: [], totalMontant: 0, devise: 'CAD', fileIdsPack: ['doc-2'] },
+      ],
+    });
+    expect(actionsPacks.filter((a) => a.type === 'pack').map((a) => a.packCle)).toEqual(['Bellerives', '12 rue Exemple']);
+
+    // 3. fileIdsPourChecklist pour changement-vie (incl. 04/Anna, exclut système/vide, plafond <= 25) + DOM bouton masqué si 0 match
+    const chgAvecDocs = interpreterChecklistsCopilote([
+      ['chg-ok', '2026-07-06', 'checklist', 'changement-vie', '', '', 'Plan changement de vie', '{"orgs":[{"k":"bel","n":"Bellerives","ok":0,"nb":2},{"k":"ircc","n":"IRCC","ok":0,"nb":1},{"k":"anna","n":"Anna","ok":0,"nb":1}]}', 'actif', '0'],
+      ['chg-vide', '2026-07-06', 'checklist', 'changement-vie', '', '', 'Plan vide', '{"orgs":[{"k":"inconnu","n":"Introuvable","ok":0,"nb":1}]}', 'actif', '0'],
+    ]);
+    const idxPacks = interpreterIndex([
+      ['drive|f-sys', '2026-07-06', '2026-07_Bellerives.pdf', '', '_Technique', 'technique', '', ''],
+      ['drive|f-a-trier', '2026-07-06', '2026-07_Bellerives.pdf', '00 · À trier', '00 · À trier', 'à trier', '', ''],
+      ['drive|f-sans-chm', '2026-07-06', '2026-07_Bellerives.pdf', '02 · Finances', '', 'classé', '', ''],
+      ['drive|f-imm-ircc', '2026-07-06', '2026-07_Permis_IRCC.pdf', '04 · Immigration', '04 · Immigration/Permis', 'manuel', '', ''],
+      ['drive|f-anna', '2026-07-06', '2026-07_Dossier_Anna.pdf', '08 · Perso & projets', '08 · Perso & projets/Anna', 'manuel', '', ''],
+      ...Array.from({ length: 28 }, (_, i) => ['drive|f-bel-' + i, '2026-07-06', `2026-07_Releve_${i}.pdf`, '02 · Finances', '02 · Finances/Bellerives', 'classé', '', '']),
+    ]);
+    const resolved = fileIdsPourChecklist(chgAvecDocs[0]!, idxPacks);
+    expect(resolved).toHaveLength(25);
+    expect(resolved).toContain('f-imm-ircc');
+    expect(resolved).toContain('f-anna');
+    expect(resolved).not.toContain('f-sys');
+    expect(resolved).not.toContain('f-a-trier');
+    expect(resolved).not.toContain('f-sans-chm');
+    expect(fileIdsPourChecklist(chgAvecDocs[1]!, idxPacks)).toEqual([]);
+
+    mockEtat.donnees = {
+      index: idxPacks.slice(3, 5),
+      santeBrut: [], journalBrut: [], reglagesBrut: [], telemetrieBrut: [], coutsBrut: [], actionsBrut: [],
+      copiloteBrut: [
+        ['chg-ok', '2026-07-06', 'checklist', 'changement-vie', '', '', 'Plan actif', '{"orgs":[{"k":"ircc","n":"IRCC","ok":0,"nb":1}]}', 'actif', '0'],
+        ['chg-vide', '2026-07-06', 'checklist', 'changement-vie', '', '', 'Plan sans fichier', '{"orgs":[{"k":"x","n":"Inexistant","ok":0,"nb":1}]}', 'actif', '0'],
+      ],
+    };
+    render(createElement(Copilote, { langue: 'fr', onAller: () => {} }));
+    const btnsPack = screen.getAllByRole('button', { name: /Créer le pack 1-clic/ });
+    // Seul chg-ok (et non chg-vide) expose le bouton Pack (+ 1 fiche active dans Fiche360 = 2 au total, jamais 3)
+    expect(btnsPack).toHaveLength(2);
+    fireEvent.click(btnsPack[0]!);
+    await vi.waitFor(() => expect(mockEtat.creerPack).toHaveBeenCalledWith({ pack: 'changement-vie', fileIds: ['f-imm-ircc'], titre: 'Plan actif' }));
   });
 });

@@ -10,7 +10,7 @@ import { annulerActionMoteur, creerPackCopilote, executerDecisionCopilote, gerer
 import { BanniereErreur, EntetePage, IndicateurChargement } from '../composants/UI';
 import { Fiche360 } from '../composants/Fiche360';
 import { Icone, type NomIcone } from '../composants/Icone';
-import { construireActionsSemaine, construireFiches360, construireVueSignauxCopilote, extraireMouvementsDrive, filtrerMouvementsDrive, formaterMontantSignal, interpreterCartesCopilote, interpreterChecklistsCopilote, interpreterEntites, interpreterLiens, interpreterReglesCopilote, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote, urlDriveSure, type CarteCopilote, type CategorieMouvementDrive, type ChecklistCopilote, type FiltreMouvementDrive, type MouvementDrive, type RegleCopilote, type SignalRepli, type TypeCarteCopilote } from '../copilote';
+import { construireActionsSemaine, construireFiches360, construireVueSignauxCopilote, extraireMouvementsDrive, fileIdsPourChecklist, filtrerMouvementsDrive, formaterMontantSignal, interpreterCartesCopilote, interpreterChecklistsCopilote, interpreterEntites, interpreterLiens, interpreterReglesCopilote, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote, urlDriveSure, type CarteCopilote, type CategorieMouvementDrive, type ChecklistCopilote, type FiltreMouvementDrive, type MouvementDrive, type RegleCopilote, type SignalRepli, type TypeCarteCopilote } from '../copilote';
 import { formaterDateCourte } from '../explorateur';
 import { t, type CleTexte, type Langue } from '../i18n';
 
@@ -204,7 +204,7 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
       <section className="copilote-cartes">
         <h2 className="titre-liste">{t('copiloteChecklistsTitre', langue)}{checklists.length > 0 && <span className="badge">{checklists.length}</span>}</h2>
         {checklists.length === 0 ? <p className="explication">{t('copiloteChecklistsVide', langue)}</p> : checklists.map((c) => {
-          const packRes = packsCrees[c.id], packUrl = urlDriveSure(packRes?.dossierUrl), fids = c.items.map((x) => x.fileId).filter((x): x is string => Boolean(x));
+          const packRes = packsCrees[c.id], packUrl = urlDriveSure(packRes?.dossierUrl), fids = fileIdsPourChecklist(c, donnees.index);
           return (<article key={c.id} className="prop-carte">
             <div className="prop-tete"><Icone nom="coche" className="accent" /><b>{c.titre}</b><span className="sp" /><span className="pastille douce">{c.faits}/{c.total}</span>{c.termine && <span className="pastille ok">{t('copiloteTermineBadge', langue)}</span>}</div>
             <div className="copilote-checklist">{c.items.map((it) => (
@@ -214,7 +214,7 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
               </button>
             ))}</div>
             <div className="prop-actions">
-              <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void lancerPack(c.id, c.packCle, fids, c.titre)}><Icone nom="dossier" className="chev" /> {t('copilotePackBtn', langue)}</button>
+              {(c.type !== 'changement-vie' || fids.length > 0) && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void lancerPack(c.id, c.packCle, fids, c.titre)}><Icone nom="dossier" className="chev" /> {t('copilotePackBtn', langue)}</button>}
               {packUrl && <a className="bouton-ligne" href={packUrl} target="_blank" rel="noreferrer">{t('copilotePackPret', langue).replace('{n}', String(packRes?.nbRaccourcis ?? 0))} <Icone nom="externe" className="chev" /></a>}
             </div>
           </article>);

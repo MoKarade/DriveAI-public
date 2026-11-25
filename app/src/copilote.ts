@@ -286,9 +286,12 @@ export function liensPourCarte(carte: CarteCopilote, liens: readonly LienMailDri
   return out;
 }
 
+const STATUTS_VIVANTS = new Set(['classé', 'déplacé', 'manuel']);
+const RE_ZONE_PROT = /\b(?:04\s*·\s*immigration|immigration|ircc|csq|caq|anna|00\s*·\s*(?:a\s*trier|a\s*verifier|packs)|donnees\s*&\s*exports)\b/;
 const normTxt = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
-const estZoneProtegee = (domaine: string, chemin: string) => [domaine, ...chemin.split('/')].some((s) => { const n = normTxt(s); return !!n && (ZONES_PROT_COPILOTE.has(n) || n.startsWith('_') || /^00\s*·/.test(n)); });
-const parseJsonObj = (brut: unknown): Record<string, unknown> => { try { const p = brut ? JSON.parse(String(brut)) : null; return p && typeof p === 'object' && !Array.isArray(p) ? p as Record<string, unknown> : {}; } catch { return {}; } };
+const estZoneSysteme = (domaine: string, chemin: string) => [domaine, ...chemin.split('/')].some((s) => { const n = normTxt(s); return !!n && (n === 'donnees & exports' || n.startsWith('_') || /^00\s*·/.test(n)); });
+const estZoneProtegee = (...champs: unknown[]) => champs.some((c) => String(c ?? '').split('/').some((s) => { const n = normTxt(s); return !!n && (ZONES_PROT_COPILOTE.has(n) || n.startsWith('_') || /(?:^|\s)00\s*·/.test(n) || RE_ZONE_PROT.test(n) || /\b_[a-z0-9]+/.test(n)); }));
+const parseJsonObj = (brut: unknown): Record<string, unknown> => { try { const p = typeof brut === 'string' ? (brut ? JSON.parse(brut) : null) : brut; return p && typeof p === 'object' && !Array.isArray(p) ? p as Record<string, unknown> : {}; } catch { return {}; } };
 const hasProp = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 /** Valide strictement qu'une URL pointe vers Drive, Docs ou Gmail (PURE). */
 export const urlDriveSure = (url: unknown): string | undefined => { const u = typeof url === 'string' ? url.trim() : ''; return /^https:\/\/(drive|docs|mail)\.google\.com\//.test(u) ? u : undefined; };
@@ -333,19 +336,31 @@ export function interpreterReglesCopilote(copiloteBrut: readonly string[][] = []
   return copiloteBrut.flatMap((r) => {
     const id = String(r[0] ?? '').trim(), type = String(r[3] ?? '').trim(), statut = String(r[8] ?? '').trim();
     if (!id || id === 'Id' || type !== 'regle-auto' || statut === 'ignoré' || etatsLocaux[id]?.supprime) return [];
-    const p = parseJsonObj(r[7]), alors = parseJsonObj(p.alors), dom = String(p.domaine ?? r[4] ?? '').trim(), chm = String(p.cible ?? r[5] ?? '').trim();
-    const zoneProtegee = estZoneProtegee(dom, chm), loc = hasProp(etatsLocaux, id) ? etatsLocaux[id] : undefined;
-    return [{ id, phrase: String(p.phrase ?? r[6] ?? '').trim(), domaine: dom, chemin: chm, auto: !zoneProtegee && (loc?.auto ?? (statut === 'auto' || Boolean(p.auto))), validations: Math.max(Number(r[9]) || 0, Number(p.validations) || 0), statut, canal: String(alors.canal ?? 'les-deux'), action: String(alors.action ?? 'deplacer'), zoneProtegee }];
+    const p = parseJsonObj(r[7]), alors = parseJsonObj(p.alors), dom = String(p.domaine || r[4] || '').trim(), chm = String(p.cible || r[5] || '').trim(), phrase = String(p.phrase || r[6] || '').trim();
+    const zoneProtegee = estZoneProtegee(dom, chm, alors.domaine, alors.cible, alors.libelle, phrase, r[6]), loc = hasProp(etatsLocaux, id) ? etatsLocaux[id] : undefined;
+    return [{ id, phrase, domaine: dom, chemin: chm, auto: !zoneProtegee && (loc?.auto ?? (statut === 'auto' || Boolean(p.auto))), validations: Math.max(Number(r[9]) || 0, Number(p.validations) || 0), statut, canal: String(alors.canal ?? 'les-deux'), action: String(alors.action ?? 'deplacer'), zoneProtegee }];
   });
 }
+/** Résout les fileIds Drive éligibles pour un pack (spécifique à `changement-vie` depuis `Index`, capped `<= 25`, PURE). */
+export function fileIdsPourChecklist(c: ChecklistCopilote, index: readonly LigneIndex[]): string[] {
+  if (c.type !== 'changement-vie') return c.items.map((x) => x.fileId).filter((x): x is string => Boolean(x));
+  const norm = (s: string) => normTxt(s).replace(/[_-]+/g, ' ').trim(), orgs = c.items.map((x) => norm(x.libelle)).filter((s) => s.length >= 2);
+  if (!orgs.length) return [];
+  const out: string[] = [], vus = new Set<string>();
+  for (const l of index) {
+    const fid = fileIdDepuisCle(l.cle), chm = String(l.chemin ?? '').trim();
+    if (!fid || vus.has(fid) || !chm || !STATUTS_VIVANTS.has(l.statut) || estZoneSysteme(l.domaine, chm)) continue;
+    const txt = norm(`${chm} ${l.fichier}`);
+    if (orgs.some((o) => txt.includes(o))) { vus.add(fid); out.push(fid); if (out.length >= 25) break; }
+  }
+  return out;
+}
 function catFiche(domaine: string, chemin: string, type = '', cat = ''): CategorieFiche360 | null {
-  const n = normTxt(`${domaine}/${chemin}/${type}/${cat}`);
-  if (n.includes('04 · immigration') || n.includes('immigration')) return 'immigration';
-  if (n.split('/').some((s) => s.trim() === 'anna')) return 'anna';
-  if (n.includes('vehicule') || n.includes('voiture')) return 'vehicule';
-  if (n.includes('logement')) return 'logement';
-  if (n.includes('carriere') || n.includes('employeur')) return 'employeur';
-  return n.includes('voyage') ? 'voyage' : null;
+  const d = normTxt(domaine), chSegs = chemin.split('/').map(normTxt).filter(Boolean), segs = [d, ...chSegs, normTxt(type), normTxt(cat)].filter(Boolean);
+  if (segs.some((s) => s.includes('immigration'))) return 'immigration';
+  if (segs.some((s) => s === 'anna')) return 'anna';
+  const matchCat = (s: string): CategorieFiche360 | null => s.includes('logement') ? 'logement' : (s.includes('vehicule') || s.includes('voiture')) ? 'vehicule' : (s.includes('carriere') || s.includes('employeur')) ? 'employeur' : s.includes('voyage') ? 'voyage' : null;
+  return matchCat([...chSegs.filter((s) => !/^\d+\s*·/.test(s)), normTxt(type), normTxt(cat)].filter(Boolean).join(' ')) ?? matchCat(d);
 }
 /** Construit les Fiches 360° par sujet de vie (#17), incluant `04 · Immigration` et `Anna` en lecture seule (PURE). */
 export function construireFiches360(donnees: { index: readonly LigneIndex[]; signaux: readonly LigneSignal[]; liens: readonly LienMailDrive[]; entites: readonly EntiteCopilote[] }): Fiche360[] {
@@ -361,9 +376,8 @@ export function construireFiches360(donnees: { index: readonly LigneIndex[]; sig
     if (e.statut === 'validée' || cat === 'immigration' || cat === 'anna') ensure(`${cat}|${normTxt(e.entite)}`, e.entite, cat, e.domaine, e.entite);
   }
   const matchFiche = (domaine: string, chemin: string, nom = '') => {
-    const txt = normTxt(`${domaine}/${chemin}/${nom}`);
-    for (const f of fiches.values()) if (txt.includes(normTxt(f.titre))) return f;
-    const cat = catFiche(domaine, chemin);
+    const cat = catFiche(domaine, chemin), prot = cat === 'immigration' || cat === 'anna', txt = normTxt(`${domaine}/${chemin}/${nom}`);
+    for (const f of fiches.values()) if ((prot ? f.lectureSeule && f.categorie === cat : !f.lectureSeule) && txt.includes(normTxt(f.titre))) return f;
     if (cat === 'immigration') return ensure('immigration|04', '04 · Immigration', 'immigration', '04 · Immigration', '04 · Immigration');
     if (cat === 'anna') return ensure('anna|anna', 'Anna', 'anna', 'Anna', 'Anna');
     const segs = chemin.split('/').map((s) => s.trim()).filter(Boolean);
@@ -376,7 +390,7 @@ export function construireFiches360(donnees: { index: readonly LigneIndex[]; sig
   };
   for (const l of donnees.index) {
     const chm = String(l.chemin ?? '').trim(), dom = String(l.domaine ?? '').trim(), fid = fileIdDepuisCle(l.cle);
-    if (!fid || !chm || /^(_doublons|_technique|_medias|00\s*·)/.test(normTxt(chm))) continue;
+    if (!fid || !chm || estZoneSysteme(dom, chm)) continue;
     const f = matchFiche(dom, chm, l.fichier); if (!f) continue;
     f.nbDocs++;
     if (!f.fids.has(fid)) { f.fids.add(fid); if (f.fileIdsPack.length < 25) f.fileIdsPack.push(fid); if (f.docs.length < 5) f.docs.push({ fileId: fid, nom: l.fichier, date: l.traiteLe, lienDrive: lienDrivePourLigne(l) }); }
@@ -415,6 +429,6 @@ export function construireActionsSemaine(donnees: { vueSignaux: ReturnType<typeo
   for (const ch of checklists) if (!ch.termine) out.push({ id: `act-chk-${ch.id}`, priorite: 2, type: 'demarche', titre: ch.titre, detail: `${ch.faits}/${ch.total}`, packCle: ch.packCle });
   if (autoCards + autoReg > 0) out.push({ id: 'act-auto', priorite: 2, type: 'auto', titre: 'Passage en mode auto prêt', detail: `${autoCards + autoReg} geste(s) (≥ 3 val.)` });
   if (autres > 0) out.push({ id: 'act-cas', priorite: 3, type: 'cascade', titre: 'Rangement Drive proposé', detail: `${autres} proposition(s)` });
-  for (const f of fiches.slice(0, 2)) if (f.fileIdsPack.length > 0) out.push({ id: `act-pack-${f.id}`, priorite: 3, type: 'pack', titre: `Pack prêt : ${f.titre}`, detail: `${f.fileIdsPack.length} doc(s)`, packCle: f.titre });
+  for (const f of fiches.filter((x) => x.fileIdsPack.length > 0).slice(0, 2)) out.push({ id: `act-pack-${f.id}`, priorite: 3, type: 'pack', titre: `Pack prêt : ${f.titre}`, detail: `${f.fileIdsPack.length} doc(s)`, packCle: f.titre });
   return out.slice(0, 8);
 }
