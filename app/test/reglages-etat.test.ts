@@ -388,6 +388,7 @@ describe('AujourdHui.tsx & conformité visuelle R2/R4', () => {
       '../src/composants/UI.tsx',
       '../src/composants/Suspects.tsx',
       '../src/composants/Omnibox.tsx',
+      '../src/composants/Fiche360.tsx',
       '../src/vues/Reorg.tsx',
       '../src/vues/Explorateur.tsx',
       '../src/vues/AujourdHui.tsx',

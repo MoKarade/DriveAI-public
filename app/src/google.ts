@@ -1152,3 +1152,29 @@ export async function executerDecisionCopilote(id: string, decision: DecisionCop
   if (!rep.ok) throw new Error(rep.erreur || 'copilote-executer refusé');
   return rep;
 }
+
+export interface ReponseCopilotePack { ok: boolean; dossierId?: string; dossierUrl?: string; nbRaccourcis?: number; message?: string; erreur?: string }
+export interface ReponseCopiloteChecklist { ok: boolean; checklistId?: string; statut?: 'actif' | 'terminé'; message?: string; erreur?: string }
+export interface ReponseCopiloteQuestion { ok: boolean; reponse?: string; llmUtilise?: boolean; sources?: Array<{ nom: string; lien: string; fileId?: string; chemin?: string }>; erreur?: string }
+export interface ReponseCopiloteRegle { ok: boolean; regleId?: string; auto?: boolean; message?: string; erreur?: string }
+async function postCopilote<T extends { ok: boolean; erreur?: string }>(action: string, corps: Record<string, unknown>): Promise<T> {
+  const rep = await postWebApp<T>(action, corps, { rejouable: true });
+  if (!rep.ok) throw new Error(rep.erreur || `${action} refusé`);
+  return rep;
+}
+/** Crée un Pack 1-clic par raccourcis Drive (`copilote-pack`), sans appel réseau en MODE_MOCK. */
+export async function creerPackCopilote(opts: { pack: string; fileIds?: string[]; titre?: string }): Promise<ReponseCopilotePack> {
+  return MODE_MOCK ? { ok: true, dossierId: 'pack-mock-1', dossierUrl: 'https://drive.google.com/drive/folders/pack-mock-1', nbRaccourcis: opts.fileIds?.length || 3, message: 'Pack créé (raccourcis Drive).' } : postCopilote('copilote-pack', opts);
+}
+/** Met à jour une checklist ou plan changement de vie (`copilote-checklist`), sans appel réseau en MODE_MOCK. */
+export async function majChecklistCopilote(opts: { checklistId?: string; demarche?: string; item?: string; coche?: boolean }): Promise<ReponseCopiloteChecklist> {
+  return MODE_MOCK ? { ok: true, checklistId: opts.checklistId || 'chk-mock', statut: opts.coche ? 'terminé' : 'actif', message: 'Checklist mise à jour.' } : postCopilote('copilote-checklist', opts);
+}
+/** Pose une question sur les métadonnées structurées (`copilote-question`), sans appel réseau en MODE_MOCK. */
+export async function poserQuestionCopilote(question: string): Promise<ReponseCopiloteQuestion> {
+  return MODE_MOCK ? { ok: true, reponse: '2 document(s) pertinents trouvés (dont 04 · Immigration en lecture seule).', llmUtilise: false, sources: [{ nom: '2026-06-15_Bail_Immeubles Tremblay.pdf', lien: 'https://drive.google.com/file/d/f-004/view', fileId: 'f-004', chemin: '03 · Logement & véhicule/Logement/12 rue Exemple' }] } : postCopilote('copilote-question', { question });
+}
+/** Crée, bascule auto ou supprime une règle en 1 phrase (`copilote-regle`), sans appel réseau en MODE_MOCK. */
+export async function gererRegleCopilote(opts: { mode: 'creer' | 'basculer-auto' | 'supprimer-auto'; regleId?: string; phrase?: string }): Promise<ReponseCopiloteRegle> {
+  return MODE_MOCK ? { ok: true, regleId: opts.regleId || 'reg-mock-1', auto: opts.mode === 'basculer-auto', message: opts.mode === 'supprimer-auto' ? 'Règle supprimée.' : 'Règle enregistrée.' } : postCopilote('copilote-regle', opts);
+}

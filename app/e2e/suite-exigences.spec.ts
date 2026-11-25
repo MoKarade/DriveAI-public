@@ -2358,4 +2358,56 @@ test.describe('Tier 4 — Parcours utilisateurs bout-en-bout S1 à S6', () => {
 
     verifierAucuneErreur(journal);
   });
+
+  test('Lot 4B-2 @lot-4b-2 — Fiches 360°, Checklists/Packs, Questions IA, Règles 1 phrase, Actions semaine & 320px@24px', async ({ page }, testInfo) => {
+    const journal = await preparerApp(page, testInfo, { theme: 'clair' });
+    await allerSection(page, testInfo, 'Copilote');
+
+    await expect(page.getByText('Priorités de la semaine')).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Checklists & changement de vie/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Fiches 360° par sujet/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Règles en 1 phrase/ })).toBeVisible();
+
+    // #18 Question IA
+    await page.getByPlaceholder('Poser une question sur vos documents…').fill('Où est mon bail ?');
+    await page.getByRole('button', { name: 'Demander', exact: true }).click();
+    await expect(page.getByText(/2 document\(s\) pertinents trouvés/)).toBeVisible();
+
+    // #13–#15 Checklist + Pack 1-clic
+    const cb = page.getByRole('checkbox', { name: /Assurance habitation/ });
+    await expect(cb).toHaveAttribute('aria-checked', 'false');
+    await cb.click();
+    await expect(cb).toHaveAttribute('aria-checked', 'true');
+    await page.getByRole('button', { name: 'Créer le pack 1-clic' }).first().click();
+    await expect(page.getByRole('link', { name: /Ouvrir le pack/ })).toBeVisible();
+
+    // #17 Fiches 360° : 04 · Immigration & Anna en lecture seule + Pack autorisé
+    await page.getByRole('tab', { name: /04 · Immigration/ }).click();
+    await expect(page.getByText('Lecture seule').first()).toBeVisible();
+    await page.getByRole('tab', { name: /Anna/ }).click();
+    await expect(page.getByText('2026-06-12_Dossier_Anna_Exemple.pdf')).toBeVisible();
+
+    // #19 Règles en 1 phrase
+    await page.getByPlaceholder('Ex. : classer les factures Gaz dans Finances').fill('Classer factures eau dans Finances');
+    await page.getByRole('button', { name: 'Ajouter', exact: true }).click();
+    await expect(page.getByText('Classer factures eau dans Finances')).toBeVisible();
+    await page.getByRole('button', { name: 'Mode auto', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Supprimer', exact: true }).first().click();
+
+    await auditerCiblesTactiles(page, `${testInfo.project.name}/Lot4B2/Copilote`);
+    if (testInfo.project.name === 'tel') {
+      await page.setViewportSize({ width: 320, height: 568 });
+      await page.evaluate(() => { document.documentElement.style.fontSize = '24px'; });
+      await stabiliserRendu(page);
+    }
+    const deb = await mesurerDebordement(page);
+    expect(deb.page).toBeLessThanOrEqual(0);
+    expect(deb.horsCarte).toBeLessThanOrEqual(1);
+    if (testInfo.project.name === 'tel') {
+      await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
+      await page.setViewportSize({ width: 390, height: 844 });
+    }
+
+    verifierAucuneErreur(journal);
+  });
 });

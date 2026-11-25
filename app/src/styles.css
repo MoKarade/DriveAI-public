@@ -1022,3 +1022,19 @@ button.ligne.texte:not(:disabled):hover, .ligne button.t.texte:not(:disabled):ho
 }
 .copilote-vue .prop-tete b { min-width: 0; overflow-wrap: anywhere; }
 .copilote-total-argent { background: var(--gf-vert-fond); color: var(--gf-vert); border: 1px solid var(--gf-vert-bordure); }
+.copilote-vue form.recherche { min-width: 0; max-width: 100%; }
+.copilote-liste { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.86rem; min-width: 0; }
+.copilote-liste li { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.4rem; min-width: 0; overflow-wrap: anywhere; }
+.copilote-checklist { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
+.copilote-check-item {
+  display: flex; align-items: center; gap: 0.55rem; width: 100%; min-height: 44px; min-width: 44px;
+  padding: 0.45rem 0.7rem; text-align: left; font-weight: 500; white-space: normal; overflow-wrap: anywhere;
+  background: var(--carte-douce); color: var(--texte); border: 1px solid var(--bordure); border-radius: var(--r-m);
+}
+.copilote-check-lib { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
+.copilote-case {
+  width: 20px; height: 20px; flex: 0 0 auto; border-radius: 6px; border: 1px solid var(--bordure-champ);
+  background: var(--fond); display: inline-grid; place-items: center;
+}
+.copilote-case.coche { background: var(--gf-vert-fond); border-color: var(--gf-vert-bordure); color: var(--gf-vert); }
+.fiche360-stats { display: flex; flex-wrap: wrap; gap: 0.45rem 0.9rem; font-size: 0.86rem; color: var(--texte-doux); min-width: 0; }

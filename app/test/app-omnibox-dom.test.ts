@@ -107,6 +107,10 @@ vi.mock('../src/google', () => ({
   demanderPassageMoteur: spiesGoogle.demanderPassageMoteur,
   annulerActionMoteur: spiesGoogle.annulerActionMoteur,
   executerDecisionCopilote: vi.fn(async (id: string) => ({ ok: true, id, statut: 'appliqué', actionIds: [], nbValidations: 1, proposerAuto: false, message: 'OK' })),
+  creerPackCopilote: vi.fn(async () => ({ ok: true, dossierId: 'p-1', dossierUrl: 'https://drive.google.com/drive/folders/p-1', nbRaccourcis: 2, message: 'OK' })),
+  majChecklistCopilote: vi.fn(async () => ({ ok: true, checklistId: 'chk-1', statut: 'actif' as const, message: 'OK' })),
+  poserQuestionCopilote: vi.fn(async () => ({ ok: true, reponse: 'OK', llmUtilise: false, sources: [] })),
+  gererRegleCopilote: vi.fn(async () => ({ ok: true, regleId: 'reg-1', auto: false, message: 'OK' })),
   viderCachePlages: spiesGoogle.viderCachePlages,
 }));
 

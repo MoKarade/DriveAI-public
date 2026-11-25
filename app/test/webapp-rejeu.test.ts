@@ -273,4 +273,48 @@ describe('les contrats publics que le refactor devait préserver', () => {
     vi.stubGlobal('fetch', vi.fn(async () => reponse(200, { ok: false, erreur: 'carte introuvable' })));
     await expect(executerDecisionCopilote('cop-x', 'ignorer')).rejects.toThrow('carte introuvable');
   });
+
+  it('creerPackCopilote, majChecklistCopilote, poserQuestionCopilote et gererRegleCopilote appellent WebApp en rejouable et lèvent si ok:false', async () => {
+    const { creerPackCopilote, majChecklistCopilote, poserQuestionCopilote, gererRegleCopilote } = await import('../src/google');
+    const faux = vi.fn<typeof fetch>(async () => reponse(200, { ok: true, dossierId: 'd1', dossierUrl: 'https://drive.google.com/drive/folders/d1', nbRaccourcis: 2, checklistId: 'chk-1', statut: 'actif', reponse: 'Réponse test', llmUtilise: true, sources: [], regleId: 'reg-1', auto: false, message: 'OK' }));
+    vi.stubGlobal('fetch', faux);
+
+    expect((await creerPackCopilote({ pack: 'logement', fileIds: ['f1'] })).nbRaccourcis).toBe(2);
+    expect(String(faux.mock.calls[0]?.[0])).toContain('action=copilote-pack');
+
+    expect((await majChecklistCopilote({ checklistId: 'chk-1', item: 'bail', coche: true })).statut).toBe('actif');
+    expect(String(faux.mock.calls[1]?.[0])).toContain('action=copilote-checklist');
+
+    expect((await poserQuestionCopilote('Où est mon bail ?')).reponse).toBe('Réponse test');
+    expect(String(faux.mock.calls[2]?.[0])).toContain('action=copilote-question');
+
+    expect((await gererRegleCopilote({ mode: 'creer', phrase: 'Classer gaz dans Finances' })).regleId).toBe('reg-1');
+    expect(String(faux.mock.calls[3]?.[0])).toContain('action=copilote-regle');
+
+    vi.stubGlobal('fetch', vi.fn(async () => reponse(200, { ok: false, erreur: 'refus test' })));
+    await expect(creerPackCopilote({ pack: 'x' })).rejects.toThrow('refus test');
+    await expect(majChecklistCopilote({ checklistId: 'c' })).rejects.toThrow('refus test');
+    await expect(poserQuestionCopilote('q')).rejects.toThrow('refus test');
+    await expect(gererRegleCopilote({ mode: 'supprimer-auto', regleId: 'r' })).rejects.toThrow('refus test');
+  });
+
+  it('MODE_MOCK : creerPackCopilote, majChecklistCopilote, poserQuestionCopilote et gererRegleCopilote répondent sans fetch', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_E2E_MOCK', 'true');
+    const fetchInterdit = vi.fn(async () => { throw new Error('réseau interdit'); });
+    vi.stubGlobal('fetch', fetchInterdit);
+    try {
+      const { creerPackCopilote, majChecklistCopilote, poserQuestionCopilote, gererRegleCopilote } = await import('../src/google');
+      expect((await creerPackCopilote({ pack: 'logement' })).ok).toBe(true);
+      expect((await majChecklistCopilote({ checklistId: 'chk-1', coche: true })).statut).toBe('terminé');
+      expect((await majChecklistCopilote({ demarche: 'Logement', coche: false })).statut).toBe('actif');
+      expect((await poserQuestionCopilote('Où est mon bail ?')).ok).toBe(true);
+      expect((await gererRegleCopilote({ mode: 'basculer-auto', regleId: 'r1' })).auto).toBe(true);
+      expect((await gererRegleCopilote({ mode: 'supprimer-auto', regleId: 'r1' })).ok).toBe(true);
+      expect(fetchInterdit).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  });
 });

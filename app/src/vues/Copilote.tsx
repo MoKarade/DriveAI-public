@@ -3,17 +3,14 @@
  * et fil « Ce qui a bougé dans ton Drive » #4 avec filtres rapides).
  */
 
-import { Fragment, useState } from 'react';
+import { Fragment, useState, type FormEvent } from 'react';
 import type { Section } from '../navigation';
 import { useEtatGlobal } from '../etatGlobal';
-import { annulerActionMoteur, executerDecisionCopilote, type DecisionCopilote } from '../google';
+import { annulerActionMoteur, creerPackCopilote, executerDecisionCopilote, gererRegleCopilote, majChecklistCopilote, poserQuestionCopilote, type DecisionCopilote, type ReponseCopilotePack, type ReponseCopiloteQuestion } from '../google';
 import { BanniereErreur, EntetePage, IndicateurChargement } from '../composants/UI';
+import { Fiche360 } from '../composants/Fiche360';
 import { Icone, type NomIcone } from '../composants/Icone';
-import {
-  construireVueSignauxCopilote, extraireMouvementsDrive, filtrerMouvementsDrive, formaterMontantSignal,
-  interpreterCartesCopilote, interpreterLiens, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote,
-  type CarteCopilote, type CategorieMouvementDrive, type FiltreMouvementDrive, type MouvementDrive, type SignalRepli, type TypeCarteCopilote,
-} from '../copilote';
+import { construireActionsSemaine, construireFiches360, construireVueSignauxCopilote, extraireMouvementsDrive, fileIdsPourChecklist, filtrerMouvementsDrive, formaterMontantSignal, interpreterCartesCopilote, interpreterChecklistsCopilote, interpreterEntites, interpreterLiens, interpreterReglesCopilote, interpreterSignaux, liensPourCarte, peutPasserEnAuto, syntheseSemaineCopilote, urlDriveSure, type CarteCopilote, type CategorieMouvementDrive, type ChecklistCopilote, type FiltreMouvementDrive, type MouvementDrive, type RegleCopilote, type SignalRepli, type TypeCarteCopilote } from '../copilote';
 import { formaterDateCourte } from '../explorateur';
 import { t, type CleTexte, type Langue } from '../i18n';
 
@@ -56,6 +53,13 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
   const [statutsLocaux, setStatutsLocaux] = useState<Record<string, string>>({});
   const [retour, setRetour] = useState<{ texte: string; actionIds: string[] } | null>(null);
   const [erreurAction, setErreurAction] = useState('');
+  const [question, setQuestion] = useState('');
+  const [reponseQ, setReponseQ] = useState<ReponseCopiloteQuestion | null>(null);
+  const [cochesLocaux, setCochesLocaux] = useState<Record<string, boolean>>({});
+  const [packsCrees, setPacksCrees] = useState<Record<string, ReponseCopilotePack>>({});
+  const [phraseRegle, setPhraseRegle] = useState('');
+  const [reglesLocaux, setReglesLocaux] = useState<Record<string, { auto?: boolean; supprime?: boolean }>>({});
+  const [reglesCreees, setReglesCreees] = useState<RegleCopilote[]>([]);
   if (!donnees) return <IndicateurChargement langue={langue} />;
 
   const locale = langue === 'fr' ? 'fr-CA' : 'en-CA';
@@ -64,7 +68,14 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
   const mouvements = tousMouvements.slice(0, 50);
   const visibles = filtrerMouvementsDrive(mouvements, filtre);
   const liens = interpreterLiens(donnees.liensBrut);
-  const vue = construireVueSignauxCopilote(interpreterCartesCopilote(donnees.copiloteBrut), interpreterSignaux(donnees.signauxBrut), statutsLocaux);
+  const signaux = interpreterSignaux(donnees.signauxBrut);
+  const vue = construireVueSignauxCopilote(interpreterCartesCopilote(donnees.copiloteBrut), signaux, statutsLocaux);
+  const checklists = interpreterChecklistsCopilote(donnees.copiloteBrut, cochesLocaux);
+  const fiches = construireFiches360({ index: donnees.index, signaux, liens, entites: interpreterEntites(donnees.entitesBrut) });
+  const reglesBase = interpreterReglesCopilote(donnees.copiloteBrut, reglesLocaux);
+  const idsBase = new Set(reglesBase.map((r) => r.id));
+  const regles = [...reglesCreees.filter((r) => !idsBase.has(r.id) && !reglesLocaux[r.id]?.supprime).map((r) => ({ ...r, auto: reglesLocaux[r.id]?.auto ?? r.auto })), ...reglesBase];
+  const actionsSemaine = construireActionsSemaine({ vueSignaux: vue, checklists, regles, fiches });
   const repliExp = vue.signauxRepli.filter((s) => s.section === 'expiration'), repliArg = vue.signauxRepli.filter((s) => s.section === 'argent');
   const totalArgent = vue.totauxAReclamer.map((x) => formaterMontantSignal(x.montant, x.devise, locale)).join(' + ');
   const rendreRepli = (s: SignalRepli) => (
@@ -89,6 +100,28 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
     for (const aid of actionIds) await annulerActionMoteur(aid);
     setRetour({ texte: t('actionAnnuleeOk', langue), actionIds: [] });
   }) : Promise.resolve();
+  const soumettreQuestion = (e: FormEvent) => { e.preventDefault(); const q = question.trim().slice(0, 300); if (q) void executer('question', async () => setReponseQ(await poserQuestionCopilote(q))); };
+  const basculerCheck = (c: ChecklistCopilote, cle: string, coche: boolean) => executer(`chk-${c.id}-${cle}`, async () => {
+    const rep = await majChecklistCopilote({ checklistId: c.id, demarche: c.demarche, item: cle, coche });
+    setCochesLocaux((prev) => ({ ...prev, [`${c.id}|${cle}`]: coche })); setRetour({ texte: rep.message || t('copiloteActionOk', langue), actionIds: [] });
+  });
+  const lancerPack = (cle: string, pack: string, fileIds?: string[], titre?: string) => executer(`pack-${cle}`, async () => {
+    const rep = await creerPackCopilote({ pack, ...(fileIds?.length ? { fileIds } : {}), ...(titre ? { titre } : {}) });
+    setPacksCrees((prev) => ({ ...prev, [cle]: rep })); setRetour({ texte: rep.message || t('copiloteActionOk', langue), actionIds: [] });
+  });
+  const soumettreRegle = (e: FormEvent) => {
+    e.preventDefault(); const p = phraseRegle.trim().slice(0, 240);
+    if (p.length >= 5) void executer('regle-creer', async () => {
+      const rep = await gererRegleCopilote({ mode: 'creer', phrase: p }); setPhraseRegle('');
+      if (rep.regleId) setReglesCreees((prev) => [{ id: rep.regleId!, phrase: p, domaine: '', chemin: '', auto: Boolean(rep.auto), validations: 0, statut: rep.auto ? 'auto' : 'proposé', canal: 'les-deux', action: 'deplacer', zoneProtegee: false }, ...prev.filter((x) => x.id !== rep.regleId)]);
+      setRetour({ texte: rep.message || t('copiloteActionOk', langue), actionIds: [] });
+    });
+  };
+  const agirRegle = (r: RegleCopilote, mode: 'basculer-auto' | 'supprimer-auto') => executer(`reg-${r.id}`, async () => {
+    const rep = await gererRegleCopilote({ mode, regleId: r.id });
+    setReglesLocaux((prev) => ({ ...prev, [r.id]: mode === 'supprimer-auto' ? { supprime: true } : { auto: rep.auto ?? !r.auto } }));
+    setRetour({ texte: rep.message || t('copiloteActionOk', langue), actionIds: [] });
+  });
 
   return (
     <div className="colonnes copilote-vue">
@@ -101,6 +134,10 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
           <div className="tuile"><b>{synthese.dossiers}</b><small>{t('copiloteStatDossiers', langue)}</small></div>
           <div className="tuile"><b>{synthese.apprentissages}</b><small>{t('copiloteStatApprentissages', langue)}</small></div>
         </div>
+        {actionsSemaine.length > 0 && <>
+          <p className="explication"><b>{t('copiloteSemaineActions', langue)}</b></p>
+          <ul className="copilote-liste">{actionsSemaine.map((a) => <li key={a.id}><span className={'pastille ' + (a.priorite === 1 ? 'attn' : a.priorite === 2 ? 'cat' : 'douce')}>P{a.priorite}</span><span><b>{a.titre}</b>{a.detail ? ` · ${a.detail}` : ''}</span></li>)}</ul>
+        </>}
         <div className="copilote-pied">
           <p className="explication">{t('copiloteSemaineNote', langue)}</p>
           <button type="button" className="bouton-ligne" onClick={() => onAller('documents')}>
@@ -109,10 +146,25 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
         </div>
       </section>
 
+      <BanniereErreur langue={langue} erreur={erreurAction} onFermer={() => setErreurAction('')} />
+      {retour && <p className="bandeau-ok" role="status"><span>{retour.texte}</span>{retour.actionIds.length > 0 && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void annulerDerniere(retour.actionIds)}>{t('annulerAction', langue)}</button>}</p>}
+
+      <section className="copilote-cartes">
+        <form className="recherche" onSubmit={soumettreQuestion}>
+          <Icone nom="recherche" className="chev" />
+          <input type="search" maxLength={300} value={question} onChange={(e) => setQuestion(e.target.value)} placeholder={t('copiloteQuestionPlaceholder', langue)} aria-label={t('copiloteQuestionPlaceholder', langue)} />
+          <button type="submit" className="recherche-soumettre" disabled={enCoursId !== null || !question.trim()}>{t('copiloteQuestionBtn', langue)}</button>
+        </form>
+        {reponseQ && (
+          <article className="prop-carte">
+            <div className="prop-tete"><Icone nom="copilote" className="accent" /><b>{reponseQ.reponse}</b><span className="sp" /><span className="pastille douce">{t(reponseQ.llmUtilise ? 'copiloteQuestionIa' : 'copiloteQuestionLocal', langue)}</span></div>
+            {reponseQ.sources && reponseQ.sources.length > 0 && <div className="copilote-liens">{reponseQ.sources.map((s, i) => { const u = urlDriveSure(s.lien); return u ? <a key={`${s.fileId ?? i}`} className="bouton-ligne" href={u} target="_blank" rel="noreferrer">{s.nom} <Icone nom="externe" className="chev" /></a> : <span key={`${s.fileId ?? i}`} className="pastille douce">{s.nom}</span>; })}</div>}
+          </article>
+        )}
+      </section>
+
       <section className="copilote-cartes">
         <h2 className="titre-liste">{t('copiloteProactifTitre', langue)}{vue.propositions.length > 0 && <span className="badge">{vue.propositions.length}</span>}</h2>
-        <BanniereErreur langue={langue} erreur={erreurAction} onFermer={() => setErreurAction('')} />
-        {retour && <p className="bandeau-ok" role="status"><span>{retour.texte}</span>{retour.actionIds.length > 0 && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void annulerDerniere(retour.actionIds)}>{t('annulerAction', langue)}</button>}</p>}
         {(() => {
           const rendreCarte = (c: CarteCopilote) => {
             const cfg = TYPES_CARTE_UI[c.type], assoc = liensPourCarte(c, liens), echs = Array.isArray(c.action.echeances) ? c.action.echeances : [];
@@ -147,6 +199,41 @@ export function Copilote({ langue, onAller }: { langue: Langue; onAller: (s: Sec
             ))}
           </>);
         })()}
+      </section>
+
+      <section className="copilote-cartes">
+        <h2 className="titre-liste">{t('copiloteChecklistsTitre', langue)}{checklists.length > 0 && <span className="badge">{checklists.length}</span>}</h2>
+        {checklists.length === 0 ? <p className="explication">{t('copiloteChecklistsVide', langue)}</p> : checklists.map((c) => {
+          const packRes = packsCrees[c.id], packUrl = urlDriveSure(packRes?.dossierUrl), fids = fileIdsPourChecklist(c, donnees.index);
+          return (<article key={c.id} className="prop-carte">
+            <div className="prop-tete"><Icone nom="coche" className="accent" /><b>{c.titre}</b><span className="sp" /><span className="pastille douce">{c.faits}/{c.total}</span>{c.termine && <span className="pastille ok">{t('copiloteTermineBadge', langue)}</span>}</div>
+            <div className="copilote-checklist">{c.items.map((it) => (
+              <button key={it.cle} type="button" role="checkbox" aria-checked={it.fait} className="copilote-check-item" disabled={enCoursId !== null} onClick={() => void basculerCheck(c, it.cle, !it.fait)}>
+                <span className={'copilote-case' + (it.fait ? ' coche' : '')}>{it.fait && <Icone nom="coche" className="chev" />}</span>
+                <span className="copilote-check-lib">{it.libelle}{it.nb ? ` (${it.nb})` : ''}</span>
+              </button>
+            ))}</div>
+            <div className="prop-actions">
+              {(c.type !== 'changement-vie' || fids.length > 0) && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void lancerPack(c.id, c.packCle, fids, c.titre)}><Icone nom="dossier" className="chev" /> {t('copilotePackBtn', langue)}</button>}
+              {packUrl && <a className="bouton-ligne" href={packUrl} target="_blank" rel="noreferrer">{t('copilotePackPret', langue).replace('{n}', String(packRes?.nbRaccourcis ?? 0))} <Icone nom="externe" className="chev" /></a>}
+            </div>
+          </article>);
+        })}
+      </section>
+      <Fiche360 langue={langue} locale={locale} fiches={fiches} enCours={enCoursId !== null} packsCrees={packsCrees} onCreerPack={(cle, pack, fids, titre) => void lancerPack(cle, pack, fids, titre)} />
+      <section className="copilote-cartes">
+        <h2 className="titre-liste">{t('copiloteReglesTitre', langue)}{regles.length > 0 && <span className="badge">{regles.length}</span>}</h2>
+        <form className="recherche" onSubmit={soumettreRegle}><Icone nom="plus" className="chev" /><input type="text" maxLength={240} value={phraseRegle} onChange={(e) => setPhraseRegle(e.target.value)} placeholder={t('copiloteReglePlaceholder', langue)} aria-label={t('copiloteReglePlaceholder', langue)} /><button type="submit" className="recherche-soumettre" disabled={enCoursId !== null || phraseRegle.trim().length < 5}>{t('copiloteRegleCreer', langue)}</button></form>
+        {regles.length === 0 ? <p className="explication">{t('copiloteReglesVide', langue)}</p> : regles.map((r) => (
+          <article key={r.id} className="prop-carte">
+            <div className="prop-tete"><Icone nom="copilote" className="accent" /><b>{r.phrase}</b><span className="sp" /><span className="pastille douce">{t('copiloteRegleVal', langue).replace('{n}', String(r.validations))}</span><span className={r.auto ? 'pastille ok' : 'pastille douce'}>{t(r.auto ? 'copiloteBadgeAuto' : 'copiloteReglePropose', langue)}</span>{r.zoneProtegee && <span className="pastille attn"><Icone nom="cadenas" className="chev" /> {t('copiloteLectureSeule', langue)}</span>}</div>
+            {(r.chemin || r.domaine) && <div className="prop-chemin">{r.chemin || r.domaine}</div>}
+            <div className="prop-actions">
+              {!r.zoneProtegee && <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agirRegle(r, 'basculer-auto')}>{t(r.auto ? 'copiloteRegleCouper' : 'copiloteRegleActiver', langue)}</button>}
+              <button type="button" className="bouton-ligne" disabled={enCoursId !== null} onClick={() => void agirRegle(r, 'supprimer-auto')}>{t('copiloteRegleSuppr', langue)}</button>
+            </div>
+          </article>
+        ))}
       </section>
 
       <section>
