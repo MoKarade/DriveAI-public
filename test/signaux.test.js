@@ -376,3 +376,142 @@ test('Non-régression Lot 3A : booléen garantie, JSON coût corrompu fail-close
   const pmMars = plain(c0.detecterPiecesManquantesPure_(idxPieces, [], new Date('2026-03-15T12:00:00Z'), 40));
   assert.deepStrictEqual(pmMars.map((x) => x.cle), ['releve-bellerives'], '2026-02-30 ne retombe pas en 2026-02-28');
 });
+
+test('Non-régression R3 : epingle|/agenda|/agenda-exp| ne masquent pas déplacé, doublon reste bloqué', () => {
+  const fidDep = 'FICTIF_EPINGLE_DEPL_001';
+  const fidDoub = 'FICTIF_DOUB_MASQ_00001';
+  const { c, sh, props } = ctxSignaux({
+    sheets: {
+      Index: [
+        ['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId'],
+        ['drive|' + fidDoub, new Date(), '2026-04-01_Facture_Fictif.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fidDoub],
+        ['drive|' + fidDoub, new Date(), '2026-04-01_Facture_Fictif.pdf', '02 · Finances', '02 · Finances', 'doublon', '', '', fidDoub],
+        ['drive|' + fidDep, new Date(), '2026-04-05_Assurance_Fictif.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule', 'déplacé', '', '', fidDep],
+        ['epingle|' + fidDep, new Date(), '2026-04-05_Assurance_Fictif.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule', 'épinglé', '', '', fidDep],
+        ['agenda|' + fidDep + '|2027-04-05', new Date(), '2026-04-05_Assurance_Fictif.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule', 'agenda', '', '', fidDep],
+        ['agenda-exp|' + fidDep + '|90|2027-04-05', new Date(), '2026-04-05_Assurance_Fictif.pdf', '03 · Logement & véhicule', '03 · Logement & véhicule', 'agenda', '', '', fidDep],
+      ],
+    },
+    files: {
+      [fidDoub]: { name: '2026-04-01_Facture_Fictif.pdf', mimeType: 'text/plain', texte: 'Doublon ignoré' },
+      [fidDep]: { name: '2026-04-05_Assurance_Fictif.pdf', mimeType: 'text/plain', texte: 'Assurance fictive échéance 2027-04-05' },
+    },
+  });
+  c.syntheseCoutMois_ = () => ({ appels: 1, dollars: 1.0 });
+  const appeles = [];
+  c.appelAnthropicTexte_ = (m, sys, contenu) => {
+    appeles.push(contenu);
+    return JSON.stringify({ categorie: 'Assurance', date_expiration: '2027-04-05', fournisseur: 'AssureurFictif' });
+  };
+  const auj = new Date().toISOString().slice(0, 10).replace(/-/g, '/');
+  assert.strictEqual(c.rattraperSignauxCopilote_(sh.sheets.Index.slice(1), () => false), 1);
+  assert.strictEqual(appeles.length, 1, 'seul fidDep appelle le LLM, fidDoub reste bloqué à 0 appel');
+  assert.ok(appeles[0].includes('2026-04-05_Assurance_Fictif.pdf'));
+  assert.strictEqual(props.DriveAI_SIGNAUX_JOUR, auj + '|1');
+  const sig = c.lireSignaux_().find((s) => s.fileId === fidDep);
+  assert.ok(sig && sig.dateExpiration === '2027-04-05' && sig.fournisseur === 'AssureurFictif');
+});
+
+test('Non-régression R3 : bornes 3/run + 15/j sur {bad/null hors panne, et break immédiat sur estPannePlateforme_()', () => {
+  const auj = new Date().toISOString().slice(0, 10).replace(/-/g, '/');
+
+  // 1. 5 docs '{bad' → Run 1 = 3 appels (auj|3), Run 2 = 2 appels (auj|5), Run 3 = 0 appel
+  const idxBad = [['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId']];
+  const filesBad = {};
+  for (let i = 1; i <= 5; i++) {
+    const fid = 'FICTIF_BAD_JSON_00000' + i;
+    idxBad.push(['drive|' + fid, new Date(), '2026-07-0' + i + '_Doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fid]);
+    filesBad[fid] = { name: '2026-07-0' + i + '_Doc.pdf', mimeType: 'text/plain', texte: 'Contenu bad ' + i };
+  }
+  const { c: cBad, sh: shBad, props: pBad } = ctxSignaux({ sheets: { Index: idxBad }, files: filesBad });
+  cBad.syntheseCoutMois_ = () => ({ appels: 1, dollars: 1.0 });
+  let appelsBad = 0;
+  cBad.appelAnthropicTexte_ = () => { appelsBad++; return '{bad'; };
+  assert.strictEqual(cBad.rattraperSignauxCopilote_(shBad.sheets.Index.slice(1), () => false), 3);
+  assert.strictEqual(appelsBad, 3);
+  assert.strictEqual(pBad.DriveAI_SIGNAUX_JOUR, auj + '|3');
+  assert.strictEqual(cBad.lireSignaux_().filter((s) => s.categorie === 'aucun').length, 3);
+
+  assert.strictEqual(cBad.rattraperSignauxCopilote_(shBad.sheets.Index.slice(1), () => false), 2);
+  assert.strictEqual(appelsBad, 5);
+  assert.strictEqual(pBad.DriveAI_SIGNAUX_JOUR, auj + '|5');
+  assert.strictEqual(cBad.lireSignaux_().filter((s) => s.categorie === 'aucun').length, 5);
+
+  assert.strictEqual(cBad.rattraperSignauxCopilote_(shBad.sheets.Index.slice(1), () => false), 0);
+  assert.strictEqual(appelsBad, 5, 'aucune boucle infinie sur {bad');
+
+  // 2. 5 docs null (hors panne plateforme) → Run 1 = 3 appels (auj|3), Run 2 = 2 appels (auj|5), Run 3 = 0 appel ; puis plafond 15/j respecté
+  const idxNull = [['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId']];
+  const filesNull = {};
+  for (let i = 1; i <= 5; i++) {
+    const fid = 'FICTIF_NULL_RET_00000' + i;
+    idxNull.push(['drive|' + fid, new Date(), '2026-08-0' + i + '_Doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fid]);
+    filesNull[fid] = { name: '2026-08-0' + i + '_Doc.pdf', mimeType: 'text/plain', texte: 'Contenu null ' + i };
+  }
+  const { c: cNull, sh: shNull, props: pNull, files: fNull } = ctxSignaux({ sheets: { Index: idxNull }, files: filesNull });
+  cNull.syntheseCoutMois_ = () => ({ appels: 1, dollars: 1.0 });
+  let appelsNull = 0;
+  cNull.appelAnthropicTexte_ = () => { appelsNull++; return null; };
+  assert.strictEqual(cNull.rattraperSignauxCopilote_(shNull.sheets.Index.slice(1), () => false), 3);
+  assert.strictEqual(appelsNull, 3);
+  assert.strictEqual(pNull.DriveAI_SIGNAUX_JOUR, auj + '|3');
+
+  assert.strictEqual(cNull.rattraperSignauxCopilote_(shNull.sheets.Index.slice(1), () => false), 2);
+  assert.strictEqual(appelsNull, 5);
+  assert.strictEqual(pNull.DriveAI_SIGNAUX_JOUR, auj + '|5');
+
+  assert.strictEqual(cNull.rattraperSignauxCopilote_(shNull.sheets.Index.slice(1), () => false), 0);
+  assert.strictEqual(appelsNull, 5, 'aucune boucle infinie sur null hors panne');
+
+  // Plafond 15/j : départ à auj|13 avec 3 nouveaux docs null → exactement 2 appels jusqu'à auj|15
+  for (let i = 1; i <= 3; i++) {
+    const fid = 'FICTIF_QUOTA_J_00000' + i;
+    shNull.sheets.Index.push(['drive|' + fid, new Date(), '2026-08-1' + i + '_Doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fid]);
+    fNull[fid] = { name: '2026-08-1' + i + '_Doc.pdf', mimeType: 'text/plain', texte: 'Contenu quota ' + i };
+  }
+  pNull.DriveAI_SIGNAUX_JOUR = auj + '|13';
+  assert.strictEqual(cNull.rattraperSignauxCopilote_(shNull.sheets.Index.slice(1), () => false), 2);
+  assert.strictEqual(appelsNull, 7);
+  assert.strictEqual(pNull.DriveAI_SIGNAUX_JOUR, auj + '|15');
+
+  // 3. estPannePlateforme_() : déjà active (0 appel) et déclenchée au 1er appel → break immédiat sans marquer 'aucun', puis rattrapage après réinitialisation
+  const idxPanne = [['Clé', 'Traité le', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId']];
+  const filesPanne = {};
+  for (let i = 1; i <= 3; i++) {
+    const fid = 'FICTIF_PANNE_RAT_0000' + i;
+    idxPanne.push(['drive|' + fid, new Date(), '2026-09-0' + i + '_Doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', fid]);
+    filesPanne[fid] = { name: '2026-09-0' + i + '_Doc.pdf', mimeType: 'text/plain', texte: 'Contenu panne ' + i };
+  }
+  const { c: cPanne, sh: shPanne, props: pPanne } = ctxSignaux({ sheets: { Index: idxPanne }, files: filesPanne });
+  cPanne.syntheseCoutMois_ = () => ({ appels: 1, dollars: 1.0 });
+  let appelsPanne = 0;
+
+  // Déjà active avant le run → 0 appel
+  cPanne.poserPannePlateforme_('panne déjà active');
+  cPanne.appelAnthropicTexte_ = () => { appelsPanne++; return '{}'; };
+  assert.strictEqual(cPanne.rattraperSignauxCopilote_(shPanne.sheets.Index.slice(1), () => false), 0);
+  assert.strictEqual(appelsPanne, 0);
+
+  // Déclenchée au 1er appel → break immédiat (1 appel, 0 ligne 'aucun', DriveAI_SIGNAUX_JOUR inchangé)
+  cPanne.reinitialiserPannePlateforme_();
+  cPanne.appelAnthropicTexte_ = () => {
+    appelsPanne++;
+    cPanne.poserPannePlateforme_('crédit épuisé test');
+    return null;
+  };
+  assert.strictEqual(cPanne.rattraperSignauxCopilote_(shPanne.sheets.Index.slice(1), () => false), 0);
+  assert.strictEqual(appelsPanne, 1, 'break immédiat dès le 1er appel qui déclenche la panne');
+  assert.strictEqual(cPanne.lireSignaux_().length, 0, 'zéro ligne aucun inscrite pendant une panne plateforme');
+  assert.strictEqual(pPanne.DriveAI_SIGNAUX_JOUR, undefined, 'compteur jour inchangé sur panne plateforme');
+
+  // Rattrapage réussi au run suivant après reinitialiserPannePlateforme_()
+  cPanne.reinitialiserPannePlateforme_();
+  cPanne.appelAnthropicTexte_ = () => {
+    appelsPanne++;
+    return JSON.stringify({ categorie: 'Facture', fournisseur: 'FournisseurFictif', montant: 42, devise: 'CAD' });
+  };
+  assert.strictEqual(cPanne.rattraperSignauxCopilote_(shPanne.sheets.Index.slice(1), () => false), 3);
+  assert.strictEqual(appelsPanne, 4);
+  assert.strictEqual(pPanne.DriveAI_SIGNAUX_JOUR, auj + '|3');
+  assert.strictEqual(cPanne.lireSignaux_().length, 3);
+});

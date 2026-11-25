@@ -146,7 +146,9 @@ function rattraperSignauxCopilote_(indexLignes, depasse) {
   lireSignaux_().forEach(function (s) { vus[s.fileId] = true; });
   for (var i = lignes.length - 1; i >= 0 && traites < restant; i--) {
     if ((depasse && depasse()) || budgetSignauxDepasse_() || (typeof estPannePlateforme_ === 'function' && estPannePlateforme_())) break;
-    var l = lignes[i], fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(l) : String(l[8] || '').trim();
+    var l = lignes[i], cle = String(l[0] || '').trim();
+    if (cle.indexOf('epingle|') === 0 || cle.indexOf('agenda') === 0) continue;
+    var fid = typeof fileIdDeLigneIndex_ === 'function' ? fileIdDeLigneIndex_(l) : String(l[8] || '').trim();
     var nom = String(l[2] || ''), dom = String(l[3] || ''), chem = String(l[4] || ''), stat = String(l[5] || '');
     if (!fid || vus[fid]) continue;
     vus[fid] = true;
@@ -160,8 +162,9 @@ function rattraperSignauxCopilote_(indexLignes, depasse) {
       if (mime.indexOf('application/vnd.google-apps.') === 0 && typeof exporterTexteNatif_ === 'function') extrait = exporterTexteNatif_(fid, mime) || '';
       else if (typeof f.getBlob === 'function' && typeof extraireTexte_ === 'function') extrait = extraireTexte_(f.getBlob()) || '';
       var res = extraireSignalLlm_({ nomFichier: nom, chemin: chem, extrait: extrait });
-      if (!res) continue;
-      var sig = construireSignalDepuisClassif_({ fileId: fid, nom: nom, domaine: dom, chemin: chem }, res, { fileId: fid, domaine: dom, chemin: chem, nom: nom });
+      if (!res && typeof estPannePlateforme_ === 'function' && estPannePlateforme_()) break;
+      var sig = res ? construireSignalDepuisClassif_({ fileId: fid, nom: nom, domaine: dom, chemin: chem }, res, { fileId: fid, domaine: dom, chemin: chem, nom: nom })
+        : { fileId: fid, categorie: 'aucun', domaine: dom, chemin: chem };
       if (!sig.dateExpiration && sig.montant === '' && !sig.finGarantie && !sig.delaiRetour && !sig.fournisseur && !sig.categorie) sig.categorie = 'aucun';
       enregistrerSignal_(sig);
       incrementerCompteurSignauxJour_(props, auj, 1);
