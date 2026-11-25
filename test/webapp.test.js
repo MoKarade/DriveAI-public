@@ -916,4 +916,9 @@ test('doPost action=copilote-executer : secret, validation, verrou, mémo reques
   assert.strictEqual(r2.memo, true);
   assert.strictEqual(appels, 2); // cop-err (1) + cop-abc-123 (1, rejeu servi par mémo)
   assert.strictEqual(releaseCalls, 2);
+
+  const rRec = post('SECRET', { id: 'cop-rec-01', decision: 'reclame', requestId: 'reqCopiloteRec01' });
+  assert.strictEqual(rRec.ok, true);
+  assert.strictEqual(appels, 3);
+  assert.strictEqual(releaseCalls, 3);
 });

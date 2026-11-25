@@ -3,8 +3,9 @@
  */
 var COLONNES_COPILOTE = ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'Chemin', 'Titre', 'ActionJson', 'Statut', 'Validations'];
 var COPILOTE_DOSSIER_VIDES = 'Dossiers vides';
-var COPILOTE_DECISIONS = { 'executer': 1, 'ignorer': 1, 'restaurer': 1, 'passer-auto': 1, 'desactiver-auto': 1 };
+var COPILOTE_DECISIONS = { 'executer': 1, 'ignorer': 1, 'restaurer': 1, 'reclame': 1, 'passer-auto': 1, 'desactiver-auto': 1 };
 var COPILOTE_STATUTS_OUVERTS = { 'proposé': 1, 'auto': 1, 'actif': 1 };
+var COPILOTE_TYPES_SANS_AUTO = { 'alerte-corbeille': 1, 'demarche-active': 1, 'expiration': 1, 'piece-manquante': 1, 'facture-hausse': 1, 'facture-doublon': 1, 'renouvellement': 1, 'remboursement': 1, 'retour-garantie': 1 };
 
 function normaliserCopilote_(s) {
   if (typeof normaliserCle_ === 'function') return normaliserCle_(s);
@@ -54,7 +55,7 @@ function parserActionCopilote_(brut) {
   try { var o = brut && typeof brut === 'string' ? JSON.parse(brut) : null; return (o && typeof o === 'object') ? o : {}; } catch (e) { return {}; }
 }
 
-function cibleActionCopilote_(a) { return a ? String(a.sourceId || a.cibleId || a.dossierId || a.fileId || a.cle || '') : ''; }
+function cibleActionCopilote_(a) { return a ? String(a.cle || a.sourceId || a.cibleId || a.dossierId || a.fileId || '') : ''; }
 
 function correspondSujetCopilote_(sujetNorm, nom, chemin) {
   if (!sujetNorm || sujetNorm.length < 3) return false;
@@ -104,7 +105,14 @@ function enregistrerCarteCopilote_(carte) {
     if (c.type !== carte.type || (!COPILOTE_STATUTS_OUVERTS[c.statut] && c.statut !== 'ignoré')) continue;
     var memeCible = cible && cibleActionCopilote_(parserActionCopilote_(c.actionJson)) === cible;
     if (!memeCible && !((carte.type === 'cascade' || carte.type === 'demarche-active') && carte.chemin && c.chemin === carte.chemin)) continue;
-    if (c.statut === 'ignoré') return { id: '', cree: false };
+    if (c.statut === 'ignoré') {
+      if (carte.type === 'remboursement') {
+        var ancIds = {};
+        (parserActionCopilote_(c.actionJson).ids || []).forEach(function (x) { ancIds[x] = true; });
+        if ((carte.action && Array.isArray(carte.action.ids) ? carte.action.ids : []).some(function (x) { return !ancIds[x]; })) continue;
+      }
+      return { id: '', cree: false };
+    }
     if (!ouverte) ouverte = c;
   }
   if (ouverte) {
@@ -178,8 +186,7 @@ function executerDecisionCopilote_(corps) {
   var seuil = (typeof CONFIG !== 'undefined' && CONFIG.COPILOTE_SEUIL_AUTO) || 3, action = parserActionCopilote_(carte.actionJson), nbVal = carte.validations;
 
   if (decision === 'ignorer' || decision === 'desactiver-auto' || decision === 'passer-auto') {
-    if (decision === 'passer-auto' && (carte.type === 'alerte-corbeille' || carte.type === 'demarche-active' ||
-        carte.type === 'expiration' || carte.type === 'piece-manquante' || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) {
+    if (decision === 'passer-auto' && (COPILOTE_TYPES_SANS_AUTO[carte.type] || estZoneProtegeeCopilote_(carte.chemin, carte.domaine))) {
       return { ok: false, erreur: 'mode auto interdit sur cette carte' };
     }
     var ns = decision === 'ignorer' ? 'ignoré' : (decision === 'passer-auto' ? 'auto' : 'proposé');
@@ -197,6 +204,17 @@ function executerDecisionCopilote_(corps) {
     journalInfo_('Copilote', 'Document restauré hors corbeille (' + fid + ').');
     nbVal += 1; fSheet.getRange(carte.row, 9).setValue('appliqué'); fSheet.getRange(carte.row, 10).setValue(nbVal);
     return { ok: true, id: id, statut: 'appliqué', actionIds: [], nbValidations: nbVal, proposerAuto: nbVal >= seuil, message: 'Document restauré sans déplacement.' };
+  }
+
+  if (decision === 'reclame') {
+    if (carte.type !== 'remboursement') return { ok: false, erreur: 'type non réclamable' };
+    var cibles = (Array.isArray(action.ids) ? action.ids : []).concat(action.fileId ? [action.fileId] : [])
+      .map(function (x) { return String(x || '').trim(); }).filter(Boolean);
+    if (!cibles.length || typeof marquerSignauxReclames_ !== 'function') return { ok: false, erreur: 'cibles manquantes' };
+    var nbRec = marquerSignauxReclames_(cibles);
+    journalInfo_('Copilote', 'Remboursement marqué réclamé (' + nbRec + ' reçu(s)).');
+    fSheet.getRange(carte.row, 9).setValue('reclamé');
+    return { ok: true, id: id, statut: 'reclamé', actionIds: [], nbValidations: nbVal, proposerAuto: false, message: 'Marqué comme réclamé (' + nbRec + ' reçu(s)).' };
   }
 
   if (estZoneProtegeeCopilote_(carte.chemin, carte.domaine)) return { ok: false, erreur: 'zone protégée — mutation refusée' };
@@ -394,6 +412,8 @@ function executerEtapeCopilote_(estBudgetDepasse) {
   if (creees < maxRun && !depasse()) creees += detecterDemarcheEnCours_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse() && typeof detecterExpirationsCopilote_ === 'function') creees += detecterExpirationsCopilote_(depasse, maxRun - creees);
   if (creees < maxRun && !depasse() && typeof detecterPiecesManquantesCopilote_ === 'function') creees += detecterPiecesManquantesCopilote_(lignes, depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterSentinelleFacturesCopilote_ === 'function') creees += detecterSentinelleFacturesCopilote_(depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterArgentOublieCopilote_ === 'function') creees += detecterArgentOublieCopilote_(depasse, maxRun - creees);
   if (!depasse() && typeof rattraperSignauxCopilote_ === 'function') rattraperSignauxCopilote_(lignes, depasse);
   return { traitees: traitees, creees: creees };
 }

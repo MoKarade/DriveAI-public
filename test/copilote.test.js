@@ -129,7 +129,7 @@ function ctxCopilote(opts) {
   const dr = makeDriveHarness(files, folders);
   const props = Object.assign({ DriveAI_TECHNIQUE_ID: 'FICTIF_TECH' }, opts.props);
 
-  const c = load(['Config.gs', 'Entites.gs', 'DriveRest.gs', 'Maintenance.gs', 'VeilleDrive.gs', 'Fusion.gs', 'Reorg.gs', 'Actions.gs', 'Journal.gs', 'Copilote.gs'], {
+  const c = load(['Config.gs', 'Entites.gs', 'DriveRest.gs', 'Maintenance.gs', 'VeilleDrive.gs', 'Fusion.gs', 'Reorg.gs', 'Actions.gs', 'Journal.gs', 'Copilote.gs', 'Signaux.gs'], {
     DriveApp: dr.DriveApp,
     UrlFetchApp: dr.UrlFetchApp,
     ScriptApp: { getOAuthToken: () => 'JETON_FICTIF' },
@@ -638,4 +638,56 @@ test('Lot 3A Copilote : déduplication piece-manquante par a.cle, respect ignor�
   assert.strictEqual(c.executerDecisionCopilote_({ id: rExp.id, decision: 'passer-auto' }).ok, false);
   sh.sheets.Index.push(['drive|FICTIF_OK', new Date(), 'doc.pdf', '02 · Finances', '02 · Finances', 'classé', '', '', 'FICTIF_OK']);
   assert.strictEqual(typeof c.executerEtapeCopilote_(() => false).creees, 'number');
+});
+
+test('Lot 3B Copilote : decision reclame (incl. Anna/04 sans mutation Drive), blocage passer-auto et re-creation remboursement', () => {
+  const { c, sh, dr } = ctxCopilote({
+    sheets: {
+      Signaux: [
+        ['FileId', 'Categorie', 'Fournisseur', 'Domaine', 'Chemin', 'DateDoc', 'DateExpiration', 'Montant', 'Devise', 'FinGarantie', 'DelaiRetour', 'StatutReclamation'],
+        ['FICTIF_ANNA_REC_01', 'Reçu clinique', 'Clinique Exemple', 'Anna', 'Anna/Sante', '2026-11-10', '', 95, 'CAD', '', '', 'a-reclamer'],
+        ['FICTIF_IMMI_REC_02', 'Frais médical', 'Clinique IRCC', '04 · Immigration', '04 · Immigration/Santé', '2026-11-12', '', 55, 'CAD', '', '', 'a-reclamer'],
+      ],
+    },
+  });
+  c.domainesVeilleNonProteges_ = () => [];
+
+  // exécution de detecterArgentOublieCopilote_ : crée carte remboursement
+  const nb = c.detecterArgentOublieCopilote_(() => false, 10);
+  assert.strictEqual(nb, 1);
+  const carteRemb = sh.sheets.Copilote.slice(1).find((r) => r[3] === 'remboursement');
+  assert.ok(carteRemb);
+
+  // passer-auto refusé sur tous les types Lot 3B
+  ['facture-hausse', 'facture-doublon', 'renouvellement', 'remboursement', 'retour-garantie'].forEach((tp, idx) => {
+    const r = c.enregistrerCarteCopilote_({
+      categorie: 'carte', type: tp, domaine: '02 · Finances', chemin: '02 · Finances',
+      titre: 'Test ' + tp, action: { cle: 'test-' + idx },
+    });
+    const auto = c.executerDecisionCopilote_({ id: r.id || carteRemb[0], decision: 'passer-auto' });
+    assert.strictEqual(auto.ok, false, 'passer-auto bloqué sur ' + tp);
+  });
+
+  // decision reclame fonctionne même si la carte vise Anna/04 · Immigration (0 mutation Drive)
+  const repRec = c.executerDecisionCopilote_({ id: carteRemb[0], decision: 'reclame' });
+  assert.strictEqual(repRec.ok, true);
+  assert.strictEqual(repRec.statut, 'reclamé');
+  assert.strictEqual(dr.moves.length, 0);
+  assert.strictEqual(sh.sheets.Signaux[1][11], 'reclame');
+  assert.strictEqual(sh.sheets.Signaux[2][11], 'reclame');
+
+  // Re-création remboursement : une carte ignorée ne bloque PAS l'arrivée d'un nouveau reçu
+  const rIgn = c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'remboursement', domaine: '05 · Santé', chemin: '05 · Santé',
+    titre: 'Remboursement 1', action: { cle: 'remboursement|EUR', ids: ['F_EUR_1'], montantTotal: 40, devise: 'EUR', nbRecus: 1 },
+  });
+  assert.strictEqual(c.executerDecisionCopilote_({ id: rIgn.id, decision: 'ignorer' }).statut, 'ignoré');
+  assert.strictEqual(c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'remboursement', domaine: '05 · Santé', chemin: '05 · Santé',
+    titre: 'Remboursement 1', action: { cle: 'remboursement|EUR', ids: ['F_EUR_1'], montantTotal: 40, devise: 'EUR', nbRecus: 1 },
+  }).cree, false);
+  assert.strictEqual(c.enregistrerCarteCopilote_({
+    categorie: 'carte', type: 'remboursement', domaine: '05 · Santé', chemin: '05 · Santé',
+    titre: 'Remboursement 2', action: { cle: 'remboursement|EUR', ids: ['F_EUR_1', 'F_EUR_2'], montantTotal: 90, devise: 'EUR', nbRecus: 2 },
+  }).cree, true, 'un nouveau reçu recrée la carte remboursement');
 });

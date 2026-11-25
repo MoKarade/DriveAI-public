@@ -391,7 +391,7 @@ function actionCopiloteExecuter_(e) {
   var id = corps && typeof corps.id === 'string' ? corps.id.trim() : '';
   var decision = corps && typeof corps.decision === 'string' ? corps.decision.trim() : '';
   if (!id || !/^[A-Za-z0-9_-]{3,64}$/.test(id)) return { ok: false, erreur: 'id invalide' };
-  if (!{ 'executer': 1, 'restaurer': 1, 'ignorer': 1, 'passer-auto': 1, 'desactiver-auto': 1 }[decision]) {
+  if (!{ 'executer': 1, 'restaurer': 1, 'ignorer': 1, 'reclame': 1, 'passer-auto': 1, 'desactiver-auto': 1 }[decision]) {
     return { ok: false, erreur: 'decision invalide' };
   }
   var verrou = LockService.getScriptLock();
