@@ -257,7 +257,7 @@ test('#16 chercherReferencesDriveBrouillon_, contexteFil_ et genererBrouillonRep
     referencesDrive: [{ fileId: 'FICTIF_TEST_TRUNC_0001', nom: 'N'.repeat(1450), lien: lienLong }],
   });
   assert.ok(repNomLong && repNomLong.length <= 1500);
-  assert.ok(repNomLong.indexOf(lienLong) !== -1, 'URL Drive complète présente malgré ref0.nom long');
+  assert.strictEqual(new URL(repNomLong.match(/https:\/\/[^\s]+/)[0]).href, lienLong, 'URL Drive complète présente malgré ref0.nom long');
 
   const wUrlCoupe = creerContexteTriComplet({
     reponseBrouillon: JSON.stringify({ reponse: 'B'.repeat(1460) + ' ' + lienLong }),
@@ -266,7 +266,7 @@ test('#16 chercherReferencesDriveBrouillon_, contexteFil_ et genererBrouillonRep
     referencesDrive: [{ fileId: 'FICTIF_TEST_TRUNC_0001', nom: 'Facture_Hydro.pdf', lien: lienLong }],
   });
   assert.ok(repUrlCoupe && repUrlCoupe.length <= 1500);
-  assert.ok(repUrlCoupe.indexOf(lienLong) !== -1, 'URL Drive complète restaurée après troncature à 1500 car.');
+  assert.strictEqual(new URL(repUrlCoupe.match(/https:\/\/[^\s]+/)[0]).href, lienLong, 'URL Drive complète restaurée après troncature à 1500 car.');
 });
 
 test('#16 trierFil_ : injecte les pièces Drive depuis Index/Liens dans createDraftReply sans fuite Index/Journal', () => {
