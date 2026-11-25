@@ -503,3 +503,16 @@ test('Pont Drive → Gmail (#8) : purge ancienChemin, orienterPontDriveGmail_, b
   // contexteDrivePourFil_ retourne le chemin connu sans PII
   assert.strictEqual(c.contexteDrivePourFil_('Service <releves@bellerives.test>', 'Avis', [], doss, ponts, []), '02 · Finances/Compte Principal');
 });
+
+test('DossiersVie : ignore totalement 00 · Packs (normalisation, direct, construction et pont Gmail)', () => {
+  const c = load(['DossiersVie.gs']);
+  assert.strictEqual(c.normaliserCleDossierVie_('00 · Packs/2026-11-25_Logement'), null);
+  assert.strictEqual(c.normaliserCleDossierVie_('02 · Finances/00 · Packs'), null);
+  assert.strictEqual(c.normaliserCleDossierVie_('Marc/00 · Packs/Pack'), null);
+  assert.strictEqual(c.normaliserEntreeDossierVieDirect_('00 · Packs', '2026-11-25_Logement', '00 · Packs/2026-11-25_Logement'), null);
+  assert.strictEqual(plain(c.construireDossiersVie_([
+    ['k1', '2026-11-25', 'doc.pdf', '00 · Packs', '00 · Packs/2026-11-25_Logement', 'classé'],
+    ['k2', '2026-11-25', 'doc2.pdf', '02 · Finances', '02 · Finances/00 · Packs', 'classé'],
+  ])).length, 0);
+  assert.strictEqual(c.orienterPontDriveGmail_('00 · Packs', 'Logement', '00 · Packs/2026-11-25_Logement', ''), 0);
+});

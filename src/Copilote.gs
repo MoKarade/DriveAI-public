@@ -5,7 +5,7 @@ var COLONNES_COPILOTE = ['Id', 'Horodatage', 'Catégorie', 'Type', 'Domaine', 'C
 var COPILOTE_DOSSIER_VIDES = 'Dossiers vides';
 var COPILOTE_DECISIONS = { 'executer': 1, 'ignorer': 1, 'restaurer': 1, 'reclame': 1, 'passer-auto': 1, 'desactiver-auto': 1 };
 var COPILOTE_STATUTS_OUVERTS = { 'proposé': 1, 'auto': 1, 'actif': 1 };
-var COPILOTE_TYPES_SANS_AUTO = { 'alerte-corbeille': 1, 'demarche-active': 1, 'expiration': 1, 'piece-manquante': 1, 'facture-hausse': 1, 'facture-doublon': 1, 'renouvellement': 1, 'remboursement': 1, 'retour-garantie': 1 };
+var COPILOTE_TYPES_SANS_AUTO = { 'alerte-corbeille': 1, 'demarche-active': 1, 'expiration': 1, 'piece-manquante': 1, 'facture-hausse': 1, 'facture-doublon': 1, 'renouvellement': 1, 'remboursement': 1, 'retour-garantie': 1, 'checklist': 1, 'changement-vie': 1 };
 
 function normaliserCopilote_(s) {
   if (typeof normaliserCle_ === 'function') return normaliserCle_(s);
@@ -16,7 +16,7 @@ function normaliserCopilote_(s) {
 /** Vrai si chemin ou domaine touche une zone protégée ou système (interdite aux mutations auto). PURE. */
 function estZoneProtegeeCopilote_(chemin, domaine) {
   if (typeof estZoneExclueApprentissageVeille_ === 'function' && estZoneExclueApprentissageVeille_(chemin, domaine)) return true;
-  var interdit = { '04 · immigration': 1, 'anna': 1, '00 · a trier': 1, '00 · a verifier': 1, '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1 };
+  var interdit = { '04 · immigration': 1, 'anna': 1, '00 · a trier': 1, '00 · a verifier': 1, '00 · packs': 1, '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1 };
   return [domaine].concat(String(chemin || '').split('/')).some(function (seg) {
     var s = normaliserCopilote_(seg);
     return !!(s && (interdit[s] || s.charAt(0) === '_' || /^00\s*·/.test(s)));
@@ -44,7 +44,7 @@ function serialiserActionCopilote_(obj) {
   var copie = {};
   if (obj && typeof obj === 'object') Object.keys(obj).forEach(function (k) { copie[k] = Array.isArray(obj[k]) ? obj[k].slice() : obj[k]; });
   var s = JSON.stringify(copie);
-  ['echeances', 'tids', 'ids'].forEach(function (k) {
+  ['echeances', 'tids', 'ids', 'orgs', 'items'].forEach(function (k) {
     var minL = k === 'ids' ? 1 : 0;
     while (s.length > 500 && Array.isArray(copie[k]) && copie[k].length > minL) { copie[k].pop(); s = JSON.stringify(copie); }
   });
@@ -342,7 +342,7 @@ function detecterCascadeTickCopilote_(lignes, depasse, maxRestant) {
 /** Groupe démarche `{ domaine, chemin }` — inclut `04` & `Anna`, exclut zones système, retire `/YYYY`. PURE. */
 function groupeDemarcheChemin_(chemin, domaine) {
   var segs = String(chemin || '').split('/').map(function (s) { return s.trim(); }).filter(Boolean);
-  var sys = { '00 · a trier': 1, '00 · a verifier': 1, '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1 };
+  var sys = { '00 · a trier': 1, '00 · a verifier': 1, '00 · packs': 1, '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1 };
   if (!segs.length || (domaine ? [domaine] : []).concat(segs).some(function (seg) {
     var n = normaliserCopilote_(seg); return !n || sys[n] || n.charAt(0) === '_' || /^00\s*·/.test(n);
   })) return null;
@@ -414,6 +414,8 @@ function executerEtapeCopilote_(estBudgetDepasse) {
   if (creees < maxRun && !depasse() && typeof detecterPiecesManquantesCopilote_ === 'function') creees += detecterPiecesManquantesCopilote_(lignes, depasse, maxRun - creees);
   if (creees < maxRun && !depasse() && typeof detecterSentinelleFacturesCopilote_ === 'function') creees += detecterSentinelleFacturesCopilote_(depasse, maxRun - creees);
   if (creees < maxRun && !depasse() && typeof detecterArgentOublieCopilote_ === 'function') creees += detecterArgentOublieCopilote_(depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterChecklistsCopilote_ === 'function') creees += detecterChecklistsCopilote_(lignes, depasse, maxRun - creees);
+  if (creees < maxRun && !depasse() && typeof detecterChangementVieCopilote_ === 'function') creees += detecterChangementVieCopilote_(lignes, depasse, maxRun - creees);
   if (!depasse() && typeof rattraperSignauxCopilote_ === 'function') rattraperSignauxCopilote_(lignes, depasse);
   return { traitees: traitees, creees: creees };
 }

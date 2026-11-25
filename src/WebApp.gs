@@ -173,6 +173,10 @@ function doPost(e) {
           reponse = actionAnnulerAction_(e);
         } else if (action === 'copilote-executer') {
           reponse = actionCopiloteExecuter_(e);
+        } else if (action === 'copilote-pack') {
+          reponse = actionCopilotePack_(e);
+        } else if (action === 'copilote-checklist') {
+          reponse = actionCopiloteChecklist_(e);
         } else {
           reponse = actionTickPonctuel_();
         }
@@ -397,6 +401,38 @@ function actionCopiloteExecuter_(e) {
   var verrou = LockService.getScriptLock();
   if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
   try { return executerDecisionCopilote_({ id: id, decision: decision }); }
+  finally { verrou.releaseLock(); }
+}
+
+/** Crée un Pack Drive par raccourcis (`action=copilote-pack`), sérialisé par verrou script. */
+function actionCopilotePack_(e) {
+  var corps;
+  try { corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
+  catch (err) { return { ok: false, erreur: 'corps JSON invalide' }; }
+  var pack = corps && typeof corps.pack === 'string' ? corps.pack.trim() : '';
+  var titre = corps && typeof corps.titre === 'string' ? corps.titre.trim() : '';
+  var fileIds = corps && Array.isArray(corps.fileIds) ? corps.fileIds.map(function (x) { return String(x || '').trim(); }).filter(Boolean) : [];
+  if ((!pack && !fileIds.length) || pack.length > 80 || titre.length > 80 || fileIds.length > 25) return { ok: false, erreur: 'paramètres pack invalides' };
+  if (fileIds.some(function (x) { return !/^[A-Za-z0-9_-]{3,80}$/.test(x); })) return { ok: false, erreur: 'fileId invalide' };
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
+  try { return typeof creerPackCopilote_ === 'function' ? creerPackCopilote_({ pack: pack, fileIds: fileIds.length ? fileIds : null, titre: titre }) : { ok: false, erreur: 'module packs absent' }; }
+  finally { verrou.releaseLock(); }
+}
+
+/** Met à jour une checklist ou un plan changement de vie (`action=copilote-checklist`), sous verrou script. */
+function actionCopiloteChecklist_(e) {
+  var corps;
+  try { corps = e && e.postData && e.postData.contents ? JSON.parse(e.postData.contents) : {}; }
+  catch (err) { return { ok: false, erreur: 'corps JSON invalide' }; }
+  var checklistId = corps && typeof corps.checklistId === 'string' ? corps.checklistId.trim() : '';
+  var demarche = corps && typeof corps.demarche === 'string' ? corps.demarche.trim() : '';
+  var item = corps && typeof corps.item === 'string' ? corps.item.trim() : '';
+  if ((!checklistId && !demarche) || (checklistId && !/^[A-Za-z0-9_-]{3,64}$/.test(checklistId)) || demarche.length > 60 || item.length > 80 ||
+    (corps.coche !== undefined && typeof corps.coche !== 'boolean')) return { ok: false, erreur: 'paramètres checklist invalides' };
+  var verrou = LockService.getScriptLock();
+  if (!verrou.tryLock(5000)) return { ok: false, erreur: 'moteur occupé — réessayer dans une minute' };
+  try { return typeof executerChecklistCopilote_ === 'function' ? executerChecklistCopilote_({ checklistId: checklistId, demarche: demarche, item: item, coche: corps.coche }) : { ok: false, erreur: 'module checklists absent' }; }
   finally { verrou.releaseLock(); }
 }
 

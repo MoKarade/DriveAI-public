@@ -981,3 +981,51 @@ test('VeilleDrive + Pont Drive → Gmail (#8) : renommage dossier entité purge 
   const ponts = JSON.parse(JSON.stringify(c.pontDriveParAdresse_()));
   assert.strictEqual(ponts['factures@anciennom.test'].chemin, '05 · Carrière/NouveauNom');
 });
+
+test('VeilleDrive : exclut totalement 00 · Packs (Changes API dossier/fichier, apprentissage et épinglage)', () => {
+  const props = new Map([['DriveAI_CHANGES_TOKEN', '800']]);
+  const indexRows = [['Clé', 'Date', 'Fichier', 'Domaine', 'Chemin', 'Statut', 'Empreinte', 'Confiance', 'FileId']];
+  const folders = new Map([
+    ['FICTIF_ROOT', { id: 'FICTIF_ROOT', name: 'Mon Drive', parents: [] }],
+    ['FICTIF_MARC', { id: 'FICTIF_MARC', name: 'Marc', parents: ['FICTIF_ROOT'] }],
+    ['FICTIF_PACKS', { id: 'FICTIF_PACKS', name: '00 · Packs', parents: ['FICTIF_MARC'] }],
+    ['FICTIF_PACK_D', { id: 'FICTIF_PACK_D', name: '2026-11-25_Logement', parents: ['FICTIF_PACKS'] }],
+  ]);
+  const files = new Map([
+    ['f_in_pack', { id: 'f_in_pack', name: '2026-11-25_Bail.pdf', mimeType: 'application/pdf', parents: ['FICTIF_PACK_D'], trashed: false }],
+  ]);
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const foldW = (id) => { const d = folders.get(id); return { getId: () => d.id, getName: () => d.name, getParents: () => iter(d.parents.map(foldW)), getFiles: () => iter([]), getFolders: () => iter([]), getFoldersByName: () => iter([]) }; };
+  const fileW = (id) => { const f = files.get(id); return { getId: () => f.id, getName: () => f.name, getMimeType: () => f.mimeType, isTrashed: () => f.trashed, getParents: () => iter(f.parents.map(foldW)) }; };
+  const ajouts = [];
+  const c = load(['Config.gs', 'DriveRest.gs', 'Reset.gs', 'Maintenance.gs', 'VeilleDrive.gs'], {
+    ScriptApp: { getOAuthToken: () => 'tok' },
+    Utilities: { sleep: () => {} },
+    UrlFetchApp: {
+      fetch: () => ({
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({
+          changes: [
+            { fileId: 'FICTIF_PACK_D', file: { id: 'FICTIF_PACK_D', name: '2026-11-25_Logement', mimeType: 'application/vnd.google-apps.folder', parents: ['FICTIF_PACKS'], trashed: false } },
+            { fileId: 'f_in_pack', file: { id: 'f_in_pack', name: '2026-11-25_Bail.pdf', mimeType: 'application/pdf', parents: ['FICTIF_PACK_D'], trashed: false } },
+          ],
+          newStartPageToken: '801',
+        }),
+      }),
+    },
+    DriveApp: { getRootFolder: () => foldW('FICTIF_ROOT'), getFolderById: (id) => foldW(id), getFileById: (id) => fileW(id) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => (props.has(k) ? props.get(k) : null), setProperty: (k, v) => props.set(k, String(v)) }) },
+    indexAjouter_: (cle, res) => { ajouts.push({ cle, res }); },
+    indexContient_: () => false,
+    lireLigneIndex_: () => ({ statut: 'classé', nom: '2026-11-25_Bail.pdf', chemin: '03 · Logement/Bail', domaine: '03 · Logement' }),
+    decisionSyncIndex_: () => ({ statut: 'déplacé', nom: '2026-11-25_Bail.pdf', chemin: '00 · Packs/2026-11-25_Logement' }),
+  });
+  assert.strictEqual(c.estSousZoneSystemeVeille_(['Mon Drive', 'Marc', '00 · Packs', '2026-11-25_Logement']), true);
+  assert.strictEqual(c.estZoneExclueApprentissageVeille_('00 · Packs/2026-11-25_Logement', ''), true);
+  c.suivreChangementsDrive_(foldW('FICTIF_DOSSIERS_A_TRIER'), foldW('FICTIF_ROOT'), new Set(), 10, () => false);
+  assert.strictEqual(ajouts.length, 0, '00 · Packs ignoré par Changes API');
+  assert.strictEqual(props.has('DriveAI_DOSSIERS_VIE_DIRECTS'), false);
+  c.synchroniserFichierIndexVeille_('f_in_pack', '2026-11-25_Bail.pdf', '00 · Packs/2026-11-25_Logement', false);
+  assert.strictEqual(ajouts.some((a) => a.cle.startsWith('epingle|')), false, 'pas d epingle sur 00 · Packs');
+  void indexRows;
+});

@@ -922,3 +922,67 @@ test('doPost action=copilote-executer : secret, validation, verrou, mémo reques
   assert.strictEqual(appels, 3);
   assert.strictEqual(releaseCalls, 3);
 });
+
+/* ---------- action=copilote-pack & action=copilote-checklist (Lot 4A, #13/#14/#15) ---------- */
+
+test('doPost action=copilote-pack et action=copilote-checklist : secret, validation, verrou, mémo requestId et ok:false non mémorisé', () => {
+  const c = load(['Config.gs', 'WebApp.gs']);
+  const cache = {};
+  let lockOk = true;
+  let releaseCalls = 0;
+  let appelsPack = 0;
+  let appelsChk = 0;
+  c.CacheService = { getScriptCache: () => ({ get: (k) => cache[k] || null, put: (k, v) => { cache[k] = v; } }) };
+  c.PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => (k === 'DriveAI_WEBAPP_SECRET' ? 'SECRET' : null), setProperty: () => {} }) };
+  c.ContentService = { createTextOutput: (t) => ({ setMimeType: () => t }), MimeType: { JSON: 'json' } };
+  c.LockService = { getScriptLock: () => ({ tryLock: () => lockOk, releaseLock: () => { releaseCalls++; } }) };
+  c.poserOperationCourante_ = () => {};
+  c.creerPackCopilote_ = (corps) => {
+    appelsPack++;
+    if (corps.pack === 'vide') return { ok: false, erreur: 'aucun fichier éligible pour ce pack' };
+    return { ok: true, dossierId: 'FICTIF_PACK_1', dossierUrl: 'https://drive.google.com/drive/folders/FICTIF_PACK_1', nbRaccourcis: 2, message: 'ok' };
+  };
+  c.executerChecklistCopilote_ = (corps) => {
+    appelsChk++;
+    if (corps.checklistId === 'cop-abs') return { ok: false, erreur: 'checklist introuvable' };
+    return { ok: true, checklistId: corps.checklistId || 'cop-chk-1', statut: 'actif', message: 'ok' };
+  };
+
+  const post = (action, secret, body) => JSON.parse(c.doPost({
+    parameter: { action, secret },
+    postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) },
+  }));
+
+  // copilote-pack : secret, JSON invalide, validation, verrou occupé, ok:false, rejeu requestId
+  assert.strictEqual(post('copilote-pack', 'MAUVAIS', { pack: 'logement' }).erreur, 'refusé');
+  assert.strictEqual(post('copilote-pack', 'SECRET', '{bad').erreur, 'corps JSON invalide');
+  assert.strictEqual(post('copilote-pack', 'SECRET', {}).erreur, 'paramètres pack invalides');
+  assert.strictEqual(post('copilote-pack', 'SECRET', { fileIds: ['bad|id'] }).erreur, 'fileId invalide');
+  lockOk = false;
+  assert.match(post('copilote-pack', 'SECRET', { pack: 'logement', requestId: 'reqPack01' }).erreur, /moteur occupé/);
+  assert.strictEqual(Object.keys(cache).length, 0);
+  lockOk = true;
+  assert.strictEqual(post('copilote-pack', 'SECRET', { pack: 'vide', requestId: 'reqPack02' }).ok, false);
+  assert.strictEqual(Object.keys(cache).length, 0);
+  const p1 = post('copilote-pack', 'SECRET', { pack: 'logement', requestId: 'reqPack03' });
+  const p2 = post('copilote-pack', 'SECRET', { pack: 'logement', requestId: 'reqPack03' });
+  assert.strictEqual(p1.ok, true);
+  assert.strictEqual(p2.memo, true);
+  assert.strictEqual(appelsPack, 2);
+
+  // copilote-checklist : secret, JSON invalide, validation, verrou occupé, ok:false, rejeu requestId
+  assert.strictEqual(post('copilote-checklist', 'MAUVAIS', { checklistId: 'cop-chk-1' }).erreur, 'refusé');
+  assert.strictEqual(post('copilote-checklist', 'SECRET', '{bad').erreur, 'corps JSON invalide');
+  assert.strictEqual(post('copilote-checklist', 'SECRET', {}).erreur, 'paramètres checklist invalides');
+  assert.strictEqual(post('copilote-checklist', 'SECRET', { checklistId: 'cop-chk-1', coche: 'oui' }).erreur, 'paramètres checklist invalides');
+  lockOk = false;
+  assert.match(post('copilote-checklist', 'SECRET', { checklistId: 'cop-chk-1', item: 'bail', coche: true, requestId: 'reqChk01' }).erreur, /moteur occupé/);
+  lockOk = true;
+  assert.strictEqual(post('copilote-checklist', 'SECRET', { checklistId: 'cop-abs', requestId: 'reqChk02' }).ok, false);
+  const k1 = post('copilote-checklist', 'SECRET', { checklistId: 'cop-chk-1', item: 'bail', coche: true, requestId: 'reqChk03' });
+  const k2 = post('copilote-checklist', 'SECRET', { checklistId: 'cop-chk-1', item: 'bail', coche: true, requestId: 'reqChk03' });
+  assert.strictEqual(k1.ok, true);
+  assert.strictEqual(k2.memo, true);
+  assert.strictEqual(appelsChk, 2);
+  assert.strictEqual(releaseCalls, 4);
+});

@@ -74,7 +74,8 @@ function estSousZoneSystemeVeille_(nomsAncetres) {
     '_doublons': true,
     '_medias': true,
     '00 · a trier': true,
-    '00 · a verifier': true
+    '00 · a verifier': true,
+    '00 · packs': true
   };
   var liste = nomsAncetres || [];
   for (var i = 0; i < liste.length; i++) {
@@ -244,7 +245,8 @@ function synchroniserFichierIndexVeille_(fid, nomActuel, cheminConstat, disparu)
     fileId: fid
   });
   if (dec.statut === 'déplacé' && typeof indexContient_ === 'function' && !indexContient_('epingle|' + fid) &&
-      normaliserZoneVeille_(cheminFinal).indexOf('00 · a trier') !== 0) {
+      normaliserZoneVeille_(cheminFinal).indexOf('00 · a trier') !== 0 &&
+      normaliserZoneVeille_(cheminFinal).indexOf('00 · packs') !== 0) {
     indexAjouter_('epingle|' + fid, {
       statut: 'épinglé',
       nom: nomFinal,

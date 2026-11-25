@@ -70,7 +70,7 @@ function normaliserCleDossierVie_(chemin) {
     var s = brutSegs[i].trim();
     if (s) segs.push(s);
   }
-  if (segs.length < 2 || segs[0].charAt(0) === '_') return null;
+  if (segs.length < 2 || segs[0].charAt(0) === '_' || segs.some(function (x) { return /^00\s*·/.test(cleNormDossierVie_(x)); })) return null;
   while (segs.length > 1 && /^\d{4}$/.test(segs[segs.length - 1])) {
     segs.pop();
   }
@@ -222,7 +222,7 @@ function cleNormDossierVie_(chemin) {
 }
 
 var ZONES_EXCLUES_DOSSIER_VIE_ = {
-  '04 · immigration': 1, 'anna': 1, '00 · a trier': 1, '00 · a verifier': 1,
+  '04 · immigration': 1, 'anna': 1, '00 · a trier': 1, '00 · a verifier': 1, '00 · packs': 1,
   '_technique': 1, '_doublons': 1, '_medias': 1, 'donnees & exports': 1
 };
 

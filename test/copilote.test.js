@@ -533,7 +533,7 @@ test('transitions d’état, auto-déplacement dossier-vide, 0-move guard, doubl
   assert.ok(tropLong.length <= 500);
   assert.deepStrictEqual(JSON.parse(tropLong), {});
 
-  // troncature echeances / tids / ids avant repli '{}'
+  // troncature echeances / tids / ids / orgs / items avant repli '{}'
   const longDem = c.serialiserActionCopilote_({
     chemin: '04 · Immigration/Permis',
     ids: ['ID1', 'ID2', 'ID3'],
@@ -544,6 +544,13 @@ test('transitions d’état, auto-déplacement dossier-vide, 0-move guard, doubl
   const parsedDem = JSON.parse(longDem);
   assert.strictEqual(parsedDem.chemin, '04 · Immigration/Permis');
   assert.ok(Array.isArray(parsedDem.ids) && parsedDem.ids.length >= 1);
+
+  const longOrgs = c.serialiserActionCopilote_({
+    cle: 'chg|18m',
+    orgs: Array.from({ length: 22 }, (_, i) => ({ k: 'o' + i, n: 'Org ' + i, ok: 0, nb: 1 })),
+  });
+  assert.ok(longOrgs.length <= 500 && longOrgs !== '{}');
+  assert.ok(JSON.parse(longOrgs).orgs.length > 0 && JSON.parse(longOrgs).orgs.length < 22);
 });
 
 test('demarche-active (#7) : >= 3 mvts / 7 j, inclut 04 · Immigration & Anna (0 écriture Drive), exclut zones système, dédup & refus passer-auto', () => {
